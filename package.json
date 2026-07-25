@@ -109,6 +109,7 @@
     "mon:shots": "bun tools/mon.ts shots",
     "mon:audio": "bun tools/mon.ts audio",
     "mon:psp": "bun tools/mon.ts psp",
+    "mon:hw": "bun tools/mon.ts hw",
     "e2e:mon": "bun tests/e2e/mon-ppsspp.ts",
     "psp:all": "bun tools/psp-all.ts",
     "psp:switch": "bun psplink",

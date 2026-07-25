@@ -8,6 +8,7 @@
 //   bun tools/mon.ts audio [dir]      cook + render every song and effect to WAV
 //   bun tools/mon.ts psp [cargo args] cook, then build the PSP EBOOT
 //   bun tools/mon.ts run              …and launch it in PPSSPP
+//   bun tools/mon.ts hw [--debug]     …or load it onto a REAL PSP over PSPLINK
 //
 // The pak is cooked first by every subcommand on purpose: content lives in
 // TypeScript, and a stale pak is the one failure that looks like an engine bug
@@ -15,6 +16,8 @@
 
 import { $ } from "bun";
 import { existsSync, mkdirSync } from "node:fs";
+import { createInterface } from "node:readline";
+import { createServer } from "node:net";
 import { resolvePspBuildToolchain } from "./psp-toolchain.ts";
 
 const root = new URL("..", import.meta.url).pathname;
@@ -31,7 +34,7 @@ const rest = argv.slice(1);
 
 function usage(): never {
   console.error(
-    "usage: bun tools/mon.ts <cook|sim|check|record|shots|audio|psp|run> [args…]",
+    "usage: bun tools/mon.ts <cook|sim|check|record|shots|audio|psp|run|hw> [args…]",
   );
   process.exit(2);
 }
@@ -108,6 +111,16 @@ async function main() {
       return;
     }
 
+    case "hw": {
+      // Release by default: the debug PRX is 16 MB of symbols against 0.6 MB,
+      // and every reload pushes it over USB.
+      const debug = rest.includes("--debug");
+      await cook();
+      await buildEboot(debug ? [] : ["--release"]);
+      await runOnHardware(debug ? "debug" : "release");
+      return;
+    }
+
     default:
       usage();
   }
@@ -175,8 +188,160 @@ async function buildEboot(cargoArgs: string[]): Promise<void> {
     .cwd(eboot)
     .env(env);
 
-  const out = `${eboot}/target/mipsel-sony-psp/debug/EBOOT.PBP`;
+  const profile = cargoArgs.includes("--release") ? "release" : "debug";
+  const out = `${eboot}/target/mipsel-sony-psp/${profile}/EBOOT.PBP`;
   if (existsSync(out)) console.log(`\nEBOOT: ${out}`);
+}
+
+// ---------------------------------------------------------------------------
+// Real hardware, over PSPLINK
+// ---------------------------------------------------------------------------
+
+/**
+ * Serve the build directory as `host0:` over USB and `ldstart` the PRX, then
+ * sit in a rebuild/reload loop.
+ *
+ * Same shape as tools/hw.ts (which does this for the 2D runtime); kept here
+ * rather than generalised because the two differ in every path and neither is
+ * complicated.
+ */
+async function runOnHardware(profile: string): Promise<void> {
+  const usbhostfs = Bun.which("usbhostfs_pc");
+  const pspsh = Bun.which("pspsh");
+  if (!usbhostfs || !pspsh) {
+    console.error(
+      "PSPLINK host tools not on PATH (need usbhostfs_pc and pspsh).\n" +
+        "  brew install pspdev/pspdev/pspsdk   # or build psplink from source",
+    );
+    process.exit(1);
+  }
+
+  const targetDir = `${eboot}/target/mipsel-sony-psp/${profile}`;
+  const prx = `${targetDir}/pocketmon-psp.prx`;
+  if (!existsSync(prx)) {
+    console.error(`no PRX at ${prx}`);
+    process.exit(1);
+  }
+
+  const basePort = await findBasePort(Number(process.env.PSP_HW_PORT ?? 10300));
+  const running = (await $`pgrep -x usbhostfs_pc`.nothrow().text()).trim();
+  if (running) {
+    console.log(
+      `note: another usbhostfs_pc is running (pid ${running.split("\n").join(", ")}).\n` +
+        "      Only one can own the PSP's USB — kill it if this link does not connect.",
+    );
+  }
+
+  console.log(`serving ${profile} build as host0: on port ${basePort}`);
+  const server = Bun.spawn([usbhostfs, "-b", String(basePort), targetDir], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  // usbhostfs_pc announces every (re)connection; counting them is how we know
+  // a reset actually came back rather than hanging.
+  let connects = 0;
+  const pump = async (stream: ReadableStream<Uint8Array>) => {
+    const dec = new TextDecoder();
+    for await (const chunk of stream) {
+      for (const _ of dec.decode(chunk).matchAll(/Connected to device/g)) connects++;
+    }
+  };
+  void pump(server.stdout);
+  void pump(server.stderr);
+
+  const stop = () => {
+    try {
+      server.kill();
+      process.kill(server.pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  };
+  process.on("SIGINT", () => {
+    stop();
+    process.exit(0);
+  });
+
+  const waitForConnect = async (from: number, timeoutMs: number): Promise<boolean> => {
+    const t0 = Date.now();
+    while (connects <= from) {
+      if (Date.now() - t0 > timeoutMs) return false;
+      await Bun.sleep(200);
+    }
+    return true;
+  };
+
+  const sh = async (command: string, timeoutMs = 10_000): Promise<string> => {
+    const child = Bun.spawn([pspsh, "-p", String(basePort), "-e", command], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    const [out, err] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    clearTimeout(timer);
+    return (out + err).trim();
+  };
+
+  console.log("waiting for the PSP — launch PSPLINK on it (XMB -> Game -> PSPLINK).");
+  if (!(await waitForConnect(0, 120_000))) {
+    console.error("PSP never connected. Check the USB DATA cable and that PSPLINK is running.");
+    stop();
+    process.exit(1);
+  }
+  console.log("PSP connected.");
+
+  const load = async (): Promise<void> => {
+    const before = connects;
+    process.stdout.write("resetting PSPLINK... ");
+    await sh("reset", 6000);
+    console.log((await waitForConnect(before, 15_000)) ? "connected." : "no reconnect; continuing.");
+    const out = await sh("ldstart host0:/pocketmon-psp.prx");
+    console.log("  " + (out || "(no output)"));
+    if (/Failed|Error/i.test(out)) {
+      console.log("  load failed — is PSPLINK still running and host0: mounted?");
+    }
+  };
+
+  await load();
+  console.log("\n[mon:hw] Enter = rebuild + reload   |   q + Enter = quit\n");
+  const rl = createInterface({ input: process.stdin });
+  for await (const line of rl) {
+    const cmd = line.trim().toLowerCase();
+    if (cmd === "q" || cmd === "quit" || cmd === "exit") break;
+    await cook();
+    await buildEboot(profile === "release" ? ["--release"] : []);
+    await load();
+    console.log("\n[mon:hw] Enter = rebuild + reload   |   q + Enter = quit\n");
+  }
+  rl.close();
+  stop();
+}
+
+/** A block of consecutive free ports for the PSPLINK link. */
+async function findBasePort(start: number): Promise<number> {
+  const free = (port: number) =>
+    new Promise<boolean>((resolve) => {
+      const srv = createServer();
+      srv.once("error", () => resolve(false));
+      srv.once("listening", () => srv.close(() => resolve(true)));
+      srv.listen(port, "127.0.0.1");
+    });
+  for (let base = start; base <= start + 3000; base += 100) {
+    let ok = true;
+    for (let i = 0; i <= 8; i++) {
+      if (!(await free(base + i))) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return base;
+  }
+  throw new Error("no free TCP port block for the PSPLINK link");
 }
 
 async function launchPpsspp(): Promise<void> {

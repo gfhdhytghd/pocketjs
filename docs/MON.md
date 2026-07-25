@@ -238,7 +238,16 @@ A runtime without a headless story is not done (discipline #4):
   the software rasterizer's own output. The GE path and the reference
   rasterizer are separate implementations of one draw list; if they disagree,
   the sim goldens are describing a picture the console never shows.
-- Real hardware, over PSPLINK — **not yet run**.
+- **`bun tools/mon.ts hw`** — real hardware over PSPLINK. Serves the release
+  build as `host0:` through `usbhostfs_pc`, `ldstart`s the PRX, and then sits
+  in an Enter-to-reload loop. Release by default: the debug PRX is 16 MB of
+  symbols against 0.6 MB, and every reload pushes it over USB.
+
+  `MON_E2E_PROFILE=release bun tests/e2e/mon-ppsspp.ts` checks that build in
+  the emulator first — the profile should change optimisation, not output, and
+  the two currently render byte-identically.
+
+  **Not yet run on a physical console.** Everything above is emulator.
 
 ## 7. Sound
 

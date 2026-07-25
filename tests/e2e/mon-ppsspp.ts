@@ -27,7 +27,11 @@ const headless = process.env.PPSSPP_HEADLESS || `${homedir()}/ppsspp-src/build/P
 // PPSSPPHeadless maps ms0: to ~/.ppsspp — dumps land in ~/.ppsspp/mon_cap.
 // Contents persist across runs; always clean first.
 const capDir = `${homedir()}/.ppsspp/mon_cap`;
-const eboot = `${root}engine/pocketmon/crates/pocketmon-psp/target/mipsel-sony-psp/debug/EBOOT.PBP`;
+// `MON_E2E_PROFILE=release` checks the build that actually ships to hardware.
+// Both must render identically — the profile changes optimisation, not output,
+// and if it ever does change output that is the bug worth finding.
+const profile = process.env.MON_E2E_PROFILE === "release" ? "release" : "debug";
+const eboot = `${root}engine/pocketmon/crates/pocketmon-psp/target/mipsel-sony-psp/${profile}/EBOOT.PBP`;
 const update = process.env.UPDATE === "1";
 
 // ---------------------------------------------------------------------------
@@ -83,7 +87,7 @@ mkdirSync(simShots, { recursive: true });
 await $`${root}engine/pocketmon/crates/pocketmon-sim/target/release/pocketmon-sim ${root}dist/sparkwood.monpak --tape ${root}apps/mon/tapes/story.tape --shots ${simShots}`.quiet();
 
 console.log("# build the capture EBOOT ...");
-await $`bun tools/mon.ts psp --features capture`
+await $`bun tools/mon.ts psp --features capture ${profile === "release" ? ["--release"] : []}`
   .cwd(root)
   .env({
     ...process.env,

@@ -74,6 +74,10 @@ const NUB_DEADZONE: i32 = 48;
 fn psp_main() {
     unsafe {
         psp::enable_home_button();
+        // The PSP boots at 222 MHz and PSPLINK leaves it there. The core is
+        // integer-only and cheap, but a 30x17 tile view is ~500 GE sprites a
+        // frame plus a software mixer on a second thread — take the free 50%.
+        sys::scePowerSetClockFrequency(333, 333, 166);
         // Real hardware can start a PSPLINK-loaded thread with FPU exceptions
         // unmasked. The core is integer-only, but the SDK is not; clear FCSR
         // so a stray NaN in library code does not trap to a black screen.
@@ -146,12 +150,20 @@ unsafe fn run() -> ! {
     let mut backend = Backend::new();
     backend.upload(&game.content);
 
+    // Boot diagnostics on the debug screen. The game overdraws them on its
+    // first frame, so they only linger if boot itself failed — which is
+    // exactly when you want to read them off a real console.
     psp::dprintln!(
-        "[sparkwood] {} species, {} maps, {} pages, {} kB arena free",
+        "[sparkwood] {} species, {} maps, {} pages",
         game.content.species.len(),
         game.content.maps.len(),
         game.content.pages.len(),
+    );
+    psp::dprintln!(
+        "[sparkwood] arena {} kB free of {} kB, kernel free {} kB",
         ALLOC.free_bytes() / 1024,
+        arena::ARENA_BYTES / 1024,
+        sys::sceKernelMaxFreeMemSize() / 1024,
     );
 
     audio::start(Bank::from_content(&game.content));
