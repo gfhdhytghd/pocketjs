@@ -18,8 +18,12 @@ use psp::sys::{self, DisplayPixelFormat, DisplaySetBufSync, IoOpenFlags};
 /// `"frame:mask,frame:mask,…"` — the active mask is the last threshold at or
 /// before the current frame. Baked by tools/mon.ts from the e2e spec.
 const INPUT: &str = env!("MON_CAPTURE_INPUT");
-const CAP_START: &str = env!("MON_CAP_START");
-const CAP_N: &str = env!("MON_CAP_N");
+/// Comma-separated frame indices to dump. Only these frames are written: a
+/// full playthrough is ~2900 frames, and dumping all of them would be 1.6 GB
+/// of raw framebuffers to compare four pictures.
+const FRAMES: &str = env!("MON_CAP_FRAMES");
+/// The frame to exit on, so the headless run terminates by itself.
+const EXIT_AT: &str = env!("MON_CAP_EXIT");
 
 fn env_u32(s: &str, default: u32) -> u32 {
     let mut v: u32 = 0;
@@ -38,12 +42,20 @@ fn env_u32(s: &str, default: u32) -> u32 {
     }
 }
 
-pub fn cap_start() -> u32 {
-    env_u32(CAP_START, 0)
-}
-
-pub fn cap_n() -> u32 {
-    env_u32(CAP_N, 64)
+/// Is this frame one of the ones being captured, and at what index?
+fn shot_index(frame: u32) -> Option<u32> {
+    let mut i = 0;
+    for entry in FRAMES.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if env_u32(entry, u32::MAX) == frame {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parse one `frame:mask` pair. Masks may be decimal or `0x`-prefixed.
@@ -92,54 +104,50 @@ pub fn scripted_buttons(frame: u32) -> u32 {
     best
 }
 
-/// Dump the presented framebuffer for frames inside the window, then exit the
-/// game on the last one so the headless run terminates on its own.
+/// Dump the presented framebuffer if this frame is a checkpoint, and exit the
+/// game once the run is over.
 pub unsafe fn dump_frame(frame: u32) {
-    let start = cap_start();
-    let n = cap_n();
-    if frame < start || frame >= start + n {
-        return;
-    }
-    let idx = frame - start;
-    if idx == 0 {
+    if frame == 0 {
         sys::sceIoMkdir(b"ms0:/mon_cap\0".as_ptr(), 0o777);
     }
-    // "ms0:/mon_cap/fNNNN.raw\0", digits at offsets 14..=17.
-    let mut name: [u8; 23] = *b"ms0:/mon_cap/f0000.raw\0";
-    let mut v = idx;
-    let mut i = 17usize;
-    loop {
-        name[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if i == 14 {
-            break;
+    if let Some(idx) = shot_index(frame) {
+        // "ms0:/mon_cap/fNNNN.raw\0", digits at offsets 14..=17.
+        let mut name: [u8; 23] = *b"ms0:/mon_cap/f0000.raw\0";
+        let mut v = idx;
+        let mut i = 17usize;
+        loop {
+            name[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if i == 14 {
+                break;
+            }
+            i -= 1;
         }
-        i -= 1;
-    }
 
-    // Read straight from VRAM through the uncached mirror: the GE's output is
-    // not in the CPU's cache, and reading the cached view yields whatever was
-    // there before.
-    let mut top: *mut c_void = core::ptr::null_mut();
-    let mut bw: usize = 0;
-    let mut fmt = DisplayPixelFormat::Psm8888;
-    sys::sceDisplayGetFrameBuf(&mut top, &mut bw, &mut fmt, DisplaySetBufSync::Immediate);
-    let mut addr = top as u32;
-    if addr < 0x0400_0000 {
-        addr += 0x0400_0000;
-    }
-    addr |= 0x4000_0000;
+        // Read straight from VRAM through the uncached mirror: the GE's output
+        // is not in the CPU's cache, and the cached view holds whatever was
+        // there before.
+        let mut top: *mut c_void = core::ptr::null_mut();
+        let mut bw: usize = 0;
+        let mut fmt = DisplayPixelFormat::Psm8888;
+        sys::sceDisplayGetFrameBuf(&mut top, &mut bw, &mut fmt, DisplaySetBufSync::Immediate);
+        let mut addr = top as u32;
+        if addr < 0x0400_0000 {
+            addr += 0x0400_0000;
+        }
+        addr |= 0x4000_0000;
 
-    let fd = sys::sceIoOpen(
-        name.as_ptr(),
-        IoOpenFlags::CREAT | IoOpenFlags::WR_ONLY | IoOpenFlags::TRUNC,
-        0o777,
-    );
-    if fd.0 >= 0 {
-        sys::sceIoWrite(fd, addr as *const c_void, 512 * 272 * 4);
-        sys::sceIoClose(fd);
+        let fd = sys::sceIoOpen(
+            name.as_ptr(),
+            IoOpenFlags::CREAT | IoOpenFlags::WR_ONLY | IoOpenFlags::TRUNC,
+            0o777,
+        );
+        if fd.0 >= 0 {
+            sys::sceIoWrite(fd, addr as *const c_void, 512 * 272 * 4);
+            sys::sceIoClose(fd);
+        }
     }
-    if idx + 1 == n {
+    if frame >= env_u32(EXIT_AT, 600) {
         sys::sceKernelExitGame();
     }
 }

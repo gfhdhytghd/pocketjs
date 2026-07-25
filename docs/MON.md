@@ -212,10 +212,20 @@ A runtime without a headless story is not done (discipline #4):
   house, across the village, take a starter from the professor, north to Route
   One, and win two wild battles, asserted against recorded frame hashes.
   `bun tools/mon.ts shots` writes a PNG per checkpoint to look at.
-- **`bun tests/e2e/mon-ppsspp.ts`** — the same journey on the console: a
-  capture EBOOT with a baked input tape under PPSSPPHeadless's software
-  renderer, checked for liveness (every frame of the window presented) and
-  byte-compared against committed PNG goldens.
+- **`bun tests/e2e/mon-ppsspp.ts`** — the same journey **on the console**.
+  There is no second tape: `pocketmon-sim --emit-psp` replays the intent tape
+  above and writes out the per-frame input it produced, which the capture
+  EBOOT then replays verbatim under PPSSPPHeadless's software renderer. That
+  works because the core is identical and deterministic on both hosts, which
+  is the runtime's whole premise being cashed in rather than a trick.
+
+  Three things are asserted: **liveness** (all 14 checkpoints reached — 2877
+  frames, boot through two won battles, so a boot hang, a content-parse halt
+  or a wedged loop all fail loudly), **byte-exact PNG goldens**, and
+  **backend agreement** — every checkpoint is compared pixel for pixel against
+  the software rasterizer's own output. The GE path and the reference
+  rasterizer are separate implementations of one draw list; if they disagree,
+  the sim goldens are describing a picture the console never shows.
 - Real hardware, over PSPLINK — **not yet run**.
 
 ## 7. Out of scope for v1

@@ -155,8 +155,8 @@ async function buildEboot(cargoArgs: string[]): Promise<void> {
     // Capture-build inputs (only read under --features capture; set
     // unconditionally so a stale value cannot linger in cargo's fingerprint).
     MON_CAPTURE_INPUT: process.env.MON_CAPTURE_INPUT ?? "",
-    MON_CAP_START: process.env.MON_CAP_START ?? "0",
-    MON_CAP_N: process.env.MON_CAP_N ?? "64",
+    MON_CAP_FRAMES: process.env.MON_CAP_FRAMES ?? "",
+    MON_CAP_EXIT: process.env.MON_CAP_EXIT ?? "600",
   };
 
   console.log("pocket mon: cargo psp");

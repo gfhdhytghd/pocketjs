@@ -162,6 +162,7 @@ fn main() {
     let mut scale = 2u32;
     let mut assert_mode = false;
     let mut atlas_dir: Option<PathBuf> = None;
+    let mut emit_psp: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -193,6 +194,10 @@ fn main() {
             "--atlas" => {
                 i += 1;
                 atlas_dir = args.get(i).map(PathBuf::from);
+            }
+            "--emit-psp" => {
+                i += 1;
+                emit_psp = args.get(i).map(PathBuf::from);
             }
             "--assert" => assert_mode = true,
             other => {
@@ -278,12 +283,22 @@ fn main() {
     let mut captured: BTreeMap<String, String> = BTreeMap::new();
     let mut total = 0u32;
     let mut stalled = 0u32;
+    // The button mask of every frame, and the frame each checkpoint landed on.
+    //
+    // This is what lets ONE tape drive both hosts: the core is deterministic
+    // and identical on both, so replaying this exact per-frame input on a PSP
+    // reproduces this exact run. The alternative — hand-writing a second,
+    // frame-counted tape for the console — is two descriptions of one journey,
+    // and they drift the first time the walk cadence changes.
+    let mut input_log: Vec<u32> = Vec::new();
+    let mut mark_frames: Vec<(String, u32)> = Vec::new();
 
     for cmd in &cmds {
         match cmd {
             Cmd::Wait { frames } => {
                 for _ in 0..*frames {
                     game.tick(0);
+                    input_log.push(0);
                     total += 1;
                 }
             }
@@ -292,10 +307,12 @@ fn main() {
                 // so this is exactly one press no matter the hold length.
                 for _ in 0..4 {
                     game.tick(*buttons);
+                    input_log.push(*buttons);
                     total += 1;
                 }
                 for _ in 0..8 {
                     game.tick(0);
+                    input_log.push(0);
                     total += 1;
                 }
             }
@@ -319,13 +336,14 @@ fn main() {
                         break;
                     }
                     game.tick(*dir);
+                    input_log.push(*dir);
                     total += 1;
                     spent += 1;
                     if game.world.map_id != start_map {
                         break;
                     }
                 }
-                total += settle(&mut game);
+                total += settle_logged(&mut game, &mut input_log);
                 let walked = game.world.steps.wrapping_sub(before);
                 if walked < *cells && game.world.map_id == start_map {
                     println!(
@@ -342,6 +360,7 @@ fn main() {
                 while pressed < *cap && waiting_on_a(&game) {
                     for _ in 0..4 {
                         game.tick(spec::btn::A);
+                        input_log.push(spec::btn::A);
                         total += 1;
                     }
                     // Bail the FRAME the conversation ends, not at the end of a
@@ -353,6 +372,7 @@ fn main() {
                             break;
                         }
                         game.tick(0);
+                        input_log.push(0);
                         total += 1;
                     }
                     pressed += 1;
@@ -369,7 +389,7 @@ fn main() {
                     println!("  !! clear gave up after {pressed} presses");
                     stalled += 1;
                 }
-                total += settle(&mut game);
+                total += settle_logged(&mut game, &mut input_log);
             }
             Cmd::Fight { cap } => {
                 let mut acted = 0;
@@ -386,10 +406,12 @@ fn main() {
                     };
                     for _ in 0..4 {
                         game.tick(button);
+                        input_log.push(button);
                         total += 1;
                     }
                     for _ in 0..12 {
                         game.tick(0);
+                        input_log.push(0);
                         total += 1;
                     }
                     acted += 1;
@@ -398,7 +420,7 @@ fn main() {
                     println!("  !! fight did not finish in {acted} actions");
                     stalled += 1;
                 }
-                total += settle(&mut game);
+                total += settle_logged(&mut game, &mut input_log);
             }
             Cmd::Grind { a, b, cap } => {
                 let mut spent = 0;
@@ -416,11 +438,12 @@ fn main() {
                             break;
                         }
                         game.tick(dir);
+                        input_log.push(dir);
                         total += 1;
                         spent += 1;
                         stuck += 1;
                     }
-                    let settled = settle(&mut game);
+                    let settled = settle_logged(&mut game, &mut input_log);
                     total += settled;
                     spent += settled;
                     dir = if dir == *a { *b } else { *a };
@@ -439,6 +462,7 @@ fn main() {
                 game.draw = list;
                 let hash = format!("{:016x}", frame.hash());
                 captured.insert(name.clone(), hash.clone());
+                mark_frames.push((name.clone(), input_log.len() as u32));
                 if let Some(dir) = &shots {
                     let path = dir.join(format!("{name}.png"));
                     let bytes = png::encode_rgba(frame.w, frame.h, &frame.px);
@@ -469,8 +493,23 @@ fn main() {
     if stalled > 0 {
         println!("\n{stalled} walk(s) stalled — the tape and the map disagree");
     }
+    // The console replays `input_log` frame for frame. If a tick ever escapes
+    // the log, the two hosts silently run different journeys and the PSP
+    // goldens become fiction — so this is an assertion, not a warning.
+    if input_log.len() as u32 != total {
+        eprintln!(
+            "internal error: {} frames ticked but {} logged — a tick site is not recording input",
+            total,
+            input_log.len(),
+        );
+        std::process::exit(1);
+    }
     println!("ran {total} frames, {} checkpoints", captured.len());
     report_state(&game);
+
+    if let Some(path) = &emit_psp {
+        write_psp_plan(path, &input_log, &mark_frames);
+    }
 
     if let Some(path) = &hashes_path {
         if assert_mode {
@@ -500,6 +539,15 @@ fn waiting_on_a(game: &Game) -> bool {
         ),
         None => false,
     }
+}
+
+/// [`settle`], recording each frame's (empty) input into the replay log.
+fn settle_logged(game: &mut Game, log: &mut Vec<u32>) -> u32 {
+    let spent = settle(game);
+    for _ in 0..spent {
+        log.push(0);
+    }
+    spent
 }
 
 /// Tick with nothing held until the player is idle. Returns frames spent.
@@ -556,6 +604,49 @@ fn report_state(game: &Game) {
             .unwrap_or("???");
         println!("    {i}: {name} L{} {}/{} HP", m.level, m.hp, m.max_hp);
     }
+}
+
+/// Emit the console replay plan: the per-frame input compressed to threshold
+/// pairs, plus the frame each checkpoint landed on.
+///
+/// The PSP capture build replays this verbatim, which is how the two harnesses
+/// stay one journey rather than two. Format is a tiny JSON object so the e2e
+/// driver can read it without a parser.
+fn write_psp_plan(path: &Path, input: &[u32], marks: &[(String, u32)]) {
+    // Compress: only frames where the mask CHANGES need an entry, because the
+    // console side resolves "the last threshold at or before this frame".
+    let mut pairs: Vec<String> = Vec::new();
+    let mut last: Option<u32> = None;
+    for (frame, &mask) in input.iter().enumerate() {
+        if last != Some(mask) {
+            pairs.push(format!("{frame}:{mask}"));
+            last = Some(mask);
+        }
+    }
+    let shots = marks
+        .iter()
+        // A mark records the frame count AFTER its command; the frame actually
+        // rendered is the last one ticked.
+        .map(|(name, frame)| format!("{{\"name\":\"{name}\",\"frame\":{}}}", frame.saturating_sub(1)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        "{{\n  \"frames\": {},\n  \"input\": \"{}\",\n  \"shots\": [{}]\n}}\n",
+        input.len(),
+        pairs.join(","),
+        shots,
+    );
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!("cannot write {}: {e}", path.display());
+        std::process::exit(1);
+    }
+    println!(
+        "wrote {} ({} frames, {} input transitions, {} shots)",
+        path.display(),
+        input.len(),
+        pairs.len(),
+        marks.len(),
+    );
 }
 
 fn write_hashes(path: &Path, captured: &BTreeMap<String, String>) {

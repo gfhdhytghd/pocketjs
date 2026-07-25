@@ -11,6 +11,10 @@
 #   wait  <frames>          idle (fades, message holds)
 #   mark  <name>            capture + hash the frame
 
+# One frame before the first checkpoint: the sim can render before it has
+# ticked at all, and a console cannot — its first presented frame is already
+# post-tick. Starting here gives every checkpoint an exact console counterpart.
+wait  1
 mark  00-wake
 
 # --- out of the house ----------------------------------------------------
@@ -43,31 +47,31 @@ mark  04-partner-in-hand
 walk  d 2
 walk  r 2
 wait  40
-mark  06-back-outside
+mark  05-back-outside
 walk  d 4
 walk  l 3
 walk  u 9
 walk  u 1
 wait  40
-mark  07-route-one
+mark  06-route-one
 
 # --- the first wild battle ------------------------------------------------
 walk  u 3
-mark  08-in-the-grass
+mark  07-in-the-grass
 grind ud 900
 wait  20
-mark  09-wild-appears
+mark  08-wild-appears
 clear
-mark  10-action-menu
+mark  09-action-menu
 press a
 wait  20
-mark  11-move-menu
+mark  10-move-menu
 fight
-mark  12-battle-over
+mark  11-battle-over
 
 # --- and again, to prove the loop repeats ---------------------------------
 grind ud 900
 wait  20
-mark  13-second-encounter
+mark  12-second-encounter
 fight
-mark  14-still-standing
+mark  13-still-standing
