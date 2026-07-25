@@ -107,6 +107,7 @@
     "mon": "bun tools/mon.ts",
     "mon:check": "bun tools/mon.ts check",
     "mon:shots": "bun tools/mon.ts shots",
+    "mon:audio": "bun tools/mon.ts audio",
     "mon:psp": "bun tools/mon.ts psp",
     "e2e:mon": "bun tests/e2e/mon-ppsspp.ts",
     "psp:all": "bun tools/psp-all.ts",

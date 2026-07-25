@@ -392,6 +392,7 @@ export const MAPS: MapSpec[] = [
     id: MAP.home,
     name: "HOME",
     indoor: true,
+    music: 1,
     border: BLOCK.void,
     rows: [
       "#####",
@@ -450,6 +451,7 @@ export const MAPS: MapSpec[] = [
     id: MAP.lab,
     name: "LAB",
     indoor: true,
+    music: 1,
     border: BLOCK.void,
     rows: [
       "######",

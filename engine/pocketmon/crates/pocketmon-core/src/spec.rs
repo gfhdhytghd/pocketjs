@@ -308,6 +308,16 @@ pub const SCRIPT_ENTRY_SIZE: usize = 12;
 /// A string's index IS its key id; no hashing happens at runtime.
 pub const TEXT_ENTRY_SIZE: usize = 8;
 pub const AUDIO_ENTRY_SIZE: usize = 4;
+/// A track is a tracker pattern; see mon-spec.ts for the cell layout.
+pub const AUDIO_HEADER_SIZE: usize = 8;
+pub const AUDIO_CELL_SIZE: usize = 4;
+/// Pulse 1, pulse 2, wave, noise — the classic four.
+pub const AUDIO_CHANNELS: usize = 4;
+pub const SAMPLE_RATE: u32 = 44100;
+pub const AUDIO_BUFFER: usize = 1024;
+/// Cell `note` values that are not a semitone.
+pub const NOTE_HOLD: u8 = 0;
+pub const NOTE_OFF: u8 = 1;
 
 /// What an item does when used.
 pub mod item_kind {

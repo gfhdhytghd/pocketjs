@@ -496,11 +496,37 @@ export const SCRIPT_ENTRY_SIZE = 12;
 export const TEXT_ENTRY_SIZE = 8;
 
 /**
- * AUDO header: u16 songCount, u16 sfxCount; then a u32 offset table of
- * songCount + sfxCount entries, then the channel programs (see audio.rs for
- * the note-event stream layout).
+ * AUDO header: u16 songCount, u16 sfxCount; then a u32 offset table with
+ * `songCount + sfxCount + 1` entries (the extra one bounds the last track),
+ * then the tracks.
+ *
+ * A track is a tracker pattern — the compact shape a four-channel chip wants,
+ * and the one a human can actually author by hand:
+ *
+ *   0  u16 rowsPerMinute   tempo, in rows (not beats) per minute
+ *   2  u16 rows            pattern length
+ *   4  u8  channels        always AUDIO_CHANNELS
+ *   5  u8  loopRow         row to jump back to at the end; 0xff = play once
+ *   6  u16 reserved
+ *   8  rows * channels cells of AUDIO_CELL_SIZE bytes:
+ *        u8 note      0 = hold, 1 = note off, else a semitone index where
+ *                     69 is A4 (the MIDI convention, so a tuner agrees)
+ *        u8 param     pulse: duty 0..3 | wave: table 0..3 | noise: period
+ *        u8 volume    0..15, the chip's four-bit range
+ *        u8 flags     bit 0 = restart the envelope even on a held note
  */
 export const AUDIO_ENTRY_SIZE = 4;
+export const AUDIO_HEADER_SIZE = 8;
+export const AUDIO_CELL_SIZE = 4;
+/** Pulse 1, pulse 2, wave, noise — the classic four. */
+export const AUDIO_CHANNELS = 4;
+/** Output rate. The PSP's audio hardware wants 44.1 kHz. */
+export const SAMPLE_RATE = 44100;
+/** Samples per host buffer; the PSP's channel granularity is 64. */
+export const AUDIO_BUFFER = 1024;
+/** Cell `note` values with a meaning other than "play this semitone". */
+export const NOTE_HOLD = 0;
+export const NOTE_OFF = 1;
 
 // ---------------------------------------------------------------------------
 // Record layouts (fixed-size, LE) — the cooker writes these, the core reads them

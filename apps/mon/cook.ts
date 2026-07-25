@@ -22,6 +22,7 @@ import {
   SLOT_COUNT,
 } from "../../contracts/spec/mon-spec.ts";
 import { CAST, drawCast, SPRITE_PX } from "./art/actors.ts";
+import { encodeTrack, SFX, SONGS } from "./content/music.ts";
 import { drawCreature, PORTRAIT_PX } from "./art/creatures.ts";
 import { advanceOf, CELL as FONT_CELL, characters, rasterize } from "./art/font.ts";
 import { PAL, packPalette } from "./art/palette.ts";
@@ -508,6 +509,27 @@ function patchU16(w: Writer, at: number, v: number): void {
   buf[at + 1] = (v >> 8) & 0xff;
 }
 
+/**
+ * AUDO: `songCount + sfxCount + 1` offsets (the extra one bounds the last
+ * track), then the tracks back to back.
+ */
+function sectionAudio(): Uint8Array {
+  const tracks = [...SONGS, ...SFX].map(encodeTrack);
+  const w = new Writer(1 << 14);
+  w.u16(SONGS.length).u16(SFX.length);
+  const tableAt = w.length;
+  for (let i = 0; i <= tracks.length; i++) w.u32(0);
+  const starts: number[] = [];
+  for (const bytes of tracks) {
+    starts.push(w.length);
+    w.bytes(bytes);
+  }
+  const end = w.length;
+  starts.forEach((at, i) => w.patchU32(tableAt + i * 4, at));
+  w.patchU32(tableAt + tracks.length * 4, end);
+  return w.finish();
+}
+
 function sectionText(text: TextTable): Uint8Array {
   const strings = text.all();
   const encoder = new TextEncoder();
@@ -553,6 +575,7 @@ export function cook(): Uint8Array {
     { tag: MONPAK_TAG.scripts, count: SCRIPTS.length, payload: sectionScripts(text, scriptKeys) },
     { tag: MONPAK_TAG.maps, count: MAPS.length, payload: sectionMaps(text, scriptKeys) },
     { tag: MONPAK_TAG.font, count: characters().length, payload: sectionFont() },
+    { tag: MONPAK_TAG.audio, count: SONGS.length + SFX.length, payload: sectionAudio() },
   ];
   // TEXT goes last so every key interned above is included.
   sections.push({ tag: MONPAK_TAG.text, count: text.size, payload: sectionText(text) });
@@ -597,6 +620,7 @@ export function summary(pak: Uint8Array): string {
     `  ${SPECIES.length} species, ${MOVES.length} moves, ${TYPE_NAMES.length} types`,
     `  ${MAPS.length} maps, ${TRAINERS.length} trainers, ${SCRIPTS.length} scripts`,
     `  ${CAST.length} actor sheets (${SPRITE_PX}px), ${SPECIES.length * 2} portraits (${PORTRAIT_PX}px)`,
+    `  ${SONGS.length} songs, ${SFX.length} sound effects`,
   ].join("\n");
 }
 

@@ -70,20 +70,32 @@ is specified in the contract and *implemented* as `Game::op` — one dispatcher
 covering every op, exercised by `cargo test` — and `apps/mon/sdk.ts` is the
 guest-side algebra over it.
 
-**What is not wired yet.** No QuickJS realm is mounted in the EBOOT, so
-`Game::op` currently has no JS caller on the console: the shipped game's
-behaviour comes from its cooked content plus the native script VM. Mounting
-`pocket-mod` (or the raw QuickJS embedding `pocketjs-psp` already carries) and
-binding the dispatcher is a thin layer over a surface that is already written
-and tested — but it is not done, and this document will not pretend otherwise.
-The same goes for mounting the `ui` surface for menus: the core draws its own
-battle UI and dialogue today.
+**Where the guest is.** TypeScript is the authoring language here, and it is
+**ahead-of-time compiled** rather than interpreted on the console: `cook.ts`
+turns the content and the scripts into a MONPAK, and the core's script VM runs
+the compiled verbs. That is the [`vapor/`](../vapor) precedent rather than the
+`hosts/psp` one, and it is a deliberate choice — it keeps the entire runtime to
+two languages, Rust and TypeScript, with no C anywhere in the tree. The 2D UI
+runtime embeds QuickJS (a C library) to interpret its guest; this one does not
+need to, because a creature RPG's guest work is content and rules, and both
+compile.
 
-The base game is meant to be the first mod (RUNTIMES.md discipline #5), and
-the content path already honours it — every species, move, map, script and
-trainer is data, and the core ships none of it. What is missing is only the
-realm that would let that data arrive from a running JS program rather than a
-cooked file.
+The consequence is worth stating plainly: `Game::op` has no JS caller on the
+console today. The surface is specified, implemented as one dispatcher, and
+covered by `cargo test`; `apps/mon/sdk.ts` is the guest-side algebra over it.
+What is missing is a realm, and adding one is a thin binding over a boundary
+that already exists — `pocketjs-psp` carries the QuickJS embedding, and
+`pocket-mod` carries the realm lifecycle. It is a decision left open, not an
+oversight: mount it when live modding is worth a C dependency.
+
+The base game is meant to be the first mod (RUNTIMES.md discipline #5), and the
+content path already honours the half that matters — every species, move, map,
+script and trainer is data, and the core ships none of it. A second pak merged
+over the first is a mod today; a running JS program would be one tomorrow.
+
+The `ui` surface is likewise not mounted: the core draws its own battle UI and
+dialogue from its own state, which is what keeps an overworld frame at zero
+boundary crossings.
 
 ### Where the upstream Lua modules land
 
@@ -108,7 +120,7 @@ cooked file.
 | `data/scripts/*.lua` | **guest** | `apps/mon/content/game.ts` `SCRIPTS`, compiled by the cooker |
 | `mods/*` | **guest** | the surface *is* the mod API (`apps/mon/sdk.ts`) |
 | `import/*` | — | *(deliberately absent — see §1)* |
-| `core/ChipSynth`, `ChipAudio`, `Music` | — | **not implemented.** The core states what should be sounding (`Game::music`, `sfx`, `cry`) and no host acts on it yet |
+| `core/ChipSynth`, `ChipAudio`, `Music` | **core** | `audio.rs` — four voices (2 pulse, wave, noise), integer-only, rendered on demand |
 | `link/*` (UDP link play) | — | out of scope for v1 |
 
 ### Why the split falls where it does
@@ -228,7 +240,32 @@ A runtime without a headless story is not done (discipline #4):
   the sim goldens are describing a picture the console never shows.
 - Real hardware, over PSPLINK — **not yet run**.
 
-## 7. Out of scope for v1
+## 7. Sound
+
+Four voices, the classic set: two pulse channels with selectable duty and a
+volume envelope, a wave channel over a 32-step 4-bit table, and a noise channel
+driven by a 15-bit LFSR. Integer only, like the rest of the core — phase is a
+16.16 accumulator and the note table is frequencies in millihertz, because a
+synth that rounds differently on two hosts is a bug that gets blamed on
+something else.
+
+Tracks are tracker patterns (`apps/mon/content/music.ts`): four channels, one
+cell per row, tempo in rows per minute. That is the shape a four-voice chip
+wants and the shape a person can read back, which matters when the score is
+hand-authored rather than extracted.
+
+The core never touches a device — it renders samples into a buffer the host
+asks for. On the PSP that host is a dedicated thread: `sceAudioOutputBlocking`
+at 1024 samples paces at ~43 Hz and would cap the frame loop below 60 if it ran
+inline. The frame loop posts requests through three atomics and a sequence
+counter, which is the smallest shared surface that works and needs no lock.
+
+`bun tools/mon.ts sim <pak> --audio <dir>` renders every song and effect to
+WAV. Unit tests can prove the synth makes *a* sound; only a listen tells you
+the tune is right — and that gap is exactly how the mix shipped at 0.3% of full
+scale for an afternoon.
+
+## 8. Out of scope for v1
 
 Link play (upstream's UDP `src/link/*`), the save editor, Discord presence,
 the mod manager UI, and the slot-machine minigame. None of them are load

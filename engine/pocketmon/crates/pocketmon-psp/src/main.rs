@@ -28,11 +28,13 @@
 extern crate alloc;
 
 mod arena;
+mod audio;
 #[cfg(feature = "capture")]
 mod capture;
 
 use core::ffi::c_void;
 
+use pocketmon_core::audio::Bank;
 use pocketmon_core::{spec, Game};
 use pocketmon_gu::Backend;
 
@@ -152,6 +154,8 @@ unsafe fn run() -> ! {
         ALLOC.free_bytes() / 1024,
     );
 
+    audio::start(Bank::from_content(&game.content));
+
     // Start where a new game starts: the first map the content declares.
     let start = game.content.maps.keys().next().copied().unwrap_or(1);
     game.enter_map(start, 3, 3, spec::dir::DOWN);
@@ -171,6 +175,7 @@ unsafe fn run() -> ! {
         // Drain the event batch the way a guest would, so the queue never
         // sits at its cap silently dropping facts.
         let _ = game.encode_events();
+        audio::post(game.audio_seq, game.music, game.sfx, game.cry);
         game.render();
 
         sys::sceGuStart(GuContextType::Direct, list_ptr());

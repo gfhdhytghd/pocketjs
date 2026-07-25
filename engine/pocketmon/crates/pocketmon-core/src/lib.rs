@@ -24,6 +24,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+pub mod audio;
 pub mod battle;
 pub mod content;
 pub mod draw;
@@ -37,6 +38,21 @@ pub mod spec;
 pub mod surface;
 pub mod text;
 pub mod world;
+
+/// Sound-effect ids the CORE fires directly. Content owns the rest; these
+/// four are the ones the engine itself has an opinion about, so they are
+/// pinned here rather than left to a content author to remember.
+/// The song a battle switches to. Content owns the rest of the score; this
+/// one the engine picks, because a battle starting is an engine fact.
+pub const BATTLE_SONG: i32 = 2;
+
+pub mod sfx {
+    pub const BUMP: i32 = 0;
+    pub const SELECT: i32 = 1;
+    pub const HIT: i32 = 2;
+    pub const FAINT: i32 = 3;
+    pub const HEAL: i32 = 4;
+}
 
 pub use content::Content;
 pub use draw::MonDrawList;
@@ -149,6 +165,10 @@ pub struct Game {
     pub sfx: i32,
     /// One-shot creature cry for this frame.
     pub cry: i32,
+    /// Bumped whenever `music`/`sfx`/`cry` changes, so a host on another
+    /// thread can tell "nothing new" from "the same request again" without
+    /// needing a lock over the whole game.
+    pub audio_seq: u32,
     /// Previous frame's button mask, for edge detection.
     prev_buttons: u32,
     /// Scratch buffer reused by the packed `events()` / `view()` reads.
@@ -180,6 +200,7 @@ impl Game {
             music: -1,
             sfx: -1,
             cry: -1,
+            audio_seq: 0,
             prev_buttons: 0,
             scratch: Vec::new(),
         }
@@ -263,12 +284,43 @@ impl Game {
         }
 
         self.text.tick(pressed, &mut self.events);
+        self.emit_world_audio();
         self.apply_pending_block();
         self.dispatch_events();
         self.sync_mode();
         self.stats.tick = self.tick_count;
         self.stats.events = self.events.len() as u32;
         self.stats.events_dropped = self.events.dropped;
+    }
+
+    /// Sounds the world makes on its own — the ones a content author should
+    /// never have to remember to ask for.
+    fn emit_world_audio(&mut self) {
+        if self.world.bumped {
+            self.request_sfx(sfx::BUMP);
+        }
+        // The right music for where we are. A battle takes over the score and
+        // hands it back on the way out; otherwise it is the map's own theme.
+        // `play_music` ignores a repeat of what is already playing, so walking
+        // between two maps that share a theme does not restart it.
+        let want = if self.battle.is_some() {
+            BATTLE_SONG
+        } else {
+            self.content
+                .map_of(self.world.map_id)
+                .map(|m| m.music_id as i32 - 1)
+                .unwrap_or(-1)
+        };
+        if want != self.music {
+            self.music = want;
+            self.audio_seq = self.audio_seq.wrapping_add(1);
+        }
+    }
+
+    /// Ask the host for a one-shot effect.
+    pub fn request_sfx(&mut self, id: i32) {
+        self.sfx = id;
+        self.audio_seq = self.audio_seq.wrapping_add(1);
     }
 
     /// Apply a `replace_block` a script requested (the VM cannot reach

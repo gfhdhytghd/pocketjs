@@ -5,6 +5,7 @@
 //   bun tools/mon.ts check            cook + run the story tape against goldens
 //   bun tools/mon.ts record           cook + re-record the golden hashes
 //   bun tools/mon.ts shots [dir]      cook + write a PNG per checkpoint
+//   bun tools/mon.ts audio [dir]      cook + render every song and effect to WAV
 //   bun tools/mon.ts psp [cargo args] cook, then build the PSP EBOOT
 //   bun tools/mon.ts run              …and launch it in PPSSPP
 //
@@ -30,7 +31,7 @@ const rest = argv.slice(1);
 
 function usage(): never {
   console.error(
-    "usage: bun tools/mon.ts <cook|sim|check|record|shots|psp|run> [args…]",
+    "usage: bun tools/mon.ts <cook|sim|check|record|shots|audio|psp|run> [args…]",
   );
   process.exit(2);
 }
@@ -86,6 +87,16 @@ async function main() {
       mkdirSync(dir, { recursive: true });
       await $`${bin} ${pakPath} --tape ${tape} --shots ${dir} --atlas ${dir}`;
       console.log(`\nwrote PNGs to ${dir}`);
+      return;
+    }
+
+    case "audio": {
+      await cook();
+      const bin = await buildSim();
+      const dir = rest[0] ?? `${root}dist/mon-audio`;
+      mkdirSync(dir, { recursive: true });
+      await $`${bin} ${pakPath} --audio ${dir} --frames 1`;
+      console.log(`\nwrote WAVs to ${dir}`);
       return;
     }
 

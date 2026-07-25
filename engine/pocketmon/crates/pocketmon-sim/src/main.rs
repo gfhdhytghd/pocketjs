@@ -22,6 +22,7 @@
 
 mod png;
 mod raster;
+mod wav;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -162,6 +163,7 @@ fn main() {
     let mut scale = 2u32;
     let mut assert_mode = false;
     let mut atlas_dir: Option<PathBuf> = None;
+    let mut audio_dir: Option<PathBuf> = None;
     let mut emit_psp: Option<PathBuf> = None;
 
     let mut i = 0;
@@ -190,6 +192,10 @@ fn main() {
             "--scale" => {
                 i += 1;
                 scale = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(2).max(1);
+            }
+            "--audio" => {
+                i += 1;
+                audio_dir = args.get(i).map(PathBuf::from);
             }
             "--atlas" => {
                 i += 1;
@@ -251,6 +257,32 @@ fn main() {
         }
         println!("dumped {} atlas pages to {}", game.content.pages.len(), dir.display());
         println!("  font page {} line height {}, {} glyphs", game.content.font_page, game.content.font_line_height, game.content.glyphs.len());
+    }
+
+    // Rendering the score to WAV is the only way to actually check it. Unit
+    // tests can prove a synth makes *a* sound; they cannot tell you the tune
+    // is wrong.
+    if let Some(dir) = &audio_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let bank = pocketmon_core::audio::Bank::from_content(&game.content);
+        for i in 0..bank.tracks.len() {
+            let song = i < bank.songs as usize;
+            let mut synth = pocketmon_core::audio::Synth::new();
+            if song {
+                synth.play_music(&bank, i as u16);
+            } else {
+                synth.play_sfx(&bank, (i - bank.songs as usize) as u16);
+            }
+            // Long enough for a loop of the longest song, short enough to skim.
+            let frames = if song { spec::SAMPLE_RATE * 8 } else { spec::SAMPLE_RATE };
+            let samples = synth.render_vec(&bank, frames as usize);
+            let kind = if song { "song" } else { "sfx" };
+            let index = if song { i } else { i - bank.songs as usize };
+            let path = dir.join(format!("{kind}{index}.wav"));
+            let _ = std::fs::write(&path, wav::encode(spec::SAMPLE_RATE, &samples));
+            let peak = samples.iter().map(|&v| (v as i32).abs()).max().unwrap_or(0);
+            println!("  {} peak {peak}", path.display());
+        }
     }
 
     // Start where a new game starts.

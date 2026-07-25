@@ -13,7 +13,11 @@ import {
   ACTORS_MAX,
   ACTOR_SIZE,
   ATLAS_PAGE_HEADER_SIZE,
+  AUDIO_BUFFER,
+  AUDIO_CELL_SIZE,
+  AUDIO_CHANNELS,
   AUDIO_ENTRY_SIZE,
+  AUDIO_HEADER_SIZE,
   BAG_MAX,
   BALL_RATE,
   BEHAVIOR,
@@ -66,6 +70,8 @@ import {
   MOVE_FLAG_PRIORITY,
   MOVE_FLAG_RECHARGE,
   MOVE_SIZE,
+  NOTE_HOLD,
+  NOTE_OFF,
   OUTCOME,
   PAGE_MAX,
   PAGE_PX,
@@ -81,6 +87,7 @@ import {
   RECT_SIZE,
   SAVE_HEADER_SIZE,
   SAVE_MAGIC,
+  SAMPLE_RATE,
   SAVE_VERSION,
   SCRIPT_ENTRY_SIZE,
   SCRIPT_HEADER_SIZE,
@@ -294,6 +301,16 @@ export function generateMonRust(): string {
   put("/// A string's index IS its key id; no hashing happens at runtime.");
   put(`pub const TEXT_ENTRY_SIZE: usize = ${TEXT_ENTRY_SIZE};`);
   put(`pub const AUDIO_ENTRY_SIZE: usize = ${AUDIO_ENTRY_SIZE};`);
+  put("/// A track is a tracker pattern; see mon-spec.ts for the cell layout.");
+  put(`pub const AUDIO_HEADER_SIZE: usize = ${AUDIO_HEADER_SIZE};`);
+  put(`pub const AUDIO_CELL_SIZE: usize = ${AUDIO_CELL_SIZE};`);
+  put("/// Pulse 1, pulse 2, wave, noise — the classic four.");
+  put(`pub const AUDIO_CHANNELS: usize = ${AUDIO_CHANNELS};`);
+  put(`pub const SAMPLE_RATE: u32 = ${SAMPLE_RATE};`);
+  put(`pub const AUDIO_BUFFER: usize = ${AUDIO_BUFFER};`);
+  put("/// Cell `note` values that are not a semitone.");
+  put(`pub const NOTE_HOLD: u8 = ${NOTE_HOLD};`);
+  put(`pub const NOTE_OFF: u8 = ${NOTE_OFF};`);
   put("");
   constMod(put, "item_kind", "u8", ITEM_KIND, ["What an item does when used."]);
 
