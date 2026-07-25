@@ -7,6 +7,9 @@
 #                           lone standalone crates (see their Cargo.toml)
 #   pocket3d/crates/pocket3d-gu, gu-demo — PSP-only (cargo-psp toolchain)
 #   pocket3d/crates/pocket3d-vita        — Vita-only (vitasdk toolchain)
+#   pocketmon/crates/*                   — the Pocket Mon runtime: the core is
+#                                          consumed by a lone-bin PSP EBOOT, so
+#                                          it stands alone like core/ (docs/MON.md)
 [workspace]
 resolver = "2"
 members = [
@@ -29,6 +32,10 @@ exclude = [
     "pocket3d/crates/pocket3d-gu",
     "pocket3d/crates/gu-demo",
     "pocket3d/crates/pocket3d-vita",
+    "pocketmon/crates/pocketmon-core",
+    "pocketmon/crates/pocketmon-gu",
+    "pocketmon/crates/pocketmon-psp",
+    "pocketmon/crates/pocketmon-sim",
 ]
 
 [workspace.package]

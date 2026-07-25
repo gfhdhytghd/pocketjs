@@ -1,0 +1,43 @@
+# pocketmon-psp — the Pocket Mon EBOOT.
+#
+# STANDALONE LONE-BIN CRATE: cargo-psp requires the binary crate to be outside
+# any workspace (the same rule hosts/psp lives by). Build it with
+# `bun tools/mon.ts psp`, which resolves the pinned toolchain from
+# tools/cli/psp-toolchain.json.
+#
+# The composition, in docs/RUNTIMES.md terms:
+#   pocketmon-core  the RPG core (world, battle, script VM, save, draw list)
+# + pocketmon-gu    the GE backend for that draw list
+# + this crate      the arena allocator, the frame loop, and the input mapping
+#
+# The cooked content pak is embedded at build time, so the EBOOT is one file
+# with no companion data on the stick.
+
+[package]
+name = "pocketmon-psp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# `external-global-alloc` gates out rust-psp's own #[global_allocator] (one
+# kernel object per allocation) and its #[alloc_error_handler], so src/arena.rs
+# can provide both — the same trade hosts/psp makes for the same reason.
+psp = { git = "https://github.com/pocket-stack/rust-psp.git", rev = "2cbaf8c9bc72569c76240a1d9743de10731e5f6b", features = ["abort-only", "external-global-alloc"] }
+pocketmon-core = { path = "../pocketmon-core" }
+pocketmon-gu = { path = "../pocketmon-gu" }
+
+[features]
+# Frame-dump build for tests/e2e/mon-ppsspp.ts: writes captured frames to
+# ms0:/mon_cap and replays a baked input tape. Never in a normal build.
+capture = []
+
+[[bin]]
+name = "pocketmon-psp"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

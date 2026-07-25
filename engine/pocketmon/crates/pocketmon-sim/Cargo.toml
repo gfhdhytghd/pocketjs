@@ -1,0 +1,25 @@
+# pocketmon-sim — the deterministic headless host for Pocket Mon.
+#
+# The verification harness docs/MON.md §6 requires: it loads a cooked MONPAK,
+# replays a scripted input tape through pocketmon-core, rasterizes the draw
+# list exactly as a real backend would, and reports frame hashes. Everything
+# the PSP EBOOT does, minus the console.
+#
+# STANDALONE CRATE (excluded from the engine workspace) so it can depend on
+# pocketmon-core the same way the PSP EBOOT does, with its own lockfile.
+#
+# No dependencies: the PNG writer is 100 lines of stored-deflate, which is a
+# better trade than pulling an image crate into a hermetic build.
+
+[package]
+name = "pocketmon-sim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+pocketmon-core = { path = "../pocketmon-core", features = ["std"] }
+
+[[bin]]
+name = "pocketmon-sim"
+path = "src/main.rs"

@@ -154,6 +154,8 @@ The grammar is implemented once, as infrastructure every runtime reuses:
 | `pocket3d-gu` | The 3D substrate, PSP edition: renders cooked worlds through the GE (sceGu) with PVS culling, CLUT8 textures, and dynamic meshes. |
 | `pocketjs-psp` (lib) | Guest hosting + `ui` surface, PSP edition: the arena allocator, the QuickJS embedding, the DrawList GE backend (with an overlay mode for 3D compositing), pak feeding, and the DevTools mailbox — everything the 2D EBOOT proved, linkable by game EBOOTs. |
 | `pocket3d-vita` | The 3D substrate, Vita edition: CPU projection and six-plane clipping into vita2d/GXM at 960x544, painter-sorted so a PocketJS HUD can share the same scene. |
+| `pocketmon-core` | The creature-RPG core (docs/MON.md): grid world, turn battle, script VM, save, and the `mon` surface's op dispatcher. no_std + alloc, zero dependencies, zero floating point. |
+| `pocketmon-gu` | That core's draw list, rendered through the GE. |
 | `pocketjs-vita` (lib) | Guest hosting + `ui` surface, Vita edition: QuickJS, density-2 pak/font resources, controller/dual-analog input, logical-coordinate front-panel contacts and a native-density 960x544 vita2d backend over the portable 480x272 logical layout. |
 
 A specialized runtime is then a thin composition. OpenStrike is:
@@ -173,6 +175,13 @@ product bundle (JS, built by the PocketJS two-pass pipeline)
 The PSP UI runtime, in the same notation: a QuickJS guest + the `ui` surface
 + the sceGu backend. It was the first instance of the pattern all along; the
 architecture names it and makes it repeatable.
+
+Pocket Mon (docs/MON.md) is the newest instance, and an honest illustration of
+how much of the pattern you get before the guest arrives: its core, its
+surface and its `.monpak` asset format are all in place and its EBOOT runs on
+a PSP, while the QuickJS realm that would let a JS program drive that surface
+is still to come. The vocabulary was worth writing first regardless — it is
+what made the core testable without a console.
 
 And the composition is now proven portable: **OpenStrike runs on a real PSP**
 as `openstrike-core` (the same FPS simulation) + `pocket3d-gu` over a cooked

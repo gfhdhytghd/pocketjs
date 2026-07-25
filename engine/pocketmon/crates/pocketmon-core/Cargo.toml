@@ -1,0 +1,30 @@
+# pocketmon-core — the Pocket Mon RPG core: world, entities, script VM, battle
+# engine, save and the backend-independent draw list. #![no_std] + alloc by
+# default so the same crate builds for mipsel-sony-psp and the host.
+# See ../../../../docs/MON.md.
+#
+# NOTE: deliberately NOT part of any cargo workspace — cargo-psp needs the PSP
+# EBOOT to be a lone-bin standalone crate, so each crate stands alone (the same
+# rule engine/core follows).
+#
+# Zero dependencies, and zero floating point: every rule in here is integer
+# math, which is what makes the byte-exact goldens and the deterministic
+# replays possible on hosts with different FPUs.
+
+[package]
+name = "pocketmon-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+# Self-dependency with `std` so `cargo test` builds the harness against the
+# std-enabled crate while normal builds stay no_std + alloc.
+pocketmon-core = { path = ".", features = ["std"] }
+
+[features]
+default = []
+# Host-test convenience: links std instead of no_std + alloc.
+std = []

@@ -1,0 +1,19 @@
+# pocketmon-gu — the sceGu (PSP GE) backend for Pocket Mon's draw list.
+#
+# STANDALONE CRATE: excluded from the engine workspace — it only compiles for
+# mipsel-sony-psp (tier-3, cargo-psp toolchain), and workspace membership would
+# break desktop `cargo check/test`. Consumed as a path dep by the EBOOT next to
+# `pocketmon-core`, exactly the way `pocket3d-gu` sits beside `pocket3d-bsp`.
+#
+# The `psp` revision mirrors hosts/psp/Cargo.toml and tools/cli/psp-toolchain.json;
+# no sibling checkout is part of the build contract.
+
+[package]
+name = "pocketmon-gu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+psp = { git = "https://github.com/pocket-stack/rust-psp.git", rev = "2cbaf8c9bc72569c76240a1d9743de10731e5f6b", features = ["abort-only", "external-global-alloc"] }
+pocketmon-core = { path = "../pocketmon-core" }
