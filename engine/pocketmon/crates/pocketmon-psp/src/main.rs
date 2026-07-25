@@ -9,14 +9,16 @@
 //!
 //! ```text
 //!   D-pad / analog   walk, move a cursor
-//!   CROSS            confirm  (A)
-//!   CIRCLE           cancel   (B)
+//!   CIRCLE           confirm  (A)
+//!   CROSS            cancel   (B)
 //!   START            menu
-//!   SELECT           the debug overlay
 //! ```
 //!
-//! CROSS is confirm rather than CIRCLE: this is a Western-market handheld
-//! convention and matches every other PocketJS host in the repo.
+//! CIRCLE confirms, not CROSS. That is the Japanese-market convention the PSP
+//! shipped with, and — the reason it matters here — it is what every other
+//! PocketJS host does (`framework/src/input.ts` presses the focused node on
+//! CIRCLE). A player with the rest of the family on their memory stick would
+//! otherwise reach this one game and find the confirm button dead.
 
 #![no_std]
 #![no_main]
@@ -222,10 +224,10 @@ fn map_buttons(pad: &SceCtrlData) -> u32 {
     if b.contains(CtrlButtons::RIGHT) {
         mask |= spec::btn::RIGHT;
     }
-    if b.contains(CtrlButtons::CROSS) {
+    if b.contains(CtrlButtons::CIRCLE) {
         mask |= spec::btn::A;
     }
-    if b.contains(CtrlButtons::CIRCLE) {
+    if b.contains(CtrlButtons::CROSS) {
         mask |= spec::btn::B;
     }
     if b.contains(CtrlButtons::START) {
