@@ -1,5 +1,5 @@
 //! Deterministic software rasterizer: executes the core DrawList (spec.ts
-//! "DRAWLIST op format") over an RGBA8, BGRA8, or RGB565 framebuffer.
+//! "DRAWLIST op format") over an RGBA8, BGRA8, RGB565, or Gray8 framebuffer.
 //! DrawList coordinates remain logical; [`render_scaled`] maps them directly
 //! onto an integer-scaled physical surface without first rasterizing a
 //! low-resolution image.
@@ -36,6 +36,9 @@
 //! low-bandwidth opaque target for 16-bit hosts. Hardware DrawList backends
 //! reuse it (via [`render_scaled_rgb565_over`]) as their ordered software
 //! fallback for ops their accelerator cannot express.
+//!
+//! [`render_scaled_gray8`] fuses Rec. 709 grayscale conversion into raster
+//! writes, avoiding an intermediate RGBA framebuffer on monochrome hosts.
 
 use crate::damage::{
     DamageError, DamagePlan, DamagePolicy, DamageRect, DamageTarget, DamageTracker,
@@ -47,6 +50,7 @@ pub const MAX_RENDER_SCALE: u32 = 4;
 const DAMAGE_SIGNATURE_RGBA8: u64 = u32::from_be_bytes(*b"RGBA") as u64;
 const DAMAGE_SIGNATURE_ARGB8: u64 = u32::from_be_bytes(*b"ARGB") as u64;
 const DAMAGE_SIGNATURE_RGB565: u64 = u32::from_be_bytes(*b"R565") as u64;
+const DAMAGE_SIGNATURE_GRAY8: u64 = u32::from_be_bytes(*b"GRY8") as u64;
 
 /// Integer clip rect: x0/y0 inclusive, x1/y1 exclusive.
 #[derive(Clone, Copy)]
@@ -234,6 +238,48 @@ impl RenderTarget for Rgb565Target<'_> {
     }
 }
 
+struct Gray8Target<'a> {
+    pixels: &'a mut [u8],
+}
+
+/// Convert an RGB8 pixel to Gray8 with integer Rec. 709 luma weights.
+///
+/// The exact formula is `(2126*R + 7152*G + 722*B + 5000) / 10000`.
+/// Adding half the denominator makes the integer division round to nearest,
+/// with exact half-way values rounded up. Inputs are RGB8 channels, so the
+/// weighted sum fits comfortably in `u32`.
+#[inline]
+const fn gray8_luminance(r: u32, g: u32, b: u32) -> u8 {
+    ((2126 * r + 7152 * g + 722 * b + 5000) / 10000) as u8
+}
+
+impl RenderTarget for Gray8Target<'_> {
+    #[inline]
+    fn pixel_len(&self) -> usize {
+        self.pixels.len()
+    }
+
+    #[inline]
+    fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
+        if a >= 255 {
+            self.pixels[offset] = gray8_luminance(r, g, b);
+            return;
+        }
+        if a == 0 {
+            return;
+        }
+        let src = gray8_luminance(r, g, b) as u32;
+        let dst = self.pixels[offset] as u32;
+        let ia = 255 - a;
+        self.pixels[offset] = ((src * a + dst * ia + 127) / 255) as u8;
+    }
+
+    #[inline]
+    fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
+        self.pixels[start..start + len].fill(gray8_luminance(r, g, b));
+    }
+}
+
 /// Fill an already-clipped span rect with one flat color.
 fn fill_rect<T: RenderTarget>(target: &mut T, stride: i32, c: Clip, color: u32) {
     let (r, g, b, a) = channels(color);
@@ -306,6 +352,16 @@ pub fn render_scaled_rgb565(ui: &Ui, words: &[u32], fb: &mut [u16], scale: u32) 
     render_scaled_impl(ui, words, &mut target, scale, true);
 }
 
+/// Execute a complete DrawList directly into a one-byte-per-pixel Gray8
+/// framebuffer. RGB colors are converted with the deterministic integer
+/// Rec. 709 formula documented on `gray8_luminance`; alpha is composited
+/// src-over in Gray8 with the same `/ 255`, round-to-nearest rule as the
+/// RGBA8 and RGB565 targets. The framebuffer is cleared to black first.
+pub fn render_scaled_gray8(ui: &Ui, words: &[u32], fb: &mut [u8], scale: u32) {
+    let mut target = Gray8Target { pixels: fb };
+    render_scaled_impl(ui, words, &mut target, scale, true);
+}
+
 /// Execute DrawList words over an existing RGB565 framebuffer without
 /// clearing it. Hardware backends use this for ordered fallback segments.
 pub fn render_scaled_rgb565_over(ui: &Ui, words: &[u32], fb: &mut [u16], scale: u32) {
@@ -350,6 +406,18 @@ pub fn render_scaled_rgb565_regions(
     regions: &[DamageRect],
 ) {
     let mut target = Rgb565Target { pixels: fb };
+    render_scaled_regions_impl(ui, words, &mut target, scale, regions);
+}
+
+/// Gray8 equivalent of [`render_scaled_regions`].
+pub fn render_scaled_gray8_regions(
+    ui: &Ui,
+    words: &[u32],
+    fb: &mut [u8],
+    scale: u32,
+    regions: &[DamageRect],
+) {
+    let mut target = Gray8Target { pixels: fb };
     render_scaled_regions_impl(ui, words, &mut target, scale, regions);
 }
 
@@ -413,6 +481,28 @@ pub fn render_scaled_rgb565_incremental<const MAX_REGIONS: usize>(
         tracker,
         policy,
         DAMAGE_SIGNATURE_RGB565,
+    )
+}
+
+/// Incrementally render one-byte-per-pixel Gray8 using one tracker per
+/// persistent framebuffer.
+pub fn render_scaled_gray8_incremental<const MAX_REGIONS: usize>(
+    ui: &Ui,
+    words: &[u32],
+    fb: &mut [u8],
+    scale: u32,
+    tracker: &mut DamageTracker<MAX_REGIONS>,
+    policy: DamagePolicy,
+) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
+    let mut target = Gray8Target { pixels: fb };
+    render_scaled_incremental_impl(
+        ui,
+        words,
+        &mut target,
+        scale,
+        tracker,
+        policy,
+        DAMAGE_SIGNATURE_GRAY8,
     )
 }
 
@@ -1494,6 +1584,166 @@ mod tests {
             render_scaled_rgb565(&ui, words, &mut expected, 1);
             assert_eq!(outputs[target], expected);
         }
+    }
+
+    #[test]
+    fn gray8_output_uses_integer_rec709_luminance_and_clears_black() {
+        let mut ui = Ui::new();
+        ui.set_viewport(5.0, 1.0);
+        let words = [
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(1, 1),
+            0xff00_00ff,
+            draw_op::RECT,
+            xy_word(1, 0),
+            wh_word(1, 1),
+            0xff00_ff00,
+            draw_op::RECT,
+            xy_word(2, 0),
+            wh_word(1, 1),
+            0xffff_0000,
+            draw_op::RECT,
+            xy_word(3, 0),
+            wh_word(1, 1),
+            0xffff_ffff,
+        ];
+        let mut fb = vec![0xa5; 5];
+        render_scaled_gray8(&ui, &words, &mut fb, 1);
+        assert_eq!(fb, [54, 182, 18, 255, 0]);
+    }
+
+    #[test]
+    fn gray8_alpha_blending_matches_other_opaque_targets_rounding() {
+        let mut ui = Ui::new();
+        ui.set_viewport(2.0, 1.0);
+        let words = [
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(2, 1),
+            0xff80_8080,
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(1, 1),
+            0x80ff_ffff,
+            draw_op::RECT,
+            xy_word(1, 0),
+            wh_word(1, 1),
+            0x0000_00ff,
+        ];
+        let mut fb = vec![0; 2];
+        render_scaled_gray8(&ui, &words, &mut fb, 1);
+
+        // src-over uses (src*a + dst*(255-a) + 127) / 255.
+        assert_eq!(fb, [192, 128]);
+    }
+
+    #[test]
+    fn gray8_matches_rec709_conversion_of_rgba_reference() {
+        let mut ui = Ui::new();
+        ui.set_viewport(32.0, 12.0);
+        let words = [
+            draw_op::RECT,
+            xy_word(1, 1),
+            wh_word(6, 5),
+            0xff33_88dd,
+            draw_op::GRAD_RECT,
+            xy_word(9, 1),
+            wh_word(8, 6),
+            0xff10_2040,
+            0xffe0_c080,
+            spec::GradDir::ToRight as u32,
+            draw_op::TRI,
+            xy_word(20, 1),
+            xy_word(30, 9),
+            xy_word(18, 9),
+            0xff00_00ff,
+            0xff00_ff00,
+            0xffff_0000,
+            // A grayscale alpha layer exercises src-over while preserving
+            // exact comparability with an RGBA framebuffer converted last.
+            draw_op::RECT,
+            xy_word(2, 2),
+            wh_word(4, 3),
+            0x80ff_ffff,
+        ];
+        let scale = 2;
+        let pixels = 32 * scale as usize * 12 * scale as usize;
+        let mut rgba_fb = vec![0; pixels * 4];
+        let mut gray_fb = vec![0; pixels];
+        render_scaled(&ui, &words, &mut rgba_fb, scale);
+        render_scaled_gray8(&ui, &words, &mut gray_fb, scale);
+
+        for (pixel, rgba) in gray_fb.iter().zip(rgba_fb.chunks_exact(4)) {
+            assert_eq!(
+                *pixel,
+                gray8_luminance(rgba[0] as u32, rgba[1] as u32, rgba[2] as u32)
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_gray8_matches_full_render_and_skips_unchanged_frames() {
+        let mut ui = Ui::new();
+        ui.set_viewport(24.0, 12.0);
+        let frame = |x: i16, color: u32| {
+            vec![
+                draw_op::RECT,
+                xy_word(0, 0),
+                wh_word(24, 12),
+                0xffff_ffff,
+                draw_op::RECT,
+                xy_word(x, 2),
+                wh_word(6, 6),
+                color,
+                draw_op::RECT,
+                xy_word(8, 4),
+                wh_word(8, 6),
+                0x8040_4040,
+            ]
+        };
+        let previous = frame(2, 0xff00_00ff);
+        let current = frame(10, 0xffff_0000);
+        let scale = 2;
+        let mut incremental = vec![0u8; 24 * scale as usize * 12 * scale as usize];
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+
+        let first = render_scaled_gray8_incremental(
+            &ui,
+            &previous,
+            &mut incremental,
+            scale,
+            &mut tracker,
+            DamagePolicy::default(),
+        )
+        .unwrap();
+        assert!(first.is_full_redraw());
+        let changed = render_scaled_gray8_incremental(
+            &ui,
+            &current,
+            &mut incremental,
+            scale,
+            &mut tracker,
+            DamagePolicy::default(),
+        )
+        .unwrap();
+        assert!(!changed.is_empty());
+
+        let mut full = vec![0u8; incremental.len()];
+        render_scaled_gray8(&ui, &current, &mut full, scale);
+        assert_eq!(incremental, full);
+
+        let unchanged = render_scaled_gray8_incremental(
+            &ui,
+            &current,
+            &mut incremental,
+            scale,
+            &mut tracker,
+            DamagePolicy::default(),
+        )
+        .unwrap();
+        assert!(unchanged.is_empty());
+        assert_eq!(incremental, full);
     }
 
     #[test]

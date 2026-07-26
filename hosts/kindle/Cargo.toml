@@ -1,0 +1,36 @@
+[package]
+name = "pocketjs-kindle"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "PocketJS UI runtime host for jailbroken Kindle e-readers"
+
+# This is a standalone device crate, like hosts/psp and hosts/vita. Keeping it
+# outside engine/Cargo.toml means a device build cannot accidentally pull in a
+# desktop renderer.
+[workspace]
+
+[dependencies]
+pocketjs-core = { path = "../../engine/core", features = ["std"] }
+pocket-mod = { path = "../../engine/crates/pocket-mod" }
+pocket-ui-surface = { path = "../../engine/crates/pocket-ui-surface" }
+
+anyhow = "1"
+env_logger = "0.11"
+libc = "0.2"
+log = "0.4"
+memmap2 = "0.9"
+signal-hook = "0.3"
+
+# rquickjs does not publish pre-generated bindings for this ARM musl triplet.
+# Cargo feature unification enables bindgen for pocket-mod's rquickjs-sys only
+# on device builds; native tests keep using the shipped bindings.
+[target.'cfg(target_arch = "arm")'.dependencies]
+rquickjs = { version = "0.12", features = ["bindgen"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

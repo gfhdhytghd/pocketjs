@@ -34,6 +34,14 @@
 //   - While the cursor is enabled, d-pad focus traversal and the CIRCLE
 //     press of the classic model are suppressed; onButtonPress hooks are
 //     untouched (they run in frame.ts before this module).
+//
+// Direct-touch press mode (input.touch capability, opt-in via
+// enableTouchPress):
+//   - The first contact arms the focusable node under its down point and
+//     releases through the same focus/active/onPress authority as CIRCLE.
+//   - A host hitTest op is required. Raw-touch apps remain completely
+//     unaffected until they opt in, and hosts without hitTest keep their
+//     existing geometry adapters.
 
 import { BTN, IMG_FLAG_RLE, PSM, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
 import { ticksPerFrame } from "./clock.ts";
@@ -41,11 +49,21 @@ import { analogX, analogY } from "./frame.ts";
 import { getHost, getOps, hostViewport, type HostOps } from "./host.ts";
 import { get as pakGet } from "./pak.ts";
 import type { NodeMirror } from "./renderer.ts";
+import { touches } from "./touch.ts";
 
 let root: NodeMirror | null = null;
 let focused: NodeMirror | null = null;
 let pressedNode: NodeMirror | null = null;
 let prevButtons = 0;
+let touchPress: {
+  id: number;
+  target: NodeMirror | null;
+  inside: boolean;
+} | null = null;
+// Direct-touch activation is a composable app capability. Keep one opaque
+// token per caller so a nested component's cleanup cannot disable a
+// longer-lived owner (for example, an app shell while an OSK is mounted).
+const touchPressOwners = new Set<symbol>();
 const focusScopeStack: NodeMirror[] = [];
 const focusGridStack: FocusGridRegistration[] = [];
 const focusControllerStack: FocusControllerRegistration[] = [];
@@ -62,6 +80,7 @@ export function setInputRoot(r: NodeMirror | null): void {
   focused = null;
   pressedNode = null;
   prevButtons = 0;
+  touchPress = null;
   focusScopeStack.length = 0;
   focusGridStack.length = 0;
   focusControllerStack.length = 0;
@@ -84,6 +103,7 @@ export function setInputRoot(r: NodeMirror | null): void {
  *  touching host ops — the host may already be a different instance). */
 export function resetInput(): void {
   cursor = null;
+  touchPressOwners.clear();
   setInputRoot(null);
 }
 
@@ -99,6 +119,10 @@ export function registerPress(
 export function registerFocusable(node: NodeMirror, on: boolean): void {
   node.focusable = on;
   __notifyTreeMutation(); // hover resolution depends on focusable flags
+  if (!on && touchPress?.target === node) {
+    touchPress = null;
+    setPressedNode(null);
+  }
   if (!on && focused === node) {
     focusNode(null);
   }
@@ -285,7 +309,11 @@ function moveFocus(direction: FocusDirection): void {
 }
 
 function firePress(): void {
-  let n: NodeMirror | null = focused;
+  firePressFrom(focused);
+}
+
+function firePressFrom(start: NodeMirror | null): void {
+  let n = start;
   while (n) {
     if (n.onPress) {
       n.onPress();
@@ -376,6 +404,10 @@ export function pushFocusGrid(node: NodeMirror, opts: FocusGridOptions): () => v
  * sibling subtree → nearest focusable ancestor → none.
  */
 export function notifyDetached(node: NodeMirror): void {
+  if (touchPress?.target && isWithin(touchPress.target, node)) {
+    touchPress = null;
+    setPressedNode(null);
+  }
   if (!focused || !isWithin(focused, node)) return;
   const parent = node.parent;
   if (parent) {
@@ -669,6 +701,78 @@ export function hitFocusable(x: number, y: number): NodeMirror | null {
   return cursorTarget(findMirror(hitRoot ?? root, ops.hitTest(x, y)));
 }
 
+/**
+ * One direct-touch press lifecycle. The first contact arms the focusable
+ * target under its down point, `active:` follows leave/re-enter, and release
+ * over that same target bubbles the ordinary onPress handler. This gives
+ * touch-only hosts the same activation semantics as CIRCLE and the virtual
+ * cursor without exposing a second component event API.
+ *
+ * Returns true while a contact owns input, including its release frame, so a
+ * simultaneous button edge cannot double-activate the target.
+ */
+function touchFrame(): boolean {
+  if (touchPressOwners.size === 0 || !getOps().hitTest) return false;
+  const contacts = touches();
+  if (!touchPress) {
+    const contact = contacts[0];
+    if (!contact) return false;
+    const target = hitFocusable(contact.x, contact.y);
+    touchPress = { id: contact.id, target, inside: target !== null };
+    if (target) {
+      focusNode(target);
+      setPressedNode(target);
+    }
+    return true;
+  }
+
+  const contact = contacts.find(({ id }) => id === touchPress!.id);
+  if (!contact) {
+    const { target, inside } = touchPress;
+    touchPress = null;
+    setPressedNode(null);
+    if (target && inside) {
+      focusNode(target);
+      firePressFrom(target);
+    }
+    return true;
+  }
+
+  const target = hitFocusable(contact.x, contact.y);
+  touchPress.inside = target === touchPress.target;
+  setPressedNode(touchPress.inside ? touchPress.target : null);
+  return true;
+}
+
+/**
+ * Opt into direct-touch activation for focusable nodes. Each call owns one
+ * token; the returned disposer releases only that token. Releasing the final
+ * owner cancels any in-flight contact and restores raw-touch-only behavior.
+ *
+ * This is intentionally explicit: apps with their own pan/gesture arbitration
+ * continue to receive touch snapshots without the focus manager claiming them.
+ */
+export function enableTouchPress(): () => void {
+  const owner = Symbol("touch-press-owner");
+  touchPressOwners.add(owner);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    // resetInput() may already have invalidated this generation. A stale
+    // disposer must not cancel an owner registered after that reset.
+    if (!touchPressOwners.delete(owner) || touchPressOwners.size > 0) return;
+    touchPress = null;
+    setPressedNode(null);
+  };
+}
+
+/** Internal coordination for system controls that also provide a raw-touch
+ * fallback on hosts without native hit testing. */
+export function isTouchPressEnabled(): boolean {
+  return touchPressOwners.size > 0;
+}
+
 /** One cursor-mode frame. Returns false when the host predates the cursor
  *  ops — the caller then falls through to the classic d-pad model, so a
  *  stale host never loses input. */
@@ -759,6 +863,7 @@ export function handleFrame(buttons: number): void {
   const pressed = buttons & ~prevButtons;
   const released = prevButtons & ~buttons;
   prevButtons = buttons;
+  if (touchFrame()) return;
   if (cursor && cursorFrame(buttons, pressed, released)) return;
   if (released & BTN.CIRCLE) setPressedNode(null);
   if (pressed === 0) return;

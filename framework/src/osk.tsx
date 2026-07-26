@@ -37,7 +37,14 @@ import { virtualFrame } from "./clock.ts";
 import { Focusable, FocusScope, Text, View } from "./components.ts";
 import { pushButtonHandlerBlock } from "./frame.ts";
 import { getOps, hostViewport } from "./host.ts";
-import { focusNode, getFocused, hitFocusable, pushFocusController, type FocusDirection } from "./input.ts";
+import {
+  focusNode,
+  getFocused,
+  hitFocusable,
+  isTouchPressEnabled,
+  pushFocusController,
+  type FocusDirection,
+} from "./input.ts";
 import { onButtonPress, onFrame } from "./lifecycle.ts";
 import { touches } from "./touch.ts";
 import {
@@ -287,6 +294,13 @@ function OskPanel(props: { osk: OskController; theme: OskThemeName }): SolidJSX.
   // -- touch: contact edges -> keys (input.touch platforms) -----------------
   let prevTouchIds = new Set<number>();
   onFrame(() => {
+    // An app may opt into the focus manager's release-based touch press path.
+    // With native hit testing it owns these Focusables; keep this raw adapter
+    // only for legacy/non-hitTest hosts, where it supplies geometry fallback.
+    if (isTouchPressEnabled() && getOps().hitTest) {
+      if (prevTouchIds.size > 0) prevTouchIds = new Set();
+      return;
+    }
     const list = touches();
     if (list.length === 0) {
       if (prevTouchIds.size > 0) prevTouchIds = new Set();

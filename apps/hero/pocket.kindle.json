@@ -1,0 +1,30 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.hero-kindle",
+  "name": "pocketjs-hero-kindle",
+  "title": "PocketJS: Hero for Kindle",
+  "version": "0.6.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "input.touch",
+        "text.glyphs.baked"
+      ]
+    }
+  },
+  "app": {
+    "entry": "apps/hero/main.tsx",
+    "output": "hero-kindle-main",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [
+          309,
+          412
+        ],
+        "presentation": "native"
+      }
+    }
+  }
+}

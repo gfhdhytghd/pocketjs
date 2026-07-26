@@ -1,0 +1,56 @@
+{
+  "comment": "Managed by PocketJS Kindle bootstrap. Local edits will be replaced.",
+  "items": [
+    {
+      "name": "PocketJS Dev",
+      "priority": 0,
+      "items": [
+        {
+          "name": "Start USB SSH",
+          "action": "./bin/pocketjs.sh",
+          "params": "start-ssh",
+          "exitmenu": true,
+          "refresh": false,
+          "status": false,
+          "internal": "status Starting PocketJS USB SSH"
+        },
+        {
+          "name": "Stop USB SSH",
+          "action": "./bin/pocketjs.sh",
+          "params": "stop-ssh",
+          "exitmenu": true,
+          "refresh": false,
+          "status": false,
+          "internal": "status Stopping PocketJS USB SSH"
+        },
+        {
+          "name": "Run Runtime",
+          "action": "./bin/pocketjs.sh",
+          "params": "run-runtime",
+          "exitmenu": true,
+          "refresh": false,
+          "status": false,
+          "internal": "status Starting PocketJS runtime"
+        },
+        {
+          "name": "Stop Runtime",
+          "action": "./bin/pocketjs.sh",
+          "params": "stop-runtime",
+          "exitmenu": true,
+          "refresh": false,
+          "status": false,
+          "internal": "status Stopping PocketJS runtime"
+        },
+        {
+          "name": "Write Diagnostics",
+          "action": "./bin/pocketjs.sh",
+          "params": "diagnose",
+          "exitmenu": true,
+          "refresh": false,
+          "status": false,
+          "internal": "status Writing PocketJS diagnostics"
+        }
+      ]
+    }
+  ]
+}

@@ -141,7 +141,13 @@ describe("pocket.json v2 schema", () => {
 
 describe("platform registry", () => {
   test("production advertises only the truthful stock-host profiles", () => {
-    expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
+    expect(Object.keys(POCKET_TARGETS)).toEqual([
+      "psp",
+      "vita",
+      "pocketbook",
+      "kindle-pw5",
+      "macos-widget",
+    ]);
     expect(validatePlatformContractRegistry(POCKET_PLATFORM_CONTRACTS)).toEqual([]);
     expect(POCKET_TARGETS.psp.capabilities).toEqual([
       "input.analog.left",
@@ -175,6 +181,19 @@ describe("platform registry", () => {
       logicalViewports: [[480, 272]],
       presentations: ["integer-fit"],
       rasterDensity: 2,
+    });
+    // The PW5 target owns the exact native-density portrait panel.
+    expect(POCKET_TARGETS["kindle-pw5"]).toEqual({
+      hostAbi: 5,
+      platform: "kindle",
+      form: "takeover",
+      display: {
+        physicalViewport: [1236, 1648],
+        logicalViewports: [[309, 412]],
+        presentations: ["native", "integer-fit"],
+        rasterDensity: 4,
+      },
+      capabilities: ["input.touch", "text.glyphs.baked"],
     });
     // The desktop widget target: dynamic viewport, real pointer/text/IME,
     // runtime glyph baking — and honestly NO nub or synthesized cursor.
@@ -270,6 +289,52 @@ describe("semantic resolution", () => {
     expect(verifyPlanHash(result.plan)).toBe(true);
   });
 
+  test("resolves the PW5 paper-ink plan at exact native density", async () => {
+    const input = await Bun.file(
+      new URL("../apps/paper-ink/pocket.json", import.meta.url),
+    ).json();
+    const result = validateAndResolveBuildPlan(input, { target: "kindle-pw5" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.target).toEqual({ id: "kindle-pw5", hostAbi: 5 });
+    expect(result.plan.viewport).toEqual({
+      logical: [309, 412],
+      physical: [1236, 1648],
+      presentation: "native",
+      rasterDensity: 4,
+    });
+    expect(result.plan.features).toEqual({
+      "input.touch": true,
+      "text.glyphs.baked": true,
+    });
+    expect(verifyPlanHash(result.plan)).toBe(true);
+  });
+
+  test("resolves the shared Hero source through its Kindle portrait manifest", async () => {
+    const input = await Bun.file(
+      new URL("../apps/hero/pocket.kindle.json", import.meta.url),
+    ).json();
+    const result = validateAndResolveBuildPlan(input, { target: "kindle-pw5" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.app).toMatchObject({
+      id: "dev.pocket-stack.hero-kindle",
+      entry: "apps/hero/main.tsx",
+      output: "hero-kindle-main",
+    });
+    expect(result.plan.viewport).toEqual({
+      logical: [309, 412],
+      physical: [1236, 1648],
+      presentation: "native",
+      rasterDensity: 4,
+    });
+    expect(result.plan.features).toEqual({
+      "input.touch": true,
+      "text.glyphs.baked": true,
+    });
+    expect(verifyPlanHash(result.plan)).toBe(true);
+  });
+
   test("desktop-widget capabilities are first-class: PSP admission refuses them", () => {
     // A widget-only app REQUIRES the desktop surface — a PSP plan must be
     // rejected at resolve time, not discovered broken at runtime.
@@ -327,34 +392,34 @@ describe("semantic resolution", () => {
 
   test("every committed demo manifest lands on the expected admission matrix", async () => {
     const { readdirSync, existsSync } = await import("node:fs");
-    // demo -> [psp, vita, macos-widget] admission. Fixed-only console demos
-    // stay off the desktop widget (its profile presents "native" over a
-    // dynamic viewport, not the console integer-fit contract); Hero declares
-    // both policies, while the note is dynamic-only. A new demo missing here
-    // fails the test on purpose.
-    const expected: Record<string, [boolean, boolean, boolean]> = {
-      cafe: [true, true, false],
-      cards: [true, true, false],
-      chrome: [true, true, false],
-      cursor: [true, true, false],
-      gallery: [true, true, false],
-      hero: [true, true, true],
-      "hero-vue-sfc": [true, true, false],
-      "hero-vue-vapor": [true, true, false],
-      im: [true, true, false],
-      "ipod-nano": [false, false, false], // admitted by the package-shaped macos-embedded target
-      launcher: [true, true, false], // the Cover Flow deck (docs/LAUNCHER.md) is an ordinary console app
-      library: [true, true, false],
-      motions: [true, true, false],
-      music: [true, true, false],
-      note: [false, false, true],
-      notifications: [true, true, false],
-      settings: [true, true, false],
-      stats: [true, true, false],
-      "vue-sfc-lab": [true, true, false],
-      zoomlab: [true, true, false],
+    // demo -> [psp, vita, pocketbook, kindle-pw5, macos-widget] admission.
+    // The 480×272 console apps also fit PocketBook's nominal surface; Kindle
+    // intentionally admits only portrait-native manifests. Hero declares a
+    // dynamic variant for the widget, while note is dynamic-only.
+    const expected: Record<string, [boolean, boolean, boolean, boolean, boolean]> = {
+      cafe: [true, true, true, false, false],
+      cards: [true, true, true, false, false],
+      chrome: [true, true, true, false, false],
+      cursor: [true, true, true, false, false],
+      gallery: [true, true, true, false, false],
+      hero: [true, true, true, false, true],
+      "hero-vue-sfc": [true, true, true, false, false],
+      "hero-vue-vapor": [true, true, true, false, false],
+      im: [true, true, true, false, false],
+      "ipod-nano": [false, false, false, false, false], // admitted by the package-shaped macos-embedded target
+      launcher: [true, true, true, false, false], // the Cover Flow deck is an ordinary console app
+      library: [true, true, true, false, false],
+      motions: [true, true, true, false, false],
+      music: [true, true, true, false, false],
+      note: [false, false, false, false, true],
+      notifications: [true, true, true, false, false],
+      "paper-ink": [false, false, false, true, false],
+      settings: [true, true, true, false, false],
+      stats: [true, true, true, false, false],
+      "vue-sfc-lab": [true, true, true, false, false],
+      zoomlab: [true, true, true, false, false],
     };
-    const targets = ["psp", "vita", "macos-widget"] as const;
+    const targets = ["psp", "vita", "pocketbook", "kindle-pw5", "macos-widget"] as const;
     for (const demo of readdirSync(new URL("../apps/", import.meta.url)).sort()) {
       const url = new URL(`../apps/${demo}/pocket.json`, import.meta.url);
       if (!existsSync(url)) continue;
@@ -414,6 +479,8 @@ describe("semantic resolution", () => {
     expect(POCKET_TARGETS.psp.platform).toBe("psp");
     expect(POCKET_TARGETS.psp.form).toBe("takeover");
     expect(POCKET_TARGETS.vita.form).toBe("takeover");
+    expect(POCKET_TARGETS["kindle-pw5"].platform).toBe("kindle");
+    expect(POCKET_TARGETS["kindle-pw5"].form).toBe("takeover");
     expect(POCKET_TARGETS["macos-widget"].platform).toBe("macos");
     expect(POCKET_TARGETS["macos-widget"].form).toBe("widget");
   });

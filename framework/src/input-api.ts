@@ -6,6 +6,7 @@ export {
   cursorX,
   cursorY,
   enableCursor,
+  enableTouchPress,
   focusNode,
   getFocused,
   hitFocusable,

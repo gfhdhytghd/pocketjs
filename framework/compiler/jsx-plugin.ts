@@ -4,7 +4,6 @@ import { transformAsync, type PluginObj } from "@babel/core";
 import type { ParserOptions } from "@babel/parser";
 import solidPreset from "babel-preset-solid";
 import tsPreset from "@babel/preset-typescript"; // untyped - see framework/compiler/ambient.d.ts
-import { transformVueJsxVapor } from "vue-jsx-vapor/api";
 import { existsSync } from "node:fs";
 import { compileVueSfc } from "./vue-sfc-compile.ts";
 import {
@@ -472,6 +471,7 @@ export async function transformFile(
       configFile: false,
       sourceMaps: false,
     });
+    const { transformVueJsxVapor } = await import("vue-jsx-vapor/api");
     const vapor = transformVueJsxVapor(src, path, {}, false, false, false);
     res = await transformAsync(vapor.code, {
       filename: path,

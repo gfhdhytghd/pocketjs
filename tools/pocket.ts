@@ -168,6 +168,26 @@ const targetBackends = {
         `(hosts/pocketbook, cargo zigbuild) and copy both to the device.`,
     );
   },
+  "kindle-pw5": async ({ planPath, projectRoot, outdir, args }) => {
+    await run(
+      [
+        Bun.which("bun") ?? "bun",
+        resolve(frameworkRoot, "tools/kindle.ts"),
+        "build",
+        `--plan=${planPath}`,
+        `--project-root=${projectRoot}`,
+        `--outdir=${outdir}`,
+        "--skip-build",
+        ...args,
+      ],
+      "Kindle backend",
+    );
+  },
+  // `pocket build` is intentionally unavailable for the desktop widget:
+  // that shell has its own `bun widget` entrypoint and dynamic window args.
+  "macos-widget": async () => {
+    throw new Error("PocketJS macos-widget: use `bun widget` to build the desktop shell");
+  },
 } satisfies Record<PocketTargetId, TargetBackend>;
 
 await targetBackends[target as PocketTargetId]({

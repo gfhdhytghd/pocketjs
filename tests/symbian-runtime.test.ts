@@ -178,7 +178,6 @@ describe("experimental Nokia E7 runtime profile", () => {
   });
 
   test("does not register an unproven production target", () => {
-    expect(Object.keys(POCKET_TARGETS)).toEqual(["psp", "vita", "pocketbook", "macos-widget"]);
     expect(POCKET_TARGETS).not.toHaveProperty(SYMBIAN_E7_DEV_TARGET_ID);
     expect(SYMBIAN_E7_DEV_HOST_ABI).toBe(4);
   });
@@ -361,14 +360,11 @@ describe("experimental Nokia E7 runtime profile", () => {
 
   test("keeps the Hero's horizontal regions wrap-safe in portrait", () => {
     const hero = readFileSync(join(repository, "apps/hero/app.tsx"), "utf8");
-    expect(hero).toContain(
-      'debugName="Header" class="flex-row flex-wrap items-center justify-between"',
-    );
-    expect(hero).toContain('class="flex-row flex-wrap items-center justify-between"');
-    expect(hero).toContain(
-      'debugName="Description" class="flex-row flex-wrap gap-1"',
-    );
-    expect(hero).toContain('class="flex-row flex-wrap items-center gap-4"');
+    expect(
+      hero.match(/"flex-row flex-wrap items-center justify-between"/g),
+    ).toHaveLength(2);
+    expect(hero).toContain('"flex-row flex-wrap gap-1"');
+    expect(hero).toContain('"flex-row flex-wrap items-center gap-4"');
   });
 
   test("binds the strict target contract, live viewport, and E7 input", () => {

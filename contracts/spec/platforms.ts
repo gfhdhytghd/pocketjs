@@ -163,6 +163,7 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
   readonly psp: TargetProfile<PocketCapabilityId>;
   readonly vita: TargetProfile<PocketCapabilityId>;
   readonly pocketbook: TargetProfile<PocketCapabilityId>;
+  readonly "kindle-pw5": TargetProfile<PocketCapabilityId>;
   readonly "macos-widget": TargetProfile<PocketCapabilityId>;
 }>({
   psp: {
@@ -222,6 +223,28 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
       rasterDensity: 2,
     },
     capabilities: ["input.buttons", "input.touch", "text.glyphs.baked"],
+  },
+  // Kindle Paperwhite 5 / Signature Edition (Malbec, 2021). The logical
+  // viewport is exactly one quarter of the 1236x1648 panel so the Gray8
+  // software rasterizer can write a native-density portrait surface without
+  // fractional scaling. Both logical axes remain below the touch wire's
+  // 9-bit coordinate ceiling. E-ink waveform selection is a host policy, not
+  // an application capability: apps observe ordinary touch + baked text while
+  // the host coalesces pixel damage and chooses partial/cleanup refreshes.
+  "kindle-pw5": {
+    hostAbi: 5,
+    platform: "kindle",
+    form: "takeover",
+    display: {
+      physicalViewport: [1236, 1648],
+      logicalViewports: [[309, 412]],
+      presentations: ["native", "integer-fit"],
+      rasterDensity: 4,
+    },
+    capabilities: [
+      "input.touch",
+      "text.glyphs.baked",
+    ],
   },
   // The flat pocket-widget shell (examples/note-widget is the stock host):
   // a resizable always-on-top window whose logical viewport IS the window,

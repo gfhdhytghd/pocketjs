@@ -241,6 +241,33 @@ fonts, vectors and core masks at Vita's native 960x544 density. Physical
 controls, left-analog input, and front-panel multi-touch snapshots are supported;
 PSP builds retain their controller-only fallback.
 
+The experimental Kindle Paperwhite 5 host uses a complete Kindle build source
+tree: either a git checkout or an unpacked `@pocketjs/framework` npm tarball
+followed by `bun install --frozen-lockfile` at its root. The published tarball
+includes the Kindle docs, Hero/Paper Ink examples, assets, native host, and
+device tools; the standalone zero-dependency `@pocketjs/cli` is not that source
+tree.
+It renders the 309×412 logical viewport at the panel's native 1236×1648
+resolution, accepts multitouch through evdev, and uses an external FBInk
+executable for bounded DU/A2 partial refresh followed by high-quality cleanup.
+The complete jailbreak, USB SSH, build/deploy/reload, recovery, and real-device
+verification workflow is in [docs/KINDLE.md](docs/KINDLE.md).
+
+```sh
+# One-time host and attached-device setup while /Volumes/Kindle is mounted:
+bun run kindle:setup
+bun run kindle:bootstrap --volume /Volumes/Kindle
+
+# Safely eject the volume, keep the cable attached, start "PocketJS Dev -
+# Start USB SSH" on the Kindle, then configure/check the new USB interface:
+bun run kindle:usbnet --check
+# If the doctor names an unconfigured enN:
+# bun run kindle:usbnet --interface enN
+bun run kindle probe
+bun pocket build --target kindle-pw5 --manifest apps/hero/pocket.kindle.json --project-root .
+bun run kindle dev --plan=.pocket/kindle-pw5/plan.json --skip-build --skip-native
+```
+
 ## The Pocket Launcher (on-device app switching)
 
 One PSP EBOOT or Vita VPK can embed every app admitted by that target plus a
