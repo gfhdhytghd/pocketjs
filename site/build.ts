@@ -30,7 +30,6 @@ import {
 } from "@vue-jsx-vapor/runtime/raw";
 import { OG_IMAGE_URL, SITE_DESC, SITE_TITLE, SITE_URL, renderPage } from "./templates.ts";
 import { BLOG_POSTS, DOC_NAV, type DocSection } from "./nav.ts";
-import { emitSingleLodStagePackage } from "./stage-package.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname; // repo root
 const SITE = ROOT + "site/";
@@ -300,7 +299,6 @@ async function main() {
   await bundle("playground/runtime-vue-vapor-entry.ts", "pg/runtime-vue-vapor.js", { external: ["vue"] });
   await bundle("playground/compiler-entry.ts", "pg/compiler.js", { shims: true, prelude: PROCESS_PRELUDE });
   await bundle("playground/playground.js", "pg/playground.bundle.js");
-  await bundle("assets/pocket-stage-web.js", "assets/pocket-stage-web.js");
 
   // 2. runtime assets
   // Keep the editor-facing URL byte-identical to the schema used by the
@@ -313,35 +311,6 @@ async function main() {
   for (const f of readdirSync(ROOT + "assets/images/")) copy(ROOT + "assets/images/" + f, "demo-assets/" + f);
   copyDemoAssets();
 
-  // Homepage Pocket Stage package: the Pocket Launcher plus every admitted
-  // app (docs/LAUNCHER.md) — the same deck the PSP EBOOT ships, wasm-rendered.
-  // The deploy workflow builds the launcher family first; fail here instead
-  // of silently publishing a shell with a missing screen app when
-  // site/build.ts is run by hand.
-  const registryPath = ROOT + "dist/launcher-registry.json";
-  if (!existsSync(registryPath)) {
-    throw new Error("missing dist/launcher-registry.json — run: bun tools/launcher.ts covers");
-  }
-  const launcherRegistry = JSON.parse(readFileSync(registryPath, "utf8")) as {
-    apps: { output: string; id: string; title: string }[];
-  };
-  const stageApps = ["launcher-main", ...launcherRegistry.apps.map((a) => a.output)];
-  for (const output of stageApps) {
-    const source = ROOT + `dist/packages/${output}.pocket`;
-    if (!existsSync(source)) {
-      throw new Error(`missing dist/packages/${output}.pocket — run: bun tools/launcher.ts pack`);
-    }
-    copy(source, `stage/apps/${output}.pocket`);
-  }
-  write(
-    "stage/apps/apps.json",
-    JSON.stringify({
-      apps: launcherRegistry.apps.map(({ output, id, title }) => ({ output, id, title })),
-    }),
-  );
-  const pspPackage = ROOT + "engine/pocket3d/examples/handheld/assets/dibad-psp/";
-  emitSingleLodStagePackage(pspPackage, OUT + "stage/", "psp-profile.json", "orbit");
-
   // 3. demos manifest
   const demos = demoManifest();
   write("pg/demos.json", JSON.stringify(demos));
@@ -349,16 +318,16 @@ async function main() {
 
   // 4. static assets + Tailwind CSS (compiled AFTER pages exist so the content
   //    scan sees every class; we render pages to a temp first, then compile).
-  for (const asset of ["favicon.svg", "og-image.svg", "og-image.png"]) {
+  for (const asset of ["favicon.svg", "og-image.png"]) {
     if (existsSync(SITE + "assets/" + asset)) copy(SITE + "assets/" + asset, asset);
   }
   // OpenStrike desktop screenshot (referenced by the shipping-openstrike post).
   copy(SITE + "assets/os-dust2.jpg", "assets/os-dust2.jpg");
   // The original hardware capture (embedded by the introducing-pocketjs post).
   copy(SITE + "assets/pocketjs-hardware-demo.mp4", "assets/pocketjs-hardware-demo.mp4");
-  // The hero demo wall + its poster frame (baked by site/bake-demo-wall.ts).
-  copy(SITE + "assets/pocketjs-demo-wall.mp4", "assets/pocketjs-demo-wall.mp4");
-  copy(SITE + "assets/pocketjs-demo-wall.jpg", "assets/pocketjs-demo-wall.jpg");
+  // Short, muted homepage loop and its matching first-paint poster.
+  copy(SITE + "assets/pocketjs-hardware-loop.mp4", "assets/pocketjs-hardware-loop.mp4");
+  copy(SITE + "assets/pocketjs-hardware-loop.jpg", "assets/pocketjs-hardware-loop.jpg");
   // The Pocket Vapor promo film (embedded at the top of the pocket-vapor post;
   // rendered by vapor/scripts/promo/, poster frame lives in assets/blog/).
   copy(SITE + "assets/pocket-vapor-promo.mp4", "assets/pocket-vapor-promo.mp4");
@@ -379,9 +348,8 @@ async function main() {
   }));
   copy(SITE + "assets/screen.css", "assets/screen.css");
 
-  // 6. homepage — bespoke "cinematic" design: its own chrome + home.css +
-  //    home.js (the baked demo wall + lazy Pocket Stage). Not wrapped in the shared
-  //    header/footer (those stay for docs + playground).
+  // 6. homepage — bespoke design with its own chrome, CSS and interactions.
+  //    It is not wrapped in the shared header/footer used by docs and playground.
   write("index.html", renderHome());
   copy(SITE + "assets/home.css", "assets/home.css");
   await bundle("assets/home.js", "assets/home.js");
@@ -414,7 +382,7 @@ async function main() {
   console.log("pocketjs.dev build: done -> site/dist/");
 }
 
-// The homepage is a standalone document (cinematic design owns its own header +
+// The homepage is a standalone document (its design owns its own header +
 // footer + CSS). site/home.html holds the body; site/assets/home.css the styles.
 const HOME_DESC = SITE_DESC;
 function renderHome(): string {
@@ -427,7 +395,6 @@ function renderHome(): string {
     url: SITE_URL,
     codeRepository: "https://github.com/pocket-stack/pocketjs",
     programmingLanguage: ["TypeScript", "JavaScript", "Rust"],
-    runtimePlatform: ["Sony PSP", "Sony PS Vita", "PPSSPP", "Vita3K", "WebAssembly", "Bun"],
   });
   return `<!doctype html>
 <html lang="en">
@@ -446,12 +413,12 @@ function renderHome(): string {
 <meta property="og:image" content="${OG_IMAGE_URL}">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="PocketJS — Bare Metal Modern Web">
+<meta property="og:image:alt" content="PocketJS — Build modern apps for impossible devices">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${SITE_TITLE}">
 <meta name="twitter:description" content="${HOME_DESC}">
 <meta name="twitter:image" content="${OG_IMAGE_URL}">
-<meta name="theme-color" content="#05070d">
+<meta name="theme-color" content="#101412">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/home.css">
 <script type="application/ld+json">${jsonLd}</script>

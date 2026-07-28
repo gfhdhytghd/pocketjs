@@ -7,9 +7,9 @@ const GH = "https://github.com/pocket-stack/pocketjs";
 const DISCORD = "https://discord.gg/cTce4eXzSK";
 const X_URL = "https://x.com/pocket_js";
 export const SITE_URL = "https://pocketjs.dev";
-export const SITE_TITLE = "PocketJS — Bare Metal Modern Web";
+export const SITE_TITLE = "PocketJS — Modern apps for impossible devices";
 export const SITE_DESC =
-  "High-performance JSX UI outside the browser, with native rendering, standard Vue Vapor and Solid support, a Tailwind design system, and 60 FPS animation under an 8 MB memory budget.";
+  "Build for consoles, e-readers, embedded boards and desktops. Run Vue Vapor or Solid in a tiny JavaScript guest, or compile a strict Vue Vapor subset to native code.";
 export const OG_IMAGE_URL = `${SITE_URL}/og-image.png`;
 
 export interface PageOpts {
@@ -69,7 +69,7 @@ const footer = `<footer class="mt-24 border-t border-line/70 bg-ink-2/60">
     <div class="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
       <div>
         <div class="flex items-center gap-2 font-semibold text-slate-100">${LOGO}<span>PocketJS</span></div>
-        <p class="mt-3 max-w-xs text-sm text-slate-400">Vue Vapor and Solid UI under 8 MB RAM, rendered through a tiny native core.</p>
+        <p class="mt-3 max-w-xs text-sm text-slate-400">Modern application models for consoles, e-readers, embedded boards and native desktop surfaces.</p>
       </div>
       <div class="text-sm">
         <h4 class="mb-3 font-semibold text-slate-200">Docs</h4>
@@ -119,7 +119,6 @@ export function renderPage(o: PageOpts): string {
     url: SITE_URL,
     codeRepository: GH,
     programmingLanguage: ["TypeScript", "JavaScript", "Rust"],
-    runtimePlatform: ["Sony PSP", "PPSSPP", "WebAssembly", "Bun"],
   });
   return `<!doctype html>
 <html lang="en">
@@ -138,7 +137,7 @@ export function renderPage(o: PageOpts): string {
 <meta property="og:image" content="${OG_IMAGE_URL}">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="PocketJS — Bare Metal Modern Web">
+<meta property="og:image:alt" content="PocketJS — Build modern apps for impossible devices">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${fullTitle}">
 <meta name="twitter:description" content="${desc}">

@@ -1,8 +1,12 @@
 // site/verify.ts — headless-Chrome verifier over the DevTools Protocol.
 //   bun site/verify.ts <url> [waitMs] [probeExpr]
 // Loads <url> in headless Chrome, hooks page errors, waits, evaluates a probe
-// expression (default: canvas non-black pixel ratio + status/error text), saves
-// a screenshot, and prints a JSON report. Local verification only.
+// expression (default: homepage structure, media, and overflow checks), saves a
+// screenshot, and prints a JSON report. Local verification only.
+
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const url = process.argv[2] ?? "http://127.0.0.1:8140/";
@@ -10,36 +14,35 @@ const waitMs = Number(process.argv[3] ?? 4000);
 const probe =
   process.argv[4] ??
   `(() => {
-     // FPS + memory are drawn IN the canvas now (hosts/web/hud.js), not in the
-     // DOM — so they show up in the canvas pixel stats below, not a text probe.
-     const out = { status: null, error: null, canvases: [] };
-     const s = document.querySelector('#pg-status'); if (s) out.status = s.textContent;
-     const e = document.querySelector('#pg-error'); if (e && !e.hidden) out.error = e.textContent;
-     for (const c of document.querySelectorAll('canvas')) {
-       try {
-         const ctx = c.getContext('2d');
-         const d = ctx.getImageData(0,0,c.width,c.height).data;
-         let nonblack = 0, colored = 0;
-         for (let i=0;i<d.length;i+=4){ const r=d[i],g=d[i+1],b=d[i+2];
-           if (r+g+b>24) nonblack++; if (Math.abs(r-g)+Math.abs(g-b)>40) colored++; }
-         const px = d.length/4;
-         out.canvases.push({ id:c.id, w:c.width, h:c.height,
-           nonblackPct:+(100*nonblack/px).toFixed(1), coloredPct:+(100*colored/px).toFixed(1) });
-       } catch(err){ out.canvases.push({ id:c.id, err:String(err) }); }
-     }
-     return out;
+     const visible = (element) => !!element && !element.hidden && element.getClientRects().length > 0;
+     const hero = document.querySelector('.lp-hero h1');
+     const brokenImages = [...document.images]
+       .filter((image) => image.complete && image.naturalWidth === 0)
+       .map((image) => image.currentSrc || image.src);
+     const failedVideos = [...document.querySelectorAll('video')]
+       .filter((video) => video.error)
+       .map((video) => video.currentSrc || video.querySelector('source')?.src);
+     return {
+       title: document.title,
+       heroHeading: hero?.textContent?.replace(/\\s+/g, ' ').trim() ?? null,
+       heroVisible: visible(hero),
+       activeDevicePanels: [...document.querySelectorAll('[data-device-panel]')].filter(visible).length,
+       activeTargetPanels: [...document.querySelectorAll('[data-target-panel]')].filter(visible).length,
+       menuControl: !!document.querySelector('[data-menu-toggle]'),
+       horizontalOverflow: document.documentElement.scrollWidth > window.innerWidth,
+       brokenImages,
+       failedVideos,
+     };
    })()`;
 
-const SHOT = process.env.SHOT ?? "/private/tmp/claude-501/-Users-evan-code-pocketjs/92a09046-b511-4ab3-a360-0de941219d40/scratchpad/shot.png";
+const SHOT = process.env.SHOT ?? "/tmp/pocketjs-site-verify.png";
 
-// --- launch chrome with a debugging port -----------------------------------
-const port = 9333;
+// --- launch an isolated Chrome debugging session ----------------------------
+const profileDir = mkdtempSync(join(tmpdir(), "pocketjs-verify-"));
 const proc = Bun.spawn(
-  // Recent Chrome only opens the debugging port with a dedicated profile dir,
-  // and the Pocket Stage hero needs WebGL — SwiftShader instead of --disable-gpu.
-  [CHROME, "--headless=old", `--remote-debugging-port=${port}`, `--user-data-dir=/tmp/pocketjs-verify-profile`, "--no-first-run", "--no-default-browser-check",
-    "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--hide-scrollbars", "--window-size=1400,1600", "--force-device-scale-factor=1", "about:blank"],
+  [CHROME, "--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profileDir}`, "--no-first-run", "--no-default-browser-check",
+    "--no-sandbox", "--hide-scrollbars", "--window-size=1400,1600",
+    "--force-device-scale-factor=1", "about:blank"],
   { stdout: "ignore", stderr: "ignore" },
 );
 
@@ -54,7 +57,15 @@ async function waitFor(fn: () => Promise<any>, tries = 40, gap = 100) {
   throw new Error("timed out waiting for chrome");
 }
 
-const version = await waitFor(() => fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json()));
+let port = 0;
+const version = await waitFor(async () => {
+  const [activePort] = readFileSync(join(profileDir, "DevToolsActivePort"), "utf8").trim().split(/\r?\n/);
+  port = Number(activePort);
+  if (!Number.isInteger(port) || port <= 0) throw new Error("invalid Chrome debugging port");
+  const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+  if (!response.ok) throw new Error(`Chrome debugging endpoint returned ${response.status}`);
+  return response.json();
+});
 const wsUrl = version.webSocketDebuggerUrl as string;
 const ws = new WebSocket(wsUrl);
 await new Promise((res, rej) => {
@@ -80,10 +91,10 @@ function send(method: string, params: any = {}, sessionId?: string): Promise<any
   return new Promise((res) => pending.set(id, res));
 }
 
-// attach to a page target
-const { targetInfos } = await send("Target.getTargets");
-let pageTarget = targetInfos.find((t: any) => t.type === "page");
-const { sessionId } = await send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true });
+// Create and attach to the page owned by this verifier invocation.
+const { targetId } = await send("Target.createTarget", { url: "about:blank" });
+if (!targetId) throw new Error("Chrome did not create a verifier page target");
+const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
 const S = (method: string, params?: any) => send(method, params, sessionId);
 
 const pageErrors: string[] = [];
@@ -135,5 +146,8 @@ console.log(
   ),
 );
 
+await send("Target.closeTarget", { targetId });
 ws.close();
 proc.kill();
+await proc.exited;
+rmSync(profileDir, { recursive: true, force: true });

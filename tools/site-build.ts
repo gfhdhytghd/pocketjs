@@ -30,11 +30,6 @@ async function run(...args: string[]) {
 }
 
 await run("tools/wasm.ts");
-// The homepage stage ships the Pocket Launcher + every admitted app as
-// `.pocket` packages (docs/LAUNCHER.md + docs/PLATFORM.md): registry scan, per-app
-// bundles, deterministic sim-rendered covers, the launcher bundle, then
-// the packages the stage serves.
-await run("tools/launcher.ts", "pack");
 // Restore the site's canonical hero table for the generic browser runtime.
 await run("tools/build.ts", "hero");
 await run("site/build.ts");

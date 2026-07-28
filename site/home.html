@@ -1,422 +1,600 @@
+<a class="lp-skip" href="#main-content">Skip to content</a>
+
 <div class="lp">
-  <header class="lp-nav">
-    <div class="lp-container lp-nav__in">
+  <header class="lp-nav" data-nav>
+    <div class="lp-container lp-nav__inner">
       <a class="lp-brand" href="/" aria-label="PocketJS home">
         <svg viewBox="0 0 32 32" aria-hidden="true">
           <defs>
-            <linearGradient id="lp-pgn-edge" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#eef6ff"/><stop offset="0.38" stop-color="#b7c8e2"/><stop offset="0.58" stop-color="#7487a0"/><stop offset="0.78" stop-color="#aec0d6"/><stop offset="1" stop-color="#dbe8f6"/></linearGradient>
-            <linearGradient id="lp-pgn-lens" x1="7" y1="13" x2="13" y2="19" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e4edf8"/><stop offset="0.55" stop-color="#a7b8cf"/><stop offset="1" stop-color="#53677f"/></linearGradient>
-            <linearGradient id="lp-pgn-bar" x1="16" y1="12" x2="24" y2="20" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#d7e3f1"/><stop offset="1" stop-color="#71849d"/></linearGradient>
+            <linearGradient id="lp-logo-edge" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#f7fbff"/>
+              <stop offset="0.38" stop-color="#b7c8e2"/>
+              <stop offset="0.58" stop-color="#7487a0"/>
+              <stop offset="0.78" stop-color="#aec0d6"/>
+              <stop offset="1" stop-color="#dbe8f6"/>
+            </linearGradient>
+            <linearGradient id="lp-logo-lens" x1="7" y1="13" x2="13" y2="19" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#e4edf8"/>
+              <stop offset="0.55" stop-color="#a7b8cf"/>
+              <stop offset="1" stop-color="#53677f"/>
+            </linearGradient>
           </defs>
-          <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="url(#lp-pgn-edge)" stroke-width="2.6" stroke-linejoin="round"/>
-          <circle cx="10" cy="16" r="3.1" fill="url(#lp-pgn-lens)"/>
-          <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="url(#lp-pgn-bar)"/>
-          <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="url(#lp-pgn-bar)"/>
+          <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="url(#lp-logo-edge)" stroke-width="2.6"/>
+          <circle cx="10" cy="16" r="3.1" fill="url(#lp-logo-lens)"/>
+          <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="#a9b7ca"/>
+          <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="#7f90a8"/>
         </svg>
         <span>PocketJS</span>
       </a>
-      <nav class="lp-nav__links" aria-label="Primary">
-        <a class="lp-nav__link" href="/docs/overview/">Docs</a>
-        <a class="lp-nav__link" href="/playground/">Playground</a>
-        <a class="lp-nav__link" href="/blog/">Blog</a>
-        <a class="lp-nav__link lp-nav__optional" href="/changelog/">Changelog</a>
-        <a class="lp-nav__link lp-nav__gh" href="https://github.com/pocket-stack/pocketjs" target="_blank" rel="noreferrer" aria-label="PocketJS on GitHub">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.7 18 5 18 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-        </a>
-        <a class="lp-nav__link lp-nav__discord" href="https://discord.gg/cTce4eXzSK" target="_blank" rel="noreferrer" aria-label="PocketJS Discord">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19.54 5.34A17.75 17.75 0 0 0 15.07 4c-.19.35-.41.82-.56 1.19a16.5 16.5 0 0 0-5.02 0A12.1 12.1 0 0 0 8.92 4c-1.55.27-3.06.73-4.47 1.34C1.62 9.54.86 13.64 1.24 17.68A17.9 17.9 0 0 0 6.72 20.4c.44-.59.83-1.22 1.16-1.89-.64-.24-1.25-.54-1.83-.89.15-.11.3-.23.44-.35a12.68 12.68 0 0 0 11.02 0c.15.12.29.24.44.35-.58.35-1.2.65-1.84.89.34.67.72 1.3 1.16 1.89a17.85 17.85 0 0 0 5.49-2.72c.45-4.69-.75-8.75-3.22-12.34ZM8.7 15.19c-1.07 0-1.95-.98-1.95-2.18s.86-2.18 1.95-2.18c1.08 0 1.96.98 1.95 2.18 0 1.2-.87 2.18-1.95 2.18Zm6.6 0c-1.07 0-1.95-.98-1.95-2.18s.86-2.18 1.95-2.18c1.08 0 1.96.98 1.95 2.18 0 1.2-.87 2.18-1.95 2.18Z"/></svg>
-        </a>
-        <a class="lp-nav__link lp-nav__x" href="https://x.com/pocket_js" target="_blank" rel="noreferrer" aria-label="PocketJS on X">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+
+      <button class="lp-menu" type="button" aria-expanded="false" aria-controls="lp-primary-nav" data-menu-toggle>
+        <span>Menu</span>
+        <span class="lp-menu__lines" aria-hidden="true"></span>
+      </button>
+
+      <nav class="lp-nav__links" id="lp-primary-nav" aria-label="Primary" data-menu-panel>
+        <a href="#execution">Execution</a>
+        <a href="#devices">Devices</a>
+        <a href="#platform">Platform</a>
+        <a href="/docs/overview/">Docs</a>
+        <a href="/blog/">Blog</a>
+        <a class="lp-nav__github" href="https://github.com/pocket-stack/pocketjs" target="_blank" rel="noreferrer">
+          GitHub <span aria-hidden="true">↗</span>
         </a>
       </nav>
     </div>
   </header>
 
-  <main>
-    <!-- HERO — behind the copy, every demo and satellite app plays at once:
-         a baked 4x4 wall of real recordings (site/bake-demo-wall.ts). -->
+  <main id="main-content">
     <section class="lp-hero">
-      <div class="lp-hero__wall" aria-hidden="true">
-        <video class="lp-hero__wall-video" autoplay muted loop playsinline preload="metadata" poster="/assets/pocketjs-demo-wall.jpg">
-          <source src="/assets/pocketjs-demo-wall.mp4" type="video/mp4" />
-        </video>
-        <div class="lp-hero__wall-scrim"></div>
-      </div>
-      <div class="lp-container lp-hero__in">
-        <a class="lp-eyebrow" href="/blog/pocketjs-on-symbian/">
-          <span class="lp-eyebrow__tag">New</span>
-          Symbian Wanted a Frame Function: PocketJS on a Nokia E7
-          <span class="lp-eyebrow__arw" aria-hidden="true">&rarr;</span>
-        </a>
-        <h1 class="lp-h1">Bare Metal<span class="lp-grad">Modern Web</span></h1>
-        <p class="lp-sub">
-          High-performance JSX UI outside the browser, with native rendering,
-          standard Vue Vapor and Solid support, a Tailwind design system, and
-          60 FPS animation under an 8 MB memory budget.
-        </p>
-        <div class="lp-hero__cta">
-          <a class="lp-btn lp-btn--primary" href="/docs/getting-started/">Get started</a>
-          <a class="lp-btn lp-btn--ghost" href="https://github.com/pocket-stack/pocketjs" target="_blank" rel="noreferrer">
-            Star on GitHub
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.8 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.7 18 5 18 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.5-2.7 5.5-5.3 5.8.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
-          </a>
-        </div>
-        <figure class="lp-stage" data-pocket-stage>
-          <div class="lp-stage__viewport" data-stage-viewport>
-            <canvas class="lp-stage__canvas" data-stage-canvas aria-label="Interactive 3D PSP running the Pocket Launcher. Drag to rotate, swipe sideways with two fingers to turn, and click the device controls — SELECT summons the app switcher."></canvas>
-            <canvas class="lp-stage__screen" data-stage-screen aria-hidden="true"></canvas>
-            <div class="lp-stage__status" data-stage-status role="status" aria-live="polite">
-              <span class="lp-stage__status-dot" aria-hidden="true"></span>
-              Loading Pocket Stage&hellip;
-            </div>
-          </div>
-          <figcaption class="lp-stage__caption">
-            <span><strong>The live Pocket Launcher</strong> inside the model&rsquo;s real screen material &mdash; browse the deck, launch any app, SELECT to switch.</span>
-            <span class="lp-stage__credit">
-              PSP model by <a href="https://sketchfab.com/3d-models/playstation-portable-psp-eg02-b76c7f9158204a39929a9c97d0b813d0" target="_blank" rel="noreferrer">Dibad</a>
-              &middot; <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>
-            </span>
-          </figcaption>
-        </figure>
-      </div>
-    </section>
-
-    <!-- 8MB RAM -->
-    <section class="lp-section lp-hardware">
-      <div class="lp-container">
-        <div class="lp-secthead lp-reveal">
-          <span class="lp-kicker">Familiar tools, constrained hardware</span>
-          <h2 class="lp-h2">Tailwind, flexbox, Solid and Vue Vapor under 8MB RAM.</h2>
-          <p class="lp-lead">PocketJS keeps the authoring model modern while moving the expensive work to build time and to a tiny Rust core. The result is a real interface stack that can run smoothly on a Sony PSP.</p>
-        </div>
-        <div class="lp-tools__row lp-reveal" aria-label="PocketJS frontend stack">
-          <span class="lp-tool" aria-label="Solid">
-            <svg width="32" height="30" viewBox="0 0 76 70.7" aria-hidden="true">
-              <defs>
-                <linearGradient id="lp-solid-a" x1="11.67" y1="73.36" x2="70.61" y2="44.72" gradientTransform="matrix(1,0,0,-1,0,73.4)" gradientUnits="userSpaceOnUse"><stop offset="0.1" stop-color="#76b3e1"/><stop offset="0.3" stop-color="#dcf2fd"/><stop offset="1" stop-color="#76b3e1"/></linearGradient>
-                <linearGradient id="lp-solid-b" x1="44" y1="59.33" x2="33.68" y2="24.96" gradientTransform="matrix(1,0,0,-1,0,73.4)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#76b3e1"/><stop offset="0.5" stop-color="#4377bb"/><stop offset="1" stop-color="#1f3b77"/></linearGradient>
-                <linearGradient id="lp-solid-c" x1="7.34" y1="44.34" x2="66.94" y2="3.82" gradientTransform="matrix(1,0,0,-1,0,73.4)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#315aa9"/><stop offset="0.5" stop-color="#518ac8"/><stop offset="1" stop-color="#315aa9"/></linearGradient>
-                <linearGradient id="lp-solid-d" x1="34.25" y1="39.49" x2="10.2" y2="-48.7" gradientTransform="matrix(1,0,0,-1,0,73.4)" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4377bb"/><stop offset="0.5" stop-color="#1a336b"/><stop offset="1" stop-color="#1a336b"/></linearGradient>
-              </defs>
-              <path fill="#76b3e1" d="M75.81,15.35S50.86-3.49,31.5.91l-1.7.47A12.35,12.35,0,0,0,23.22,6a11.18,11.18,0,0,0-.71,1.18L15.36,19.33l12.35,2.41A22,22,0,0,0,45.32,25.2l22,4.3Z"/>
-              <path fill="url(#lp-solid-a)" opacity=".3" d="M75.81,15.35S50.86-3.49,31.5.91l-1.7.47A12.35,12.35,0,0,0,23.22,6a11.18,11.18,0,0,0-.71,1.18L15.36,19.33l12.35,2.41A22,22,0,0,0,45.32,25.2l22,4.3Z"/>
-              <path fill="#518ac8" d="M23,15.11l-1.71.48c-7.9,2.55-10.6,9.94-6.06,16.42a21.12,21.12,0,0,0,22.54,7.1L67.29,29.5S42.39,10.71,23,15.11Z"/>
-              <path fill="url(#lp-solid-b)" opacity=".3" d="M23,15.11l-1.71.48c-7.9,2.55-10.6,9.94-6.06,16.42a21.12,21.12,0,0,0,22.54,7.1L67.29,29.5S42.39,10.71,23,15.11Z"/>
-              <path fill="url(#lp-solid-c)" d="M61.89,36.42a21.11,21.11,0,0,0-22.58-7.15L9.82,38.83.54,55.35l52.83,9,9.47-16.85C64.73,44.27,64.54,40.2,61.89,36.42Z"/>
-              <path fill="url(#lp-solid-d)" d="M52.61,52.94a21.14,21.14,0,0,0-22.53-7.15L.54,55.35s25,18.84,44.31,14.44l1.7-.47C54.46,66.81,57.16,59.42,52.61,52.94Z"/>
-            </svg>
-          </span>
-          <span class="lp-tool" aria-label="Vue Vapor">
-            <svg width="32" height="28" viewBox="0 0 256 221" aria-hidden="true">
-              <path fill="#41b883" d="M204.8 0H256L128 220.8 0 0h97.9L128 51.2 157.2 0h47.6z"/>
-              <path fill="#35495e" d="M157.2 0 128 51.2 97.9 0H48.6L128 137.6 207.4 0h-50.2z"/>
-            </svg>
-          </span>
-          <span class="lp-tool" aria-label="JSX">
-            <svg width="30" height="27" viewBox="-11.5 -10.23 23 20.46" aria-hidden="true"><circle r="2.05" fill="#61dafb"/><g fill="none" stroke="#61dafb" stroke-width="1"><ellipse rx="11" ry="4.2"/><ellipse rx="11" ry="4.2" transform="rotate(60)"/><ellipse rx="11" ry="4.2" transform="rotate(120)"/></g></svg>
-          </span>
-          <span class="lp-tool" aria-label="Tailwind CSS">
-            <svg width="34" height="21" viewBox="0 0 54 33" aria-hidden="true"><path fill="#38bdf8" fill-rule="evenodd" clip-rule="evenodd" d="M27 0c-7.2 0-11.7 3.6-13.5 10.8 2.7-3.6 5.85-4.95 9.45-4.05 2.054.513 3.522 2.004 5.147 3.653C30.744 13.09 33.808 16.2 40.5 16.2c7.2 0 11.7-3.6 13.5-10.8-2.7 3.6-5.85 4.95-9.45 4.05-2.054-.513-3.522-2.004-5.147-3.653C36.756 3.11 33.692 0 27 0zM13.5 16.2C6.3 16.2 1.8 19.8 0 27c2.7-3.6 5.85-4.95 9.45-4.05 2.054.514 3.522 2.004 5.147 3.653C17.244 29.29 20.308 32.4 27 32.4c7.2 0 11.7-3.6 13.5-10.8-2.7 3.6-5.85 4.95-9.45 4.05-2.054-.513-3.522-2.004-5.147-3.653C23.256 19.31 20.192 16.2 13.5 16.2z"/></svg>
-          </span>
-          <span class="lp-tool" aria-label="TypeScript">
-            <svg width="27" height="27" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="5" fill="#3178c6"/><text x="16.5" y="22.5" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="700" fill="#fff" text-anchor="middle">TS</text></svg>
-          </span>
-        </div>
-        <div class="lp-proof-grid">
-          <div class="lp-proof lp-reveal">
-            <h3>Flexbox is native</h3>
-            <p>Layout runs in the Rust core through taffy, so a familiar <span class="lp-mono">flex-col gap-4</span> interface lays out deterministically on PSP, browser and Bun.</p>
-          </div>
-          <div class="lp-proof lp-reveal">
-            <h3>Tailwind compiles away</h3>
-            <p>Class literals become compact style records at build time. There is no CSS parser, stylesheet cascade or utility runtime on the device.</p>
-          </div>
-          <div class="lp-proof lp-reveal">
-            <h3>Text is still sharp</h3>
-            <p>Inter glyphs are baked into coverage atlases and rendered with sub-pixel positioning, so tiny PSP screens still get readable UI text.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- CODE SAMPLE -->
-    <section class="lp-section" style="padding-top: clamp(2rem, 5vw, 3.5rem);">
-      <div class="lp-container">
-        <div class="lp-split">
-          <div class="lp-split__copy lp-reveal">
-            <span class="lp-kicker">Business logic stays intact</span>
-            <h2 class="lp-h2">Native framework imports on a tiny machine.</h2>
-            <p>Write Solid or Vue Vapor components with their own reactivity APIs, run them on QuickJS, and let PocketJS handle the native pixels.</p>
-            <ul class="lp-checklist">
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>
-                <span><span class="lp-mono">focusable</span> and <span class="lp-mono">onPress</span> map to PSP controls.</span>
-              </li>
-              <li>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>
-                <span><span class="lp-mono">focus:</span> variants and packed assets become native data in the <span class="lp-mono">.pak</span>.</span>
-              </li>
-            </ul>
-            <a class="lp-btn lp-btn--primary" href="/playground/">
-              Open the playground
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      <div class="lp-hero__grid" aria-hidden="true"></div>
+      <div class="lp-container lp-hero__inner">
+        <div class="lp-hero__copy">
+          <p class="lp-overline">
+            <span class="lp-status-dot" aria-hidden="true"></span>
+            Open source / PocketJS 0.7
+          </p>
+          <h1>Build modern apps <span>for impossible devices.</span></h1>
+          <p class="lp-hero__lede">
+            Build for consoles, e-readers, embedded boards and desktops. Run Vue Vapor or Solid in a tiny
+            JavaScript guest—or compile a strict Vue Vapor TypeScript and JSX subset to native code with Pocket Vapor.
+          </p>
+          <div class="lp-actions">
+            <a class="lp-button lp-button--solid" href="/docs/getting-started/">
+              Get started <span aria-hidden="true">→</span>
             </a>
+            <a class="lp-button lp-button--ghost" href="#devices">Explore the devices</a>
           </div>
-          <div class="lp-codecard lp-reveal">
-            <div class="lp-codecard__bar">
-              <span class="lp-dot" aria-hidden="true"></span><span class="lp-dot" aria-hidden="true"></span><span class="lp-dot" aria-hidden="true"></span>
-              <span class="lp-codecard__name">Counter.tsx</span>
-              <div class="lp-code-tabs" role="tablist" aria-label="Counter framework">
-                <button class="lp-code-tab is-active" type="button" role="tab" id="lp-code-tab-solid" aria-selected="true" aria-controls="lp-code-solid" data-code-tab="solid">Solid</button>
-                <button class="lp-code-tab" type="button" role="tab" id="lp-code-tab-vue" aria-selected="false" aria-controls="lp-code-vue" data-code-tab="vue">Vue Vapor</button>
-              </div>
-            </div>
-            <pre class="lp-code" id="lp-code-solid" role="tabpanel" aria-labelledby="lp-code-tab-solid" data-code-panel="solid"><code><span class="lp-k">import</span> { <span class="lp-t">Text</span>, <span class="lp-t">View</span> } <span class="lp-k">from</span> <span class="lp-s">"@pocketjs/framework/components"</span>;
-<span class="lp-k">import</span> { <span class="lp-f">createSignal</span> } <span class="lp-k">from</span> <span class="lp-s">"solid-js"</span>;
-
-<span class="lp-k">export</span> <span class="lp-k">default</span> <span class="lp-k">function</span> <span class="lp-t">Counter</span>() {
-  <span class="lp-k">const</span> [n, setN] = <span class="lp-f">createSignal</span>(<span class="lp-n">0</span>);
-  <span class="lp-k">return</span> (
-    <span class="lp-code-mut">&lt;</span><span class="lp-t">View</span> <span class="lp-a">class</span>=<span class="lp-s">"flex-col items-center gap-4 p-6 bg-slate-950"</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;</span><span class="lp-t">Text</span> <span class="lp-a">class</span>=<span class="lp-s">"text-2xl text-slate-50 font-bold"</span><span class="lp-code-mut">&gt;</span>Count: {<span class="lp-f">n</span>()}<span class="lp-code-mut">&lt;/</span><span class="lp-t">Text</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;</span><span class="lp-t">View</span> <span class="lp-a">class</span>=<span class="lp-s">"px-4 py-2 rounded-xl bg-slate-700 focus:bg-slate-500"</span> <span class="lp-a">focusable</span> <span class="lp-a">onPress</span>={() =&gt; <span class="lp-f">setN</span>(<span class="lp-f">n</span>() + <span class="lp-n">1</span>)}<span class="lp-code-mut">&gt;</span>
-        <span class="lp-code-mut">&lt;</span><span class="lp-t">Text</span> <span class="lp-a">class</span>=<span class="lp-s">"text-base text-slate-50 font-bold"</span><span class="lp-code-mut">&gt;</span>Press Circle<span class="lp-code-mut">&lt;/</span><span class="lp-t">Text</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;/</span><span class="lp-t">View</span><span class="lp-code-mut">&gt;</span>
-    <span class="lp-code-mut">&lt;/</span><span class="lp-t">View</span><span class="lp-code-mut">&gt;</span>
-  );
-}</code></pre>
-            <pre class="lp-code" id="lp-code-vue" role="tabpanel" aria-labelledby="lp-code-tab-vue" data-code-panel="vue" hidden><code><span class="lp-k">import</span> { <span class="lp-t">Text</span>, <span class="lp-t">View</span> } <span class="lp-k">from</span> <span class="lp-s">"@pocketjs/framework/vue-vapor/components"</span>;
-<span class="lp-k">import</span> { <span class="lp-f">ref</span> } <span class="lp-k">from</span> <span class="lp-s">"vue"</span>;
-
-<span class="lp-k">export</span> <span class="lp-k">default</span> <span class="lp-k">function</span> <span class="lp-t">Counter</span>() {
-  <span class="lp-k">const</span> n = <span class="lp-f">ref</span>(<span class="lp-n">0</span>);
-  <span class="lp-k">return</span> (
-    <span class="lp-code-mut">&lt;</span><span class="lp-t">View</span> <span class="lp-a">class</span>=<span class="lp-s">"flex-col items-center gap-4 p-6 bg-slate-950"</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;</span><span class="lp-t">Text</span> <span class="lp-a">class</span>=<span class="lp-s">"text-2xl text-slate-50 font-bold"</span><span class="lp-code-mut">&gt;</span>Count: {n.value}<span class="lp-code-mut">&lt;/</span><span class="lp-t">Text</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;</span><span class="lp-t">View</span> <span class="lp-a">class</span>=<span class="lp-s">"px-4 py-2 rounded-xl bg-slate-700 focus:bg-slate-500"</span> <span class="lp-a">focusable</span> <span class="lp-a">onPress</span>={() =&gt; n.value++}<span class="lp-code-mut">&gt;</span>
-        <span class="lp-code-mut">&lt;</span><span class="lp-t">Text</span> <span class="lp-a">class</span>=<span class="lp-s">"text-base text-slate-50 font-bold"</span><span class="lp-code-mut">&gt;</span>Press Circle<span class="lp-code-mut">&lt;/</span><span class="lp-t">Text</span><span class="lp-code-mut">&gt;</span>
-      <span class="lp-code-mut">&lt;/</span><span class="lp-t">View</span><span class="lp-code-mut">&gt;</span>
-    <span class="lp-code-mut">&lt;/</span><span class="lp-t">View</span><span class="lp-code-mut">&gt;</span>
-  );
-}</code></pre>
+          <div class="lp-stack" aria-label="Supported authoring tools">
+            <span>Vue Vapor</span>
+            <span>Solid</span>
+            <span>TypeScript</span>
+            <span>Tailwind</span>
           </div>
+        </div>
+
+        <div class="lp-deck" data-device-deck>
+          <div class="lp-deck__topline">
+            <span>Target feed</span>
+            <span class="lp-deck__meta">
+              <button type="button" aria-pressed="false" data-deck-toggle>Pause</button>
+              <b data-deck-index>01</b> / 04
+            </span>
+          </div>
+
+          <div class="lp-deck__viewport">
+            <figure class="lp-deck__panel is-active" id="lp-device-psp" role="tabpanel" aria-labelledby="lp-device-tab-psp" tabindex="0" data-device-panel="0">
+              <video muted loop playsinline preload="metadata" poster="/assets/pocketjs-hardware-loop.jpg" width="1280" height="684">
+                <source src="/assets/pocketjs-hardware-loop.mp4" type="video/mp4">
+              </video>
+              <figcaption>
+                <span class="lp-deck__eyebrow">PSP / Guest</span>
+                <strong>PocketJS apps on real hardware</strong>
+                <span>333 MHz · 480 × 272 · QuickJS + native core</span>
+              </figcaption>
+            </figure>
+
+            <figure class="lp-deck__panel" id="lp-device-e7" role="tabpanel" aria-labelledby="lp-device-tab-e7" tabindex="0" data-device-panel="1" hidden>
+              <img src="/assets/blog/symbian-e7-launcher.png" alt="Pocket Launcher rendered for the Nokia E7 landscape target" width="640" height="360" loading="lazy" decoding="async">
+              <figcaption>
+                <span class="lp-deck__eyebrow">Nokia E7 / Experimental guest</span>
+                <strong>Modern application switching on Symbian</strong>
+                <span>640 × 360 · physical keyboard · native GLES2</span>
+              </figcaption>
+            </figure>
+
+            <figure class="lp-deck__panel lp-deck__panel--lime" id="lp-device-gba" role="tabpanel" aria-labelledby="lp-device-tab-gba" tabindex="0" data-device-panel="2" hidden>
+              <img src="/assets/blog/vapor-gba-boot.png" alt="Pocket Vapor Todo running in a Game Boy Advance emulator" width="720" height="480" loading="lazy" decoding="async">
+              <figcaption>
+                <span class="lp-deck__eyebrow">Game Boy Advance / AOT</span>
+                <strong>A strict Vue Vapor component. Zero JavaScript at runtime.</strong>
+                <span>No engine · no GC · no allocator</span>
+              </figcaption>
+            </figure>
+
+            <figure class="lp-deck__panel lp-deck__panel--blue" id="lp-device-macos" role="tabpanel" aria-labelledby="lp-device-tab-macos" tabindex="0" data-device-panel="3" hidden>
+              <img src="/assets/blog/pocket-character-activity.jpg" alt="Pocket Character running as a transparent native macOS widget" width="1600" height="930" loading="lazy" decoding="async">
+              <figcaption>
+                <span class="lp-deck__eyebrow">macOS / Native widget</span>
+                <strong>A whole character stage in one process</strong>
+                <span>118 MB · steady-state median: 3.9% of one core</span>
+              </figcaption>
+            </figure>
+          </div>
+
+          <div class="lp-deck__controls" role="tablist" aria-label="Featured devices">
+            <button class="is-active" id="lp-device-tab-psp" type="button" role="tab" aria-selected="true" aria-controls="lp-device-psp" tabindex="0" data-device-tab="0">
+              <span>01</span> PSP
+            </button>
+            <button id="lp-device-tab-e7" type="button" role="tab" aria-selected="false" aria-controls="lp-device-e7" tabindex="-1" data-device-tab="1">
+              <span>02</span> E7
+            </button>
+            <button id="lp-device-tab-gba" type="button" role="tab" aria-selected="false" aria-controls="lp-device-gba" tabindex="-1" data-device-tab="2">
+              <span>03</span> GBA
+            </button>
+            <button id="lp-device-tab-macos" type="button" role="tab" aria-selected="false" aria-controls="lp-device-macos" tabindex="-1" data-device-tab="3">
+              <span>04</span> macOS
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="lp-target-rail" aria-label="PocketJS device families">
+        <div>
+          <span>PSP</span><i aria-hidden="true"></i>
+          <span>PS Vita</span><i aria-hidden="true"></i>
+          <span>PocketBook</span><i aria-hidden="true"></i>
+          <span>Nokia E7</span><i aria-hidden="true"></i>
+          <span>Game Boy Advance</span><i aria-hidden="true"></i>
+          <span>Game Boy</span><i aria-hidden="true"></i>
+          <span>NES</span><i aria-hidden="true"></i>
+          <span>ESP32</span><i aria-hidden="true"></i>
+          <span>macOS</span>
         </div>
       </div>
     </section>
 
-    <!-- SHOWCASE -->
-    <section class="lp-section lp-showcase">
-      <div class="lp-container">
-        <div class="lp-secthead lp-reveal">
-          <span class="lp-kicker">The proof is shipping software</span>
-          <h2 class="lp-h2">Built with PocketJS.</h2>
-          <p class="lp-lead">Complete open-source apps running on real handhelds — not tech demos.</p>
-        </div>
-
-        <article class="lp-case lp-reveal">
-          <a class="lp-case__media" href="/blog/shipping-openstrike/" aria-label="Read the OpenStrike story">
-            <img src="/assets/blog/openstrike-psp-dust2.png" alt="OpenStrike on de_dust2: sunlit BSP geometry, crates and arches, with the Solid HUD showing 100 HP and 30/90 ammo." loading="lazy" />
-          </a>
-          <div class="lp-case__copy">
-            <h3 class="lp-case__title">OpenStrike</h3>
-            <p>A Counter-Strike-shaped FPS that plays the classic GoldSrc-era maps — BSP world, lightmaps, bots, recoil, round flow. The HUD is a Solid app; the round rules and weapon tables are TypeScript. It holds a locked 60&nbsp;FPS on a 333&nbsp;MHz PSP and ships as one file you drop on a Memory Stick.</p>
-            <div class="lp-case__links">
-              <a class="lp-btn lp-btn--ghost" href="/blog/shipping-openstrike/">
-                Read the story
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              </a>
-              <a class="lp-case__src" href="https://github.com/pocket-stack/open-strike" target="_blank" rel="noreferrer">pocket-stack/open-strike</a>
-            </div>
-          </div>
-        </article>
-
-        <article class="lp-case lp-case--flip lp-reveal">
-          <a class="lp-case__media" href="/blog/pocket-figma/" aria-label="Read the Pocket Figma story">
-            <img src="/assets/blog/figma-psp-cover-zoom.png" alt="Pocket Figma on a PSP at 59% zoom: the Paper Wireframe Kit cover with hand-drawn lettering, and the viewer HUD along the bottom." loading="lazy" />
-          </a>
-          <div class="lp-case__copy">
-            <h3 class="lp-case__title">Pocket Figma</h3>
-            <p>A real Figma Community file, open on a PSP: the Paper Wireframe Kit — 14,430 nodes, 2,293 component instances, a canvas 26,000 pixels wide. The cooker bakes it into streaming tiles, so the device never parses the file. Pan with the analog nub, zoom with the shoulders — and the same bundle runs at native 960&times;544 on PS Vita.</p>
-            <div class="lp-case__links">
-              <a class="lp-btn lp-btn--ghost" href="/blog/pocket-figma/">
-                Read the story
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              </a>
-              <a class="lp-case__src" href="https://github.com/pocket-stack/pocket-figma" target="_blank" rel="noreferrer">pocket-stack/pocket-figma</a>
-            </div>
-          </div>
-        </article>
-
-        <article class="lp-case lp-reveal">
-          <a class="lp-case__media" href="/blog/pocket-youtube/" aria-label="Read the Pocket YouTube story">
-            <img src="/assets/blog/pocket-youtube-paused.png" alt="Pocket YouTube on a PSP: a video paused under a centered pause badge, with the title bar, red progress bar and playback hints of the player HUD." loading="lazy" />
-          </a>
-          <div class="lp-case__copy">
-            <h3 class="lp-case__title">Pocket YouTube</h3>
-            <p>YouTube on a PSP, where the network is a USB cable: a Mac companion runs yt-dlp and ffmpeg, and the handheld plays a ring buffer that happens to be a file. Search with the system keyboard, browse rows with CJK titles the device could never typeset, and watch at 12&nbsp;fps with 44.1&nbsp;kHz audio — pause, seek and all — while the UI never drops from 60&nbsp;FPS.</p>
-            <div class="lp-case__links">
-              <a class="lp-btn lp-btn--ghost" href="/blog/pocket-youtube/">
-                Read the story
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              </a>
-              <a class="lp-case__src" href="https://github.com/pocket-stack/pocket-youtube" target="_blank" rel="noreferrer">pocket-stack/pocket-youtube</a>
-            </div>
-          </div>
-        </article>
+    <section class="lp-proof-strip" aria-label="PocketJS proof points">
+      <div class="lp-container lp-proof-strip__grid">
+        <a href="/blog/pocket-vapor/">
+          <span>01 / Cartridge</span>
+          <strong>Vue on a Game Boy.</strong>
+          <small>One real component, compiled to native code.</small>
+          <b aria-hidden="true">↗</b>
+        </a>
+        <a href="/blog/pocket-youtube/">
+          <span>02 / Handheld</span>
+          <strong>YouTube on a PSP.</strong>
+          <small>Video, audio, search and OSK over USB.</small>
+          <b aria-hidden="true">↗</b>
+        </a>
+        <a href="/blog/pocketjs-on-symbian/">
+          <span>03 / Experimental host</span>
+          <strong>Modern UI on Symbian.</strong>
+          <small>A private target running on a physical Nokia E7.</small>
+          <b aria-hidden="true">↗</b>
+        </a>
+        <a href="/blog/pocket-character/">
+          <span>04 / Desktop</span>
+          <strong>A native character widget without Electron.</strong>
+          <small>One transparent process: 118 MB and 3.9% of one core in the reference run.</small>
+          <b aria-hidden="true">↗</b>
+        </a>
       </div>
     </section>
 
-    <!-- FEATURES + TOOLING + TARGETS: one bento grid -->
-    <section class="lp-section vb-bento">
+    <section class="lp-section lp-execution" id="execution">
       <div class="lp-container">
-        <div class="lp-secthead lp-reveal">
-          <span class="lp-kicker">The runtime, at a glance</span>
-          <h2 class="lp-h2">Modern UI physics on retro silicon.</h2>
-          <p class="lp-lead">You keep JSX and signals. Everything expensive becomes native data, native draw calls — and a testable machine.</p>
+        <div class="lp-section-head lp-reveal">
+          <p class="lp-kicker">One application model / Two execution classes</p>
+          <h2>Keep the app semantics.<br><span>Change the machinery underneath.</span></h2>
+          <p>
+            PocketJS starts with what the app means and what the target can do. The browser, DOM,
+            runtime CSS—and even the JavaScript engine—are implementation choices, not requirements.
+          </p>
         </div>
 
-        <div class="vb-grid lp-reveal">
-          <article class="vb-tile vb-tile--hero">
-            <h3>UI that can't flake</h3>
-            <p>A virtual clock makes every frame a pure function of the input tape. Golden tests compare whole framebuffers, byte for byte — the same on CI, desktop and hardware. Scrub backwards, replay any session, on a real PSP.</p>
-            <div class="vb-tape" aria-hidden="true">
-              <span class="vb-tape__label">input tape</span>
-              <div class="vb-tape__strip">
-                <i></i><i></i><i class="dn"></i><i></i><i class="dn"></i><i></i><i></i><i></i><i class="dn"></i><i></i><i></i><i class="dn"></i><i></i><i></i><i></i><i class="on"></i><i></i><i></i>
-              </div>
-              <span class="vb-tape__eq">&rarr;</span>
-              <span class="vb-tape__frame">frame 1487<br /><b>hash 7f3a9c01</b></span>
+        <div class="lp-execution__grid">
+          <article class="lp-exec-card lp-exec-card--guest lp-reveal">
+            <div class="lp-exec-card__head">
+              <p><span>01</span> Pocket Guest</p>
+              <strong>Keep JavaScript dynamic.</strong>
+              <small>For machines that can afford a tiny embedded engine.</small>
             </div>
-            <p class="vb-meta">The wall above? Nine of these tapes, replayed headlessly against the core.</p>
-          </article>
-
-          <article class="vb-tile">
-            <h3>Compiled styling</h3>
-            <p>Tailwind literals become numeric style records at build time. No parser, no cascade, no utility runtime on the device.</p>
-          </article>
-
-          <article class="vb-tile">
-            <h3>Deterministic flexbox</h3>
-            <p>taffy 0.11 lays out in the Rust core — identical positions on every target, provable in goldens.</p>
-          </article>
-
-          <article class="vb-tile">
-            <h3>Baked text</h3>
-            <p>Coverage atlases with sub-pixel positioning. Runtime text is compositing, not font rasterization.</p>
-          </article>
-
-          <article class="vb-tile">
-            <h3>Native motion</h3>
-            <p>Tweens, springs and keyframe timelines tick in Rust at a fixed 1/60&nbsp;s. JS declares; the core animates.</p>
-          </article>
-
-          <article class="vb-tile">
-            <h3>Real input, system-wide</h3>
-            <p>D-pad focus, analog nub, touch, a virtual cursor — and a system on-screen keyboard any app can summon with one call.</p>
-          </article>
-
-          <article class="vb-tile vb-tile--half">
-            <h3>Time-travel DevTools</h3>
-            <p>Every session records itself. Step to any frame, inspect the native tree, diff against a golden — over USB to real hardware.</p>
-          </article>
-
-          <article class="vb-tile vb-tile--half">
-            <h3>3D, same discipline</h3>
-            <p>Pocket3D runs BSP worlds with PVS through sceGu on PSP and wgpu on desktop — OpenStrike holds a locked 60&nbsp;FPS with a Solid HUD on top.</p>
-          </article>
-
-          <article class="vb-tile vb-tile--wide">
-            <div class="vb-targets__head">
-              <h3>One core, many devices</h3>
-              <p>The <span class="lp-mono">no_std</span> core needs a framebuffer and a few buttons; a <span class="lp-mono">pocket.json</span> contract decides where a bundle may ship.</p>
+            <div class="lp-flow" aria-label="Pocket Guest execution flow">
+              <span>Vue / Solid / TS</span>
+              <i aria-hidden="true">→</i>
+              <span>QuickJS guest</span>
+              <i aria-hidden="true">→</i>
+              <span>Native core</span>
+              <i aria-hidden="true">→</i>
+              <span>Host</span>
             </div>
-            <ul class="vb-chips">
-              <li class="is-live"><b></b>Sony PSP</li>
-              <li class="is-live"><b></b>PS Vita</li>
-              <li class="is-live"><b></b>macOS</li>
-              <li class="is-wip"><b></b>Symbian</li>
-              <li class="is-wip"><b></b>iOS</li>
-              <li><b></b>Nintendo 3DS</li>
-              <li><b></b>Steam Deck</li>
-              <li><b></b>Android</li>
-              <li><b></b>Embedded Linux</li>
+            <ul>
+              <li>Portable guest bundle and hot-swappable app policy</li>
+              <li>Native retained UI, layout, text and rendering</li>
+              <li>Runtime admission against explicit capabilities</li>
             </ul>
-            <div class="vb-legend"><span><b class="is-live"></b>shipping</span><span><b class="is-wip"></b>in progress</span><span><b></b>planned</span></div>
+            <div class="lp-target-pills">
+              <span>PSP</span>
+              <span>PS Vita</span>
+              <span>PocketBook</span>
+              <span>macOS widget</span>
+              <span class="is-experimental">Nokia E7 · experimental</span>
+            </div>
+          </article>
+
+          <article class="lp-exec-card lp-exec-card--vapor lp-reveal">
+            <div class="lp-exec-card__head">
+              <p><span>02</span> Pocket Vapor</p>
+              <strong>Compile the runtime away.</strong>
+              <small>For machines where even an interpreter is too expensive.</small>
+            </div>
+            <div class="lp-flow" aria-label="Pocket Vapor execution flow">
+              <span>Vue model</span>
+              <i aria-hidden="true">→</i>
+              <span>AOT compiler</span>
+              <i aria-hidden="true">→</i>
+              <span>Dirty-bit native code</span>
+              <i aria-hidden="true">→</i>
+              <span>ROM</span>
+            </div>
+            <ul>
+              <li>A strict Vue Vapor TypeScript and JSX subset</li>
+              <li>No JavaScript engine, garbage collector or allocator</li>
+              <li>Compile-time admission against board profiles</li>
+            </ul>
+            <div class="lp-target-pills">
+              <span>GBA</span>
+              <span>Game Boy</span>
+              <span>NES</span>
+              <span>ESP32 MeowBit</span>
+            </div>
+          </article>
+        </div>
+
+        <p class="lp-execution__note lp-reveal">
+          Same authoring instincts. Different artifacts. No single runtime pretending every machine is the same.
+        </p>
+      </div>
+    </section>
+
+    <section class="lp-section lp-code-section">
+      <div class="lp-container">
+        <div class="lp-section-head lp-section-head--split lp-reveal">
+          <div>
+            <p class="lp-kicker">Familiar code / Native machinery</p>
+            <h2>One guest app.<br><span>Four very different hosts.</span></h2>
+          </div>
+          <p>
+            The source stays portable where the guest fits. A target profile resolves the viewport,
+            capabilities, raster density and native backend before the app boots.
+          </p>
+        </div>
+
+        <div class="lp-code-lab lp-reveal">
+          <div class="lp-code-window">
+            <div class="lp-window-bar">
+              <span>counter.tsx</span>
+              <span>Vue Vapor / TypeScript</span>
+            </div>
+            <pre aria-label="PocketJS Vue Vapor counter example"><code><span class="lp-code__kw">import</span> { <span class="lp-code__fn">ref</span> } <span class="lp-code__kw">from</span> <span class="lp-code__str">"vue"</span>;
+<span class="lp-code__kw">import</span> { <span class="lp-code__type">Text</span>, <span class="lp-code__type">View</span> }
+  <span class="lp-code__kw">from</span> <span class="lp-code__str">"@pocketjs/framework/vue-vapor/components"</span>;
+
+<span class="lp-code__kw">export default function</span> <span class="lp-code__fn">Counter</span>() {
+  <span class="lp-code__kw">const</span> count = <span class="lp-code__fn">ref</span>(<span class="lp-code__num">0</span>);
+
+  <span class="lp-code__kw">return</span> (
+    <span class="lp-code__tag">&lt;View</span> <span class="lp-code__attr">class</span>=<span class="lp-code__str">"flex-col gap-4 p-6"</span><span class="lp-code__tag">&gt;</span>
+      <span class="lp-code__tag">&lt;Text</span> <span class="lp-code__attr">class</span>=<span class="lp-code__str">"text-2xl font-bold"</span><span class="lp-code__tag">&gt;</span>
+        Count: {count.value}
+      <span class="lp-code__tag">&lt;/Text&gt;</span>
+      <span class="lp-code__tag">&lt;View</span> <span class="lp-code__attr">focusable onPress</span>={() =&gt; count.value++}<span class="lp-code__tag">&gt;</span>
+        <span class="lp-code__tag">&lt;Text&gt;</span>Press to increment<span class="lp-code__tag">&lt;/Text&gt;</span>
+      <span class="lp-code__tag">&lt;/View&gt;</span>
+    <span class="lp-code__tag">&lt;/View&gt;</span>
+  );
+}</code></pre>
+            <a href="/playground/">Open in Playground <span aria-hidden="true">↗</span></a>
+          </div>
+
+          <div class="lp-target-console">
+            <div class="lp-target-console__tabs" role="tablist" aria-label="Guest target profiles">
+              <button class="is-active" id="lp-target-tab-psp" type="button" role="tab" aria-selected="true" aria-controls="lp-target-psp" tabindex="0" data-target-tab="psp">PSP</button>
+              <button id="lp-target-tab-vita" type="button" role="tab" aria-selected="false" aria-controls="lp-target-vita" tabindex="-1" data-target-tab="vita">Vita</button>
+              <button id="lp-target-tab-pocketbook" type="button" role="tab" aria-selected="false" aria-controls="lp-target-pocketbook" tabindex="-1" data-target-tab="pocketbook">PocketBook</button>
+              <button id="lp-target-tab-e7" type="button" role="tab" aria-selected="false" aria-controls="lp-target-e7" tabindex="-1" data-target-tab="e7">E7 <span>EXP</span></button>
+            </div>
+
+            <article class="lp-target-panel is-active" id="lp-target-psp" role="tabpanel" aria-labelledby="lp-target-tab-psp" tabindex="0" data-target-panel="psp">
+              <div class="lp-target-panel__status"><span></span> Production target</div>
+              <h3>Sony PSP</h3>
+              <p>One portable bundle, admitted for the PSP’s fixed takeover profile.</p>
+              <dl>
+                <div><dt>Execution</dt><dd>Guest / QuickJS</dd></div>
+                <div><dt>Viewport</dt><dd>480 × 272 · fixed</dd></div>
+                <div><dt>Presentation</dt><dd>sceGu · native</dd></div>
+                <div><dt>Input</dt><dd>Buttons · analog · cursor</dd></div>
+                <div><dt>Artifact</dt><dd>EBOOT.PBP</dd></div>
+              </dl>
+            </article>
+
+            <article class="lp-target-panel" id="lp-target-vita" role="tabpanel" aria-labelledby="lp-target-tab-vita" tabindex="0" data-target-panel="vita" hidden>
+              <div class="lp-target-panel__status"><span></span> Production target</div>
+              <h3>PlayStation Vita</h3>
+              <p>The same logical app at 2× raster density on the Vita’s native GPU path.</p>
+              <dl>
+                <div><dt>Execution</dt><dd>Guest / QuickJS</dd></div>
+                <div><dt>Viewport</dt><dd>960 × 544 · 2×</dd></div>
+                <div><dt>Presentation</dt><dd>GXM · integer fit</dd></div>
+                <div><dt>Input</dt><dd>Buttons · analog · touch</dd></div>
+                <div><dt>Artifact</dt><dd>VPK</dd></div>
+              </dl>
+            </article>
+
+            <article class="lp-target-panel" id="lp-target-pocketbook" role="tabpanel" aria-labelledby="lp-target-tab-pocketbook" tabindex="0" data-target-panel="pocketbook" hidden>
+              <div class="lp-target-panel__status"><span></span> Registered / WIP hardware</div>
+              <h3>PocketBook e-reader</h3>
+              <p>Retained rendering becomes damage-aware e-ink updates instead of continuous frames.</p>
+              <dl>
+                <div><dt>Execution</dt><dd>Guest / QuickJS</dd></div>
+                <div><dt>Viewport</dt><dd>960 × 544 nominal · 2×</dd></div>
+                <div><dt>Presentation</dt><dd>InkView · partial refresh</dd></div>
+                <div><dt>Input</dt><dd>Buttons + touch declared · hardware pass pending</dd></div>
+                <div><dt>Proof</dt><dd>Verse boot + render validated</dd></div>
+              </dl>
+            </article>
+
+            <article class="lp-target-panel lp-target-panel--experimental" id="lp-target-e7" role="tabpanel" aria-labelledby="lp-target-tab-e7" tabindex="0" data-target-panel="e7" hidden>
+              <div class="lp-target-panel__status"><span></span> Private experimental profile</div>
+              <h3>Nokia E7 / Symbian</h3>
+              <p>A physical-device proof, kept outside the production registry until its verification gate is repeatable.</p>
+              <dl>
+                <div><dt>Execution</dt><dd>Guest / QuickJS</dd></div>
+                <div><dt>Viewport</dt><dd>640 × 360 · live rotation</dd></div>
+                <div><dt>Presentation</dt><dd>Qt + native GLES2</dd></div>
+                <div><dt>Input</dt><dd>Keyboard · touch</dd></div>
+                <div><dt>Artifact</dt><dd>Signed SIS</dd></div>
+              </dl>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lp-section lp-package" id="platform">
+      <div class="lp-container lp-package__inner">
+        <div class="lp-package__copy lp-reveal">
+          <p class="lp-kicker">Ship the application, not the port</p>
+          <h2>One deterministic file for every admitted Guest target.</h2>
+          <p>
+            A <code>.pocket</code> package carries identity, the manifest, a resolved build plan,
+            target-flavoured guest bundles and assets. The host rechecks its embedded plan before boot.
+          </p>
+          <div class="lp-package__actions">
+            <a class="lp-button lp-button--light" href="/docs/platform-contracts/">Platform contracts</a>
+            <a href="/changelog/">Read the 0.7 changelog <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+
+        <div class="lp-package-file lp-reveal" aria-label="Anatomy of a .pocket package">
+          <div class="lp-package-file__tab">my-app.pocket</div>
+          <div class="lp-package-file__body">
+            <div><span>01</span><strong>Manifest</strong><small>what the app declares</small></div>
+            <div><span>02</span><strong>Identity</strong><small>id, title and output</small></div>
+            <div><span>03</span><strong>Resolved plan</strong><small>target + capability receipt</small></div>
+            <div><span>04</span><strong>Guest bundle</strong><small>NUL-terminated JavaScript bundle</small></div>
+            <div><span>05</span><strong>Assets + cover</strong><small>target-flavoured resources</small></div>
+            <footer>Sorted sections · deterministic encoding · footer hash</footer>
+          </div>
+        </div>
+
+        <div class="lp-package-terminal lp-reveal">
+          <div class="lp-window-bar">
+            <span>package workflow</span>
+            <span>local</span>
+          </div>
+          <pre><code><span>$</span> bun run pocket:pack build \
+    --manifest apps/my-app/pocket.json \
+    --all-targets
+<span>$</span> bun run pocket:pack inspect dist/packages/my-app.pocket
+<span>$</span> bun run pocket:pack verify dist/packages/my-app.pocket</code></pre>
+          <button type="button" data-copy-command data-copy-value="bun run pocket:pack build --manifest apps/my-app/pocket.json --all-targets">Copy build command</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="lp-section lp-devices" id="devices">
+      <div class="lp-container">
+        <div class="lp-section-head lp-section-head--split lp-reveal">
+          <div>
+            <p class="lp-kicker">Built for every kind of impossible</p>
+            <h2>Impossible is a constraint.<br><span>Not an era.</span></h2>
+          </div>
+          <p>
+            No browser. No current SDK. No continuous refresh. No JavaScript engine. Tiny memory. Strange input.
+            PocketJS makes each limit explicit through Guest target profiles or AOT board profiles.
+          </p>
+        </div>
+
+        <div class="lp-device-kinds lp-reveal" aria-label="Device categories">
+          <span><b>01</b> Retro consoles</span>
+          <span><b>02</b> Abandoned phones</span>
+          <span><b>03</b> E-ink surfaces</span>
+          <span><b>04</b> Microcontrollers</span>
+          <span><b>05</b> Native desktop surfaces</span>
+        </div>
+
+        <div class="lp-apps">
+          <article class="lp-app-card lp-app-card--wide lp-reveal">
+            <a class="lp-app-card__media" href="/blog/shipping-openstrike/">
+              <img src="/assets/blog/openstrike-psp-dust2.png" alt="PSP target framebuffer capture of OpenStrike on de_dust2" width="960" height="544" loading="lazy" decoding="async">
+            </a>
+            <div class="lp-app-card__copy">
+              <p>Game / PSP</p>
+              <h3>OpenStrike</h3>
+              <span>TypeScript game rules, a Solid HUD and native 3D at a locked 60 FPS on a physical 333 MHz PSP.</span>
+              <a href="/blog/shipping-openstrike/">Read the build story <b aria-hidden="true">↗</b></a>
+            </div>
+          </article>
+
+          <article class="lp-app-card lp-reveal">
+            <a class="lp-app-card__media" href="/blog/pocket-figma/">
+              <img src="/assets/blog/figma-psp-cover-zoom.png" alt="PSP target framebuffer capture of Pocket Figma showing a large document" width="960" height="544" loading="lazy" decoding="async">
+            </a>
+            <div class="lp-app-card__copy">
+              <p>Documents / PSP + Vita</p>
+              <h3>Pocket Figma</h3>
+              <span>A 14,430-node document, baked into streaming tiles for a machine that could never parse it.</span>
+              <a href="/blog/pocket-figma/">Explore the viewer <b aria-hidden="true">↗</b></a>
+            </div>
+          </article>
+
+          <article class="lp-app-card lp-reveal">
+            <a class="lp-app-card__media" href="/blog/pocket-youtube/">
+              <img src="/assets/blog/pocket-youtube-paused.png" alt="PSP target framebuffer capture of Pocket YouTube with a paused video" width="480" height="272" loading="lazy" decoding="async">
+            </a>
+            <div class="lp-app-card__copy">
+              <p>Media / PSP</p>
+              <h3>Pocket YouTube</h3>
+              <span>Search, OSK, video and audio—using a USB cable as the network stack.</span>
+              <a href="/blog/pocket-youtube/">See how it ships <b aria-hidden="true">↗</b></a>
+            </div>
+          </article>
+
+          <article class="lp-app-card lp-app-card--dark lp-reveal">
+            <a class="lp-app-card__media" href="/blog/pocket-character/">
+              <img src="/assets/blog/pocket-character-activity.jpg" alt="Pocket Character running in a transparent desktop window" width="1600" height="930" loading="lazy">
+            </a>
+            <div class="lp-app-card__copy">
+              <p>Ambient software / macOS</p>
+              <h3>Pocket Character</h3>
+              <span>The same idle character stage in one native process: 118 MB and a 3.9% steady-state median in the reference run.</span>
+              <a href="/blog/pocket-character/">Read the measured report <b aria-hidden="true">↗</b></a>
+            </div>
+          </article>
+
+          <article class="lp-app-card lp-app-card--lime lp-reveal">
+            <a class="lp-app-card__media" href="/blog/pocket-vapor/">
+              <img src="/assets/blog/vapor-gba-added.png" alt="Pocket Vapor Todo running on a Game Boy Advance target" width="720" height="480" loading="lazy">
+            </a>
+            <div class="lp-app-card__copy">
+              <p>AOT / GBA · GB · NES · ESP32</p>
+              <h3>Pocket Vapor Todo</h3>
+              <span>One strict Vue Vapor component, compared with real Vue after every input on three console emulators and through a USB-connected ESP32 verifier.</span>
+              <a href="/blog/pocket-vapor/">Meet Pocket Vapor <b aria-hidden="true">↗</b></a>
+            </div>
           </article>
         </div>
       </div>
     </section>
 
-    <!-- CLOSING CTA -->
-    <section class="lp-section lp-cta">
-      <div class="lp-cta__glow" aria-hidden="true"></div>
-      <div class="lp-container lp-cta__in lp-reveal">
-        <span class="lp-kicker">Start from the hardware up</span>
-        <h2 class="lp-h2" style="margin-top: 0.9rem;">Build modern UI where the browser cannot go.</h2>
-        <p>Bring modern frontend ergonomics to hardware that was never built for the web.</p>
-        <div class="lp-cta__btns">
-          <a class="lp-btn lp-btn--primary" href="/docs/getting-started/">Get started</a>
-          <a class="lp-btn lp-btn--ghost" href="/docs/overview/">Read the docs</a>
+    <section class="lp-section lp-system">
+      <div class="lp-container">
+        <div class="lp-section-head lp-reveal">
+          <p class="lp-kicker">Pocket Guest is more than a renderer</p>
+          <h2>System software,<br><span>built around the Guest runtime.</span></h2>
+          <p>
+            On Guest targets, PocketJS provides the lifecycle, packaging and host surfaces that let complete applications live on constrained hardware.
+          </p>
+        </div>
+
+        <div class="lp-system__grid">
+          <div class="lp-system__features lp-reveal">
+            <article><span>01</span><h3>App launcher</h3><p>Whole-guest switching with one runtime realm alive at a time.</p></article>
+            <article><span>02</span><h3>.pocket packages</h3><p>Deterministic, target-aware artifacts that hosts can verify.</p></article>
+            <article><span>03</span><h3>Capability contracts</h3><p>Apps declare needs; targets advertise observable behavior.</p></article>
+            <article><span>04</span><h3>Input + OSK</h3><p>Buttons, analog, touch, focus, virtual cursor and system text entry.</p></article>
+            <article><span>05</span><h3>Host services</h3><p>Optional native surfaces for storage, media and device-specific work.</p></article>
+            <article><span>06</span><h3>Deterministic DevTools</h3><p>Replay Guest input, inspect frames and debug a physical PSP through the same protocol.</p></article>
+          </div>
+
+          <aside class="lp-port-card lp-reveal">
+            <p class="lp-kicker">The porting contract</p>
+            <h3>Bring a screen.<br>Bring some input.</h3>
+            <div class="lp-port-card__block">
+              <span>You provide</span>
+              <ul>
+                <li>Display surface</li>
+                <li>Input events</li>
+                <li>Clock</li>
+                <li>Storage</li>
+                <li>Optional services</li>
+              </ul>
+            </div>
+            <div class="lp-port-card__bridge" aria-hidden="true">↓</div>
+            <div class="lp-port-card__block lp-port-card__block--pocket">
+              <span>Pocket provides</span>
+              <ul>
+                <li>Retained UI tree</li>
+                <li>Layout + text</li>
+                <li>Animation</li>
+                <li>Damage tracking</li>
+                <li>Guest lifecycle</li>
+                <li>Packages + DevTools</li>
+              </ul>
+            </div>
+            <div class="lp-port-card__links">
+              <a href="/docs/native-contract/">Native contract <b aria-hidden="true">↗</b></a>
+              <a href="/docs/platform-contracts/">Target profiles <b aria-hidden="true">↗</b></a>
+            </div>
+          </aside>
+        </div>
+
+        <div class="lp-workflow lp-reveal">
+          <div class="lp-workflow__head">
+            <p class="lp-kicker">From component to real hardware</p>
+            <a href="/docs/devtools/">Explore DevTools <span aria-hidden="true">↗</span></a>
+          </div>
+          <ol>
+            <li><span>01</span><strong>Create</strong><small>Vue, Solid or TypeScript</small></li>
+            <li><span>02</span><strong>Preview</strong><small>Playground + deterministic host</small></li>
+            <li><span>03</span><strong>Check</strong><small>Capabilities + board demands</small></li>
+            <li><span>04</span><strong>Build</strong><small>Guest target or AOT board</small></li>
+            <li><span>05</span><strong>Verify</strong><small>Guest hardware/emulator · AOT oracle + target receipt</small></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <section class="lp-closing">
+      <div class="lp-closing__grid" aria-hidden="true"></div>
+      <div class="lp-container lp-closing__inner lp-reveal">
+        <p class="lp-kicker">Your target is waiting</p>
+        <h2>The browser was never the limit.</h2>
+        <p>Build the next app for the device everyone else gave up on.</p>
+        <div class="lp-actions">
+          <a class="lp-button lp-button--solid" href="/docs/getting-started/">Start building <span aria-hidden="true">→</span></a>
+          <a class="lp-button lp-button--outline" href="/docs/native-contract/">Port a device</a>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- FOOTER -->
   <footer class="lp-footer">
-    <div class="lp-container">
-      <div class="lp-footer__grid">
-        <div class="lp-footer__brand">
-          <a class="lp-brand" href="/" aria-label="PocketJS home">
-            <svg viewBox="0 0 32 32" aria-hidden="true">
-              <defs>
-                <linearGradient id="lp-pgf-edge" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#eef6ff"/><stop offset="0.38" stop-color="#b7c8e2"/><stop offset="0.58" stop-color="#7487a0"/><stop offset="0.78" stop-color="#aec0d6"/><stop offset="1" stop-color="#dbe8f6"/></linearGradient>
-                <linearGradient id="lp-pgf-lens" x1="7" y1="13" x2="13" y2="19" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e4edf8"/><stop offset="0.55" stop-color="#a7b8cf"/><stop offset="1" stop-color="#53677f"/></linearGradient>
-                <linearGradient id="lp-pgf-bar" x1="16" y1="12" x2="24" y2="20" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#d7e3f1"/><stop offset="1" stop-color="#71849d"/></linearGradient>
-              </defs>
-              <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="url(#lp-pgf-edge)" stroke-width="2.6" stroke-linejoin="round"/>
-              <circle cx="10" cy="16" r="3.1" fill="url(#lp-pgf-lens)"/>
-              <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="url(#lp-pgf-bar)"/>
-              <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="url(#lp-pgf-bar)"/>
-            </svg>
-            <span>PocketJS</span>
-          </a>
-          <p>Vue Vapor and Solid UI under 8 MB RAM, rendered through a tiny native core.</p>
-        </div>
-        <div>
-          <h4>Docs</h4>
-          <ul>
-            <li><a href="/docs/overview/">Overview</a></li>
-            <li><a href="/docs/getting-started/">Getting started</a></li>
-            <li><a href="/docs/architecture/">Architecture</a></li>
-            <li><a href="/docs/api/">API reference</a></li>
-          </ul>
-        </div>
-        <div>
-          <h4>Explore</h4>
-          <ul>
-            <li><a href="/playground/">Playground</a></li>
-            <li><a href="https://github.com/pocket-stack/open-strike" target="_blank" rel="noreferrer">OpenStrike</a></li>
-            <li><a href="https://github.com/pocket-stack/pocket-figma" target="_blank" rel="noreferrer">Pocket Figma</a></li>
-            <li><a href="/docs/components/">Components</a></li>
-            <li><a href="/docs/styling/">Styling</a></li>
-          </ul>
-        </div>
-        <div>
-          <h4>Project</h4>
-          <ul>
-            <li><a href="/blog/">Blog</a></li>
-            <li><a href="https://github.com/pocket-stack/pocketjs" target="_blank" rel="noreferrer">GitHub</a></li>
-            <li><a href="https://x.com/pocket_js" target="_blank" rel="noreferrer">X (Twitter)</a></li>
-            <li><a href="/docs/native-contract/">Native contract</a></li>
-            <li><a href="/docs/build-pipeline/">Build pipeline</a></li>
-          </ul>
-        </div>
+    <div class="lp-container lp-footer__top">
+      <div>
+        <a class="lp-brand" href="/" aria-label="PocketJS home">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <rect x="2" y="6" width="28" height="20" rx="6" fill="none" stroke="#c8d1de" stroke-width="2.6"/>
+            <circle cx="10" cy="16" r="3.1" fill="#91a1b5"/>
+            <rect x="16" y="12.6" width="10" height="2.2" rx="1.1" fill="#a9b7ca"/>
+            <rect x="16" y="17.2" width="6.5" height="2.2" rx="1.1" fill="#7f90a8"/>
+          </svg>
+          <span>PocketJS</span>
+        </a>
+        <p>Modern application models for hardware the browser cannot reach.</p>
       </div>
-      <div class="lp-footer__bar lp-footer__bar--end">
-        <span>&copy; 2026 PocketJS &middot; MIT</span>
+      <div class="lp-footer__links">
+        <div><strong>Build</strong><a href="/docs/getting-started/">Get started</a><a href="/playground/">Playground</a><a href="/docs/frameworks/">Frameworks</a></div>
+        <div><strong>Understand</strong><a href="/docs/architecture/">Architecture</a><a href="/docs/platform-contracts/">Platform contracts</a><a href="/changelog/">Changelog</a></div>
+        <div><strong>Project</strong><a href="/blog/">Engineering log</a><a href="https://github.com/pocket-stack/pocketjs" target="_blank" rel="noreferrer">GitHub ↗</a><a href="https://discord.gg/cTce4eXzSK" target="_blank" rel="noreferrer">Discord ↗</a></div>
       </div>
+    </div>
+    <div class="lp-container lp-footer__bottom">
+      <span>© 2026 PocketJS · MIT</span>
+      <span>Designed for strange machines.</span>
     </div>
   </footer>
 </div>

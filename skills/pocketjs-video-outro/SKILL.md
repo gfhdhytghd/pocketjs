@@ -116,7 +116,7 @@ static Worker assets (Cloudflare, `site/wrangler.jsonc`; keep each file well
 under the 25 MiB per-asset limit):
 
 1. Commit the mp4 into git at `site/assets/<name>.mp4` (existing examples:
-   `pocketjs-hardware-demo.mp4`, `pocketjs-demo-wall.mp4`).
+   `pocketjs-hardware-demo.mp4`, `pocketjs-hardware-loop.mp4`).
 2. Add a `copy(SITE + "assets/<name>.mp4", "assets/<name>.mp4")` line in
    `site/build.ts` step 4, next to the other mp4 copies. Files under
    `site/assets/blog/` (e.g. poster frames) are directory-copied
