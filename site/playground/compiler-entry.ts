@@ -13,6 +13,7 @@ import { transformAsync, type PluginObj } from "@babel/core";
 import solidPreset from "babel-preset-solid";
 import tsPreset from "@babel/preset-typescript";
 import { transformVueJsxVapor } from "vue-jsx-vapor/api";
+import { compile as octaneCompile } from "octane/compiler";
 import { parse as parseFont, type Font } from "opentype.js";
 
 import { compileClasses, fontSlotInfo } from "../../framework/compiler/tailwind.ts";
@@ -44,7 +45,19 @@ import { PSM } from "../../contracts/spec/spec.ts";
  *  runtime helpers from. The playground import-map points it at runtime.js. */
 const SOLID_RENDERER_MODULE = "@pocketjs/framework/solid/renderer";
 
-type PlaygroundFramework = "solid" | "vue-vapor";
+/** Octane universal-renderer descriptor — mirrors framework/compiler/jsx-plugin.ts
+ *  OCTANE_RENDERER_DESCRIPTOR; the import map points the module id at
+ *  runtime-octane.js. */
+const OCTANE_RENDERER = {
+  id: "pocket",
+  module: "@pocketjs/framework/octane/renderer",
+  target: "universal",
+  server: "unsupported",
+  text: "host",
+  capabilities: ["portal"],
+} as const;
+
+type PlaygroundFramework = "solid" | "vue-vapor" | "octane";
 
 interface SpriteMeta {
   cols: number;
@@ -194,6 +207,19 @@ async function transform(
       configFile: false,
       sourceMaps: false,
     });
+  } else if (framework === "octane") {
+    await transformAsync(source, {
+      filename: "app.tsx",
+      presets: [[tsPreset, {}]],
+      parserOpts: { plugins: ["jsx"] },
+      plugins: [collectorPlugin(collected, framework)],
+      babelrc: false,
+      configFile: false,
+      sourceMaps: false,
+    });
+    res = octaneCompile(source, "app.tsx", { mode: "client", renderer: OCTANE_RENDERER }) as {
+      code: string;
+    };
   } else {
     res = await transformAsync(source, {
       filename: "app.tsx",
