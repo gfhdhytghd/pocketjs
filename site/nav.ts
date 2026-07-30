@@ -59,7 +59,7 @@ export const BLOG_POSTS: BlogPost[] = [
     title: "useState at 333 MHz: Octane Is PocketJS's Third Framework",
     date: "2026-07-29",
     description:
-      "PR #6 measured React out of the PSP. Octane compiles the React programming model — hooks, JSX, no VDOM — into host plans a 333 MHz handheld can run, so we ported it: a universal driver over the same native tree, all eight demos, and 15 of 23 PPSSPP goldens byte-identical to the Vue Vapor frames. Inside: the three-layer memory hunt through a pinned QuickJS (a profiler nobody asked for, a WeakMap that never lets go, a slab allocator that amplifies both), the three-framework benchmark PR #6 couldn't run, and why the honest 15.58× is really a GC story with a 1.86× ending.",
+      "PR #6 measured React out of the PSP. Octane compiles the React programming model — hooks, JSX, no VDOM — into host plans a 333 MHz handheld can run, so we ported it: a universal driver over the same native tree, all eight demos, 14 of 23 PPSSPP goldens byte-identical to the Vue Vapor frames. Inside: the three-layer memory hunt through a pinned QuickJS, the hardware test that read under 1 FPS, the compiler flag that had silently shipped an -O0 interpreter since 2021, the rule that continuous motion never touches setState — and the benchmark PR #6 couldn't run, landing every cell of three frameworks inside the 60 FPS budget.",
     author: { name: 'Yifeng "Evan" Wang', url: "https://github.com/doodlewind" },
   },
   {
