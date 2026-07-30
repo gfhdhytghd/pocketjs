@@ -87,9 +87,21 @@ export function useSpriteAnimation(
     throw new Error("PocketJS: useSpriteAnimation() requires at least one frame");
   }
   const frameStep = Math.max(1, Math.floor(opts.frameStep ?? 1));
-  const [tick, setTick] = useState(0);
+  // The raw tick lives in a ref: state (and therefore a re-render) only
+  // commits when the visible sprite index actually changes — 1/frameStep of
+  // the ticks — and never for single-frame sprites. On the PSP a re-render
+  // is the expensive unit, so this is a frame-budget contract, not a nicety.
+  const tick = useRef(0);
+  const shown = useRef(0);
+  const [index, setIndex] = useState(0);
   useFrame(() => {
-    setTick((current) => (current + 1) % (frames.length * frameStep));
+    if (frames.length === 1) return;
+    tick.current = (tick.current + 1) % (frames.length * frameStep);
+    const next = Math.floor(tick.current / frameStep) % frames.length;
+    if (next !== shown.current) {
+      shown.current = next;
+      setIndex(next);
+    }
   });
-  return frames[Math.floor(tick / frameStep) % frames.length];
+  return frames[index % frames.length];
 }

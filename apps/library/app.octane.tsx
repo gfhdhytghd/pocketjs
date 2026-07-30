@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "octane";
-import { Image, Text, View, type NodeMirror } from "@pocketjs/framework/octane/components";
+import { Image, Sprite, Text, View, type NodeMirror } from "@pocketjs/framework/octane/components";
 import { spring } from "@pocketjs/framework/octane/animation";
 import { useButtonPress, useFrame } from "@pocketjs/framework/octane/lifecycle";
 import { BTN, focusNode } from "@pocketjs/framework/octane/input";
@@ -67,17 +67,6 @@ const GAMES: Game[] = [
 ];
 
 const LOADING_FRAMES = 48;
-const SPINNER_FRAME_STEP = 3;
-const SPINNER_FRAMES = [
-  "spinner-00.svg",
-  "spinner-01.svg",
-  "spinner-02.svg",
-  "spinner-03.svg",
-  "spinner-04.svg",
-  "spinner-05.svg",
-  "spinner-06.svg",
-  "spinner-07.svg",
-];
 
 const GridScreen = (props: { selectedIndex: number; onOpen: (game: Game, index: number) => void }) => {
   const refs = useRef<(NodeMirror | undefined)[]>([]);
@@ -106,11 +95,13 @@ const GridScreen = (props: { selectedIndex: number; onOpen: (game: Game, index: 
   );
 };
 
-const Loading = (props: { title: string; frame: number }) => {
-  const src = SPINNER_FRAMES[Math.floor(props.frame / SPINNER_FRAME_STEP) % SPINNER_FRAMES.length];
+// The spinner rides the native sprite channel (sprites.json atlas, host
+// auto-play): a per-frame Octane state tick would replay the whole root
+// for every spinner frame on the PSP.
+const Loading = (props: { title: string }) => {
   return (
     <View class="flex-col items-center justify-center gap-3 grow">
-      <Image class="w-10 h-10" src={src} />
+      <Sprite class="w-10 h-10" sprite="spinner-atlas.svg" />
       <Text class="text-sm text-slate-600 tracking-wide">{`LOADING ${props.title}...`}</Text>
     </View>
   );
@@ -166,7 +157,9 @@ export default function Library() {
   const [screen, setScreen] = useState<Screen>("library");
   const [selected, setSelected] = useState<Game | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(-1);
-  const [loadFrame, setLoadFrame] = useState(0);
+  // Loading is a fixed-length phase whose motion is native (Sprite atlas):
+  // count it in a ref and commit exactly one state change at the end.
+  const loadTick = useRef(0);
 
   const openGame = (game: Game, index: number) => {
     setSelected(game);
@@ -174,7 +167,7 @@ export default function Library() {
     if (game.about) {
       setScreen("detail");
     } else {
-      setLoadFrame(0);
+      loadTick.current = 0;
       setScreen("loading");
     }
   };
@@ -184,8 +177,8 @@ export default function Library() {
   });
   useFrame(() => {
     if (screen !== "loading") return;
-    setLoadFrame((frame) => frame + 1);
-    if (loadFrame + 1 >= LOADING_FRAMES) setScreen("detail");
+    loadTick.current += 1;
+    if (loadTick.current >= LOADING_FRAMES) setScreen("detail");
   });
 
   return (
@@ -205,7 +198,7 @@ export default function Library() {
         </>
       ) : null}
 
-      {screen === "loading" && selected ? <Loading title={selected.title} frame={loadFrame} /> : null}
+      {screen === "loading" && selected ? <Loading title={selected.title} /> : null}
 
       {screen === "detail" && selected ? <Detail game={selected} /> : null}
     </View>

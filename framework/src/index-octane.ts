@@ -261,5 +261,6 @@ export {
   registerSprite,
   missCounters,
 } from "./renderer-octane.ts";
+export { setTextContent } from "./native-tree.ts";
 export { registerStyles, resolveStyle } from "./styles.ts";
 export { entries as pakEntries, get as pakGet, loadPack, resetPack } from "./pak.ts";

@@ -1,7 +1,9 @@
-import { useState } from "octane";
-import { Text, View } from "@pocketjs/framework/octane/components";
+import { useLayoutEffect, useRef, useState } from "octane";
+import { Text, View, type NodeMirror } from "@pocketjs/framework/octane/components";
+import { animate, jump } from "@pocketjs/framework/octane/animation";
 import { useButtonPress, useFrame } from "@pocketjs/framework/octane/lifecycle";
 import { BTN } from "@pocketjs/framework/octane/input";
+import { setTextContent } from "@pocketjs/framework/octane";
 
 interface Track {
   title: string;
@@ -33,51 +35,78 @@ const TRACKS: Track[] = [
 const TRACK_FRAMES = 300;
 const PROGRESS_TRACK_W = 160;
 
-// Per-frame state lives in leaf components so each tick re-renders a handful
-// of nodes, not the whole screen. Octane re-renders allocate their garbage up
-// front; keeping the always-animating state small keeps the PSP QuickJS
-// arena's GC pressure proportional to the equalizer + progress line only.
+// Continuous motion rides the native animation system, never per-frame JS:
+// an Octane state tick replays the whole root — cheap nowhere, ruinous on
+// the PSP. The equalizer is four baked keyframe timelines (pocket.config.ts
+// bakes the bars' |sin| curve, phase included, into styles.bin); play/pause
+// just switches the animate-eq* classes on and off.
+
+const EQ_BARS_PLAYING = [
+  "w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600 h-[6] animate-eq0",
+  "w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600 h-[6] animate-eq1",
+  "w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600 h-[6] animate-eq2",
+  "w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600 h-[6] animate-eq3",
+] as const;
+const EQ_BAR_PAUSED = "w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600 h-[6]";
 
 function Equalizer(props: { playing: boolean }) {
-  const [barsFrame, setBarsFrame] = useState(0);
-  useFrame(() => {
-    if (props.playing) setBarsFrame((v) => v + 1);
-  });
-  const barHeight = (i: number): number => {
-    if (!props.playing) return 6;
-    const v = Math.abs(Math.sin(barsFrame * 0.15 + i * 1.7));
-    return 6 + Math.round(v * 20);
-  };
   return (
     <View class="flex-row items-end gap-1 h-16">
       {([0, 1, 2, 3] as const).map((i) => (
-        <View
-          key={i}
-          class="w-2 rounded-md shadow bg-gradient-to-b from-emerald-500 to-emerald-600"
-          style={{ height: barHeight(i) }}
-        />
+        <View key={i} class={props.playing ? EQ_BARS_PLAYING[i] : EQ_BAR_PAUSED} />
       ))}
     </View>
   );
 }
 
+// The fill is a native linear tween across the remaining track (re-aimed on
+// play/pause) and the percent text updates imperatively via setTextContent —
+// the whole progress line costs zero re-renders until the track ends.
 function ProgressLine(props: { playing: boolean; onTrackEnd: () => void; key?: number }) {
-  const [position, setPosition] = useState(0);
-  const pct = Math.round((position / TRACK_FRAMES) * 100);
+  const raw = useRef(0);
+  const shownPct = useRef(0);
+  const fill = useRef<NodeMirror | null>(null);
+  const pctText = useRef<NodeMirror | null>(null);
+
+  useLayoutEffect(() => {
+    const node = fill.current;
+    if (!node) return;
+    if (props.playing) {
+      const remaining = TRACK_FRAMES - raw.current;
+      animate(node, "width", PROGRESS_TRACK_W, { dur: (remaining * 1000) / 60, easing: "linear" });
+    } else {
+      jump(node, "width", (raw.current / TRACK_FRAMES) * PROGRESS_TRACK_W);
+    }
+  }, [props.playing]);
+
   useFrame(() => {
     if (!props.playing) return;
-    if (position + 1 >= TRACK_FRAMES) props.onTrackEnd();
-    else setPosition((v) => v + 1);
+    raw.current += 1;
+    if (raw.current >= TRACK_FRAMES) {
+      props.onTrackEnd();
+      return;
+    }
+    const pct = Math.round((raw.current / TRACK_FRAMES) * 100);
+    if (pct !== shownPct.current) {
+      shownPct.current = pct;
+      const node = pctText.current;
+      if (node) setTextContent(node, `${pct}%`);
+    }
   });
+
   return (
     <View class="flex-row items-center gap-2">
       <View class="w-[160] h-2 rounded-full shadow bg-slate-200 overflow-hidden">
-        <View
-          class="h-2 w-0 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600"
-          style={{ width: (position / TRACK_FRAMES) * PROGRESS_TRACK_W }}
-        />
+        <View nodeRef={fill} class="h-2 w-0 rounded-full bg-gradient-to-r from-emerald-500 to-emerald-600" />
       </View>
-      <Text class="text-xs text-slate-500">{`${pct}%`}</Text>
+      <Text
+        nodeRef={(node: NodeMirror | null) => {
+          pctText.current = node;
+        }}
+        class="text-xs text-slate-500"
+      >
+        0%
+      </Text>
     </View>
   );
 }

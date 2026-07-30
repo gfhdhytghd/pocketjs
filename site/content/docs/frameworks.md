@@ -264,27 +264,32 @@ Authoring rules specific to Octane apps:
   changes across re-renders.** Re-applying a changed style value cancels the
   running tween (unchanged values are diffed away and are safe); drive such
   properties from an effect with `animate()`/`jump()` and a `nodeRef` instead.
-- **Keep always-animating state in leaf components.** A per-frame `setState`
-  re-renders its owning component; putting the counter in a small leaf (the
-  music demo's `Equalizer`/`ProgressLine`, the stats demo's `StatTiles`)
-  keeps each tick's re-render to a handful of nodes instead of the whole
-  screen. On the PSP's fixed QuickJS arena this matters twice over: the
-  pinned engine retains a sliver of every render, and its slab allocator
-  pins whole chunks around it (the host runs an arena-pressure collection,
-  but less garbage is always better). If the rendered value only changes on
-  step boundaries, commit state on the step, not the raw frame — see
-  `StatTiles` in `apps/stats/app.octane.tsx`.
-- **Frequently re-rendering apps have a session memory horizon on PSP**
-  until the pinned QuickJS is upgraded: each render retains a small residue
-  the collector cannot reclaim on this engine revision (~80–115 KB/frame
-  measured for the per-frame-state demos), so an always-animating screen
-  outlives its showcase capture window but not an unbounded session. The
-  growing live set also inflates engine GC time, which is why the PSP
-  benchmark's per-frame-work numbers for those demos are dominated by GC
-  rather than by Octane's own render work (`cards`, which has no per-frame
-  state, shows the steady-state cost). Solid and Vue Vapor apps, and Octane
-  apps without per-frame state, are unaffected. The engine fix (quickjs-rs
-  GC repair + repin) is tracked as a follow-up.
+- **Continuous motion rides the native animation system, never per-frame
+  state.** An Octane state commit replays the whole root — the cost is the
+  same whether the state lives in the root or a one-node leaf (leaf state
+  changes *how often* you replay, not what a replay costs, and on the PSP
+  one replay is a multi-frame stall). Every continuous visual has a native
+  channel with zero per-frame JS: `<Sprite>` atlases for sprite cycling
+  (the hero/gallery/library spinners, `sprites.json`), baked keyframe
+  timelines for looping choreography (the music equalizer,
+  `apps/music/pocket.config.ts`), `animate()`/`jump()` for one-shot tweens
+  (the stats bars and systems reveal, notification rows), and
+  `setTextContent` — the text-shaped sibling of `animate()` — for per-frame
+  text like count-ups and percentages (`StatTiles`, `ProgressLine`).
+- **Frame counters that merely time a phase live in refs**, committing state
+  exactly once at the boundary they're waiting for (the notifications
+  dismiss/rise timers, the library loading screen). Counting in state
+  replays the root every frame of the phase for pixels that never change.
+- **Re-render residue is per replay, not per frame, on the pinned engine.**
+  Each replay retains a small residue the collector cannot reclaim on this
+  QuickJS revision, and the slab allocator amplifies it on the fixed arena
+  (the host's arena-pressure GC absorbs the churn). With the demos'
+  continuous motion moved onto native channels, replays happen at
+  interaction rate — button presses, track changes — so the residue no
+  longer bounds a play session the way per-frame replays did. The engine
+  repair (quickjs-rs GC fix + repin) remains the tracked follow-up, as does
+  upstream work on Octane's replay cost itself, which today makes a single
+  press noticeably heavier on PSP than in Solid or Vue Vapor.
 
 ## What stays shared
 

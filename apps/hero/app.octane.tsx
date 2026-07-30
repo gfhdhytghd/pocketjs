@@ -1,20 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "octane";
-import { Image, Text, View, type NodeMirror } from "@pocketjs/framework/octane/components";
+import { Image, Sprite, Text, View, type NodeMirror } from "@pocketjs/framework/octane/components";
 import { animate } from "@pocketjs/framework/octane/animation";
-import { useSpriteAnimation } from "@pocketjs/framework/octane/lifecycle";
 import { frameworkName } from "@pocketjs/framework/octane";
-
-const SPINNER_FRAME_STEP = 3;
-const SPINNER_FRAMES = [
-  "spinner-00.svg",
-  "spinner-01.svg",
-  "spinner-02.svg",
-  "spinner-03.svg",
-  "spinner-04.svg",
-  "spinner-05.svg",
-  "spinner-06.svg",
-  "spinner-07.svg",
-];
 
 const Stat = (props: { label: string; value: string; cls: string }) => {
   return (
@@ -25,9 +12,16 @@ const Stat = (props: { label: string; value: string; cls: string }) => {
   );
 };
 
+// The spinner rides the native sprite channel (sprites.json atlas, host
+// auto-play): an Octane state tick would replay the whole root every third
+// frame — ~2ms of runtime work per replay on desktop, two orders worse on
+// the PSP — while the native path costs zero JS per frame.
+const Spinner = () => {
+  return <Sprite class="w-10 h-10" sprite="spinner-atlas.svg" />;
+};
+
 export default function Hero() {
   const [count, setCount] = useState(0);
-  const spinnerSrc = useSpriteAnimation(SPINNER_FRAMES, { frameStep: SPINNER_FRAME_STEP });
   const underline = useRef<NodeMirror | null>(null);
 
   useLayoutEffect(() => {
@@ -57,7 +51,7 @@ export default function Hero() {
         <Text class="text-xs text-blue-600 tracking-wide">ONE RUST CORE - ONE OCTANE APP</Text>
         <View class="flex-row items-center justify-between">
           <Text class="text-4xl text-slate-950 font-bold">JSX at 60 FPS.</Text>
-          <Image class="w-10 h-10" src={spinnerSrc} />
+          <Spinner />
         </View>
         <View
           nodeRef={(node: NodeMirror | null) => {

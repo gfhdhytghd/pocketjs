@@ -71,54 +71,55 @@ function NoticeRow(props: NoticeRowProps) {
 export default function Notifications() {
   const [items, setItems] = useState<Notice[]>([...INITIAL]);
   const [dismissingId, setDismissingId] = useState<string | null>(null);
-  const [dismissFrame, setDismissFrame] = useState(0);
   const [riseOffsets, setRiseOffsets] = useState<Record<string, number>>({});
-  const [riseQueued, setRiseQueued] = useState<string[]>([]);
-  const [riseFrame, setRiseFrame] = useState(0);
   const rowRefs = useRef(new Map<string, NodeMirror>());
+  // Phase timers live in refs: the motion itself is native animate() tweens,
+  // so JS only needs to know when a phase ENDS. Counting in state would
+  // replay the whole root every frame of every dismissal on the PSP.
+  const riseQueued = useRef<string[]>([]);
+  const riseTick = useRef(0);
+  const dismissTick = useRef(0);
 
-  const hasRise = Object.keys(riseOffsets).length > 0 || riseQueued.length > 0;
+  const hasRise = () => Object.keys(riseOffsets).length > 0 || riseQueued.current.length > 0;
 
   useFrame(() => {
-    if (riseQueued.length > 0) {
-      for (const id of riseQueued) {
+    if (riseQueued.current.length > 0) {
+      for (const id of riseQueued.current) {
         const row = rowRefs.current.get(id);
         if (row) animate(row, "translateY", 0, { dur: 180, easing: "out" });
       }
-      setRiseQueued([]);
-      setRiseFrame(0);
+      riseQueued.current = [];
+      riseTick.current = 0;
     } else if (Object.keys(riseOffsets).length > 0) {
-      const n = riseFrame + 1;
-      setRiseFrame(n);
-      if (n >= ROW_RISE_FRAMES) {
+      riseTick.current += 1;
+      if (riseTick.current >= ROW_RISE_FRAMES) {
         setRiseOffsets({});
-        setRiseFrame(0);
+        riseTick.current = 0;
       }
     }
 
     const id = dismissingId;
     if (id === null) return;
-    const n = dismissFrame + 1;
-    setDismissFrame(n);
-    if (n >= DISMISS_FRAMES) {
+    dismissTick.current += 1;
+    if (dismissTick.current >= DISMISS_FRAMES) {
       const before = items;
       const removedIndex = before.findIndex((it) => it.id === id);
       const rising = removedIndex < 0 ? [] : before.slice(removedIndex + 1).map((it) => it.id);
       if (rising.length > 0) {
         setRiseOffsets(Object.fromEntries(rising.map((rid) => [rid, ROW_RISE_PX])));
-        setRiseQueued(rising);
+        riseQueued.current = rising;
       }
       rowRefs.current.delete(id);
       setItems(before.filter((it) => it.id !== id));
       setDismissingId(null);
-      setDismissFrame(0);
+      dismissTick.current = 0;
     }
   });
 
   const dismiss = (id: string, el: NodeMirror | undefined) => {
-    if (dismissingId !== null || hasRise || !el) return;
+    if (dismissingId !== null || hasRise() || !el) return;
     setDismissingId(id);
-    setDismissFrame(0);
+    dismissTick.current = 0;
     animate(el, "opacity", 0, { dur: 200, easing: "out" });
     animate(el, "translateX", 24, { dur: 200, easing: "out" });
   };

@@ -3,6 +3,7 @@ import { Text, View, type NodeMirror } from "@pocketjs/framework/octane/componen
 import { animate, jump } from "@pocketjs/framework/octane/animation";
 import { useButtonPress, useFrame } from "@pocketjs/framework/octane/lifecycle";
 import { BTN } from "@pocketjs/framework/octane/input";
+import { setTextContent } from "@pocketjs/framework/octane";
 
 const COUNT_FRAMES = 75;
 const COUNT_TEXT_STEP = 8;
@@ -10,7 +11,6 @@ const BAR_ANIM_FRAMES = 26;
 const BAR_STAGGER_FRAMES = 4;
 const SYSTEMS_REVEAL_FRAMES = 12;
 const SYSTEMS_STAGGER_FRAMES = 5;
-const SYSTEMS_MAX_FRAMES = SYSTEMS_REVEAL_FRAMES + SYSTEMS_STAGGER_FRAMES * 3;
 
 interface Stat {
   label: string;
@@ -120,29 +120,43 @@ const Overview = () => {
 // engine-arena churn exhausts the PSP's fixed arena mid-window.
 
 const StatTiles = () => {
-  // The rendered value only ever changes on COUNT_TEXT_STEP boundaries, so
-  // track the raw frame in a ref and commit state only when the stepped
-  // value moves: ~10 re-renders for the whole count-up instead of 75, with
-  // byte-identical output per frame index.
+  // The count-up drives the three value texts imperatively through
+  // setTextContent — the text-shaped sibling of animate()/jump(). Committing
+  // the stepped value as state instead would re-prepare the whole root on
+  // every step: ~10 multi-frame stalls per count-up on the PSP. Here a step
+  // costs three replaceText host ops and the component never re-renders.
   const raw = useRef(0);
-  const [visibleFrame, setVisibleFrame] = useState(0);
+  const stepped = useRef(0);
+  const values = useRef<(NodeMirror | null)[]>([]);
   useFrame(() => {
     if (raw.current >= COUNT_FRAMES) return;
     raw.current += 1;
-    const stepped =
+    const next =
       raw.current >= COUNT_FRAMES
         ? COUNT_FRAMES
         : Math.floor(raw.current / COUNT_TEXT_STEP) * COUNT_TEXT_STEP;
-    if (stepped !== visibleFrame) setVisibleFrame(stepped);
+    if (next === stepped.current) return;
+    stepped.current = next;
+    const t = easeOutCubic(Math.min(1, next / COUNT_FRAMES));
+    for (let i = 0; i < STATS.length; i++) {
+      const node = values.current[i];
+      if (node) setTextContent(node, fmt(Math.round(STATS[i].target * t)));
+    }
   });
-  const t = easeOutCubic(Math.min(1, visibleFrame / COUNT_FRAMES));
   return (
     <View class="flex-row gap-3">
-      {STATS.map((stat) => (
+      {STATS.map((stat, i) => (
         <View key={stat.label} class="flex-1 flex-col gap-1 p-2 rounded-xl shadow-md bg-white border-slate-200">
           <Text class="text-xs text-slate-500 tracking-wide">{stat.label}</Text>
           <View class="flex-row items-end gap-1">
-            <Text class={stat.valueCls}>{fmt(Math.round(stat.target * t))}</Text>
+            <Text
+              nodeRef={(node: NodeMirror | null) => {
+                values.current[i] = node;
+              }}
+              class={stat.valueCls}
+            >
+              {fmt(0)}
+            </Text>
             <Text class="text-xs text-emerald-600">{stat.delta}</Text>
           </View>
         </View>
@@ -152,18 +166,30 @@ const StatTiles = () => {
 };
 
 const Systems = () => {
-  const [frame, setFrame] = useState(0);
-  useFrame(() => {
-    if (frame < SYSTEMS_MAX_FRAMES) setFrame((f) => f + 1);
-  });
-  const rowT = (i: number) => easeOutCubic((frame - i * SYSTEMS_STAGGER_FRAMES) / SYSTEMS_REVEAL_FRAMES);
+  // Staggered entrance as native tweens: one animate() pair per row on
+  // mount, zero re-renders. A per-frame state tick here replayed the whole
+  // root for every frame of the reveal on the PSP.
+  const rows = useRef<(NodeMirror | null)[]>([]);
+  useLayoutEffect(() => {
+    const dur = (SYSTEMS_REVEAL_FRAMES * 1000) / 60;
+    for (let i = 0; i < rows.current.length; i++) {
+      const node = rows.current[i];
+      if (!node) continue;
+      const delay = (i * SYSTEMS_STAGGER_FRAMES * 1000) / 60;
+      animate(node, "opacity", 1, { dur, delay, easing: "out" });
+      animate(node, "translateY", 0, { dur, delay, easing: "out" });
+    }
+  }, []);
   return (
     <View class="flex-col gap-1">
       {SYSTEMS.map((sys, i) => (
         <View
           key={sys.name}
+          nodeRef={(node: NodeMirror | null) => {
+            rows.current[i] = node;
+          }}
           class="flex-row items-center justify-between px-2 py-[2] rounded-lg shadow bg-white border-slate-200"
-          style={{ opacity: rowT(i), translateY: (1 - rowT(i)) * 8 }}
+          style={{ opacity: 0, translateY: 8 }}
         >
           <View class="flex-row items-center gap-2">
             <View class={sys.led} />

@@ -4,7 +4,6 @@ import {
   FocusScope,
   Gallery,
   Grid,
-  Image,
   Lazy,
   Screen,
   Sprite,
@@ -12,20 +11,9 @@ import {
   View,
   type NodeMirror,
 } from "@pocketjs/framework/octane/components";
-import { useSpriteAnimation, useButtonPress } from "@pocketjs/framework/octane/lifecycle";
+import { useButtonPress } from "@pocketjs/framework/octane/lifecycle";
 import { BTN, focusNode } from "@pocketjs/framework/octane/input";
 import { GALLERY_PAGES, TILES_PER_PAGE, TILE_SRCS } from "./tiles.ts";
-
-const SPINNER_FRAMES = [
-  "spinner-00.svg",
-  "spinner-01.svg",
-  "spinner-02.svg",
-  "spinner-03.svg",
-  "spinner-04.svg",
-  "spinner-05.svg",
-  "spinner-06.svg",
-  "spinner-07.svg",
-];
 
 const REVEAL_FRAMES = 16;
 const PAGE_TITLE = ["SYNTHWAVE", "GOLDEN HOUR", "EVERGREEN", "NEBULA"];
@@ -49,10 +37,11 @@ const TILE_FRAME =
   "w-[68] h-[68] rounded-lg items-center justify-center bg-slate-900 border-slate-700 focus:scale-110 focus:border-white transition-transform duration-150 ease-out";
 
 function Loading(props: { title: string }) {
-  const frame = useSpriteAnimation(SPINNER_FRAMES, { frameStep: 3 });
+  // Native sprite channel: zero per-frame JS (a state tick would replay the
+  // whole root for every spinner frame on the PSP).
   return (
     <View class="flex-col items-center justify-center gap-2 grow">
-      <Image class="w-9 h-9" src={frame} />
+      <Sprite class="w-9 h-9" sprite="spinner-atlas.svg" />
       <Text class="text-xs text-slate-300 tracking-wide">{`LOADING ${props.title}`}</Text>
     </View>
   );
