@@ -173,7 +173,7 @@ With the emulator suite green we put the release EBOOTs on a Memory Stick, and t
 
 PocketJS already had the channels to make it zero — the same native machinery Solid and Vue Vapor demos lean on:
 
-- **Sprite cycling** → the native `<Sprite>` atlas (`sprites.json`, host auto-play). The hero, gallery, and library spinners became one 256×128 atlas baked from the eight spinner SVGs; per-frame JS: none.
+- **Sprite cycling** → the native `<Sprite>` atlas (`sprites.json`, host auto-play). The hero, gallery, and library spinners became one 256×128 atlas baked from the eight spinner SVGs; per-frame JS: none. (The atlas itself shipped broken once: our SVG baker silently dropped `<g transform>`, so seven of eight cells baked blank — on hardware the spinner blinked instead of spun, and a golden re-baseline had quietly enshrined the bug. The baker now hard-errors on `<g transform>`, and the goldens got looked at with actual eyes.)
 - **Looping choreography** → baked keyframe timelines. The music equalizer's `|sin|` curve, phase per bar included, is sampled into four keyframe tracks in `pocket.config.ts` and loops in `styles.bin` forever; play/pause just switches classes:
 
 ```tsx
@@ -301,7 +301,7 @@ The [playground](/playground/) grew a third toggle. The real Octane universal co
 
 ## What's named, what's next
 
-The gaps, named, because that is house policy: a button press is one root replay and costs a visible 150–250 ms hitch on the PSP until the replay walk is fixed upstream in Octane (the identity-path caching described above); the per-replay memory residue on the pinned engine is still real — replays are now rare enough that it no longer bounds a session, but the quickjs-rs GC repair and repin remain owed, as does an upstream report for the ten-line WeakMap repro that also reproduces on bellard master; the benchmark numbers above are emulator numbers from PPSSPP's software renderer — the first hardware run is what triggered the whole performance chapter, and the post-fix hardware re-test is the open checklist item; and `gallery`, the eighth demo, ports and builds like the rest but is not yet in the golden suite.
+The gaps, named, because that is house policy: a button press is one root replay and costs a visible 150–250 ms hitch on the PSP until the replay walk is fixed upstream in Octane (the identity-path caching described above); the per-replay memory residue on the pinned engine is still real — replays are now rare enough that it no longer bounds a session, but the quickjs-rs GC repair and repin remain owed, as does an upstream report for the ten-line WeakMap repro that also reproduces on bellard master; the benchmark numbers above are emulator numbers from PPSSPP's software renderer, but the post-fix builds have since been re-tested on the same physical PSP that failed the first run — smooth, spinner turning; and `gallery`, the eighth demo, ports and builds like the rest but is not yet in the golden suite.
 
 Everything here — adapter, compiler wiring, eight ports, playground, docs, benchmark — lands in [#203](https://github.com/pocket-stack/pocketjs/pull/203). Three frameworks now compile into the same native tree on the same 2004 handheld, and the newest one writes like React because, at the source level, it is: hooks, JSX, and a compiler that did the reconciler's job before the code left your machine.
 
