@@ -32,4 +32,4 @@ pub mod shell;
 
 pub use embed::EmbeddedUi;
 pub use parts::{PartMap, PartShape, analog_pack, key_button};
-pub use shell::{FlatWidget, WidgetConfig, WidgetGame, run, run_flat};
+pub use shell::{FlatWidget, WidgetConfig, WidgetGame, WindowCommand, run, run_flat};

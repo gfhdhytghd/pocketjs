@@ -62,6 +62,17 @@ pub struct WidgetConfig {
     pub ime: bool,
 }
 
+/// A best-effort request to change the native window's desired visibility.
+///
+/// Products should coalesce repeated requests and return the latest one from
+/// [`WidgetGame::take_window_command`] or [`FlatWidget::take_window_command`].
+/// Platform support follows winit's `Window::set_visible` implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowCommand {
+    Show,
+    Hide,
+}
+
 impl Default for WidgetConfig {
     fn default() -> Self {
         Self {
@@ -108,6 +119,13 @@ pub trait WidgetGame {
     fn resize_at(&mut self, cursor: Vec2) -> bool {
         let _ = cursor;
         false
+    }
+    /// Consume the latest desired native-window visibility, if it changed.
+    ///
+    /// Fixed ticks continue while hidden. Showing the window arms one fresh
+    /// frame so a compositor never reveals stale pixels.
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        None
     }
     fn wants_exit(&self) -> bool {
         false
@@ -156,6 +174,13 @@ pub trait FlatWidget {
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)> {
         None
     }
+    /// Consume the latest desired native-window visibility, if it changed.
+    ///
+    /// Fixed ticks continue while hidden. Showing the window arms one fresh
+    /// frame so a compositor never reveals stale pixels.
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        None
+    }
     fn wants_exit(&self) -> bool {
         false
     }
@@ -191,6 +216,7 @@ trait Driver {
     fn drag_at(&mut self, cursor: Vec2) -> bool;
     fn resize_at(&mut self, cursor: Vec2) -> bool;
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)>;
+    fn take_window_command(&mut self) -> Option<WindowCommand>;
     fn wants_exit(&self) -> bool;
 }
 
@@ -234,6 +260,9 @@ impl<G: WidgetGame> Driver for SceneDriver<G> {
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)> {
         None
     }
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        self.game.take_window_command()
+    }
     fn wants_exit(&self) -> bool {
         self.game.wants_exit()
     }
@@ -270,6 +299,9 @@ impl<G: FlatWidget> Driver for FlatDriver<G> {
     }
     fn ime_cursor_area(&mut self) -> Option<(f32, f32, f32, f32)> {
         self.game.ime_cursor_area()
+    }
+    fn take_window_command(&mut self) -> Option<WindowCommand> {
+        self.game.take_window_command()
     }
     fn wants_exit(&self) -> bool {
         self.game.wants_exit()
@@ -334,6 +366,7 @@ struct WindowState {
     last_render: Instant,
     /// Dirt latched from the game, waiting for a paced render.
     render_pending: bool,
+    visible: bool,
     occluded: bool,
     /// Last IME caret rect handed to the OS (dedupe).
     ime_area: Option<(f32, f32, f32, f32)>,
@@ -410,6 +443,7 @@ impl<D: Driver> WidgetApp<D> {
             next_tick: now,
             last_render: now - Duration::from_secs(1),
             render_pending: true, // first frame
+            visible: true,
             occluded: false,
             ime_area: None,
             resizing: None,
@@ -456,6 +490,15 @@ impl<D: Driver> WidgetApp<D> {
             self.arms.dirty += 1;
         }
 
+        if let Some(visible) = apply_window_command(
+            self.driver.take_window_command(),
+            &mut state.visible,
+            &mut state.occluded,
+            &mut state.render_pending,
+        ) {
+            state.window.set_visible(visible);
+        }
+
         if self.config.ime {
             let area = self.driver.ime_cursor_area();
             if let Some((x, y, w, h)) = area
@@ -471,7 +514,7 @@ impl<D: Driver> WidgetApp<D> {
 
         let frame_interval = Duration::from_secs_f32(1.0 / self.config.max_fps.max(1.0));
         let mut wake = state.next_tick;
-        if state.render_pending && !state.occluded {
+        if redraw_eligible(state.render_pending, state.visible, state.occluded) {
             let due = state.last_render + frame_interval;
             if now >= due {
                 state.window.request_redraw();
@@ -613,10 +656,11 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Ignore redraws while occluded. Unsolicited OS redraws while
-                // the retained frame is current are rejected and counted by
-                // `redraw`; resize/reveal and game dirt arm real frames.
-                if state.occluded {
+                // Ignore redraws while hidden or occluded. Unsolicited OS
+                // redraws while the retained frame is current are rejected
+                // and counted by `redraw`; resize/reveal/show and game dirt
+                // arm real frames.
+                if !state.visible || state.occluded {
                     return;
                 }
                 if let Err(e) = self.redraw() {
@@ -630,5 +674,99 @@ impl<D: Driver> ApplicationHandler for WidgetApp<D> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.pump(event_loop);
+    }
+}
+
+fn apply_window_command(
+    command: Option<WindowCommand>,
+    visible: &mut bool,
+    occluded: &mut bool,
+    render_pending: &mut bool,
+) -> Option<bool> {
+    let requested = match command? {
+        WindowCommand::Show => true,
+        WindowCommand::Hide => false,
+    };
+    if requested == *visible {
+        return None;
+    }
+
+    *visible = requested;
+    if requested {
+        // Hiding can produce an Occluded(true) event. Optimistically clear
+        // that cached state when showing so the first repaint is not blocked;
+        // a subsequent real occlusion event will suspend rendering again.
+        *occluded = false;
+        *render_pending = true;
+    }
+    Some(requested)
+}
+
+fn redraw_eligible(render_pending: bool, visible: bool, occluded: bool) -> bool {
+    render_pending && visible && !occluded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WindowCommand, apply_window_command, redraw_eligible};
+
+    #[test]
+    fn hide_keeps_pending_work_and_show_arms_one_fresh_frame() {
+        let mut visible = true;
+        let mut occluded = true;
+        let mut render_pending = false;
+
+        assert_eq!(
+            apply_window_command(
+                Some(WindowCommand::Hide),
+                &mut visible,
+                &mut occluded,
+                &mut render_pending,
+            ),
+            Some(false)
+        );
+        assert!(!visible);
+        assert!(occluded);
+        assert!(!redraw_eligible(render_pending, visible, occluded));
+
+        // A fixed tick may report dirt while the window remains hidden.
+        render_pending = true;
+        assert_eq!(
+            apply_window_command(
+                Some(WindowCommand::Show),
+                &mut visible,
+                &mut occluded,
+                &mut render_pending,
+            ),
+            Some(true)
+        );
+        assert!(visible);
+        assert!(!occluded);
+        assert!(redraw_eligible(render_pending, visible, occluded));
+
+        // The real redraw path clears this latch after presenting once.
+        render_pending = false;
+        assert!(!redraw_eligible(render_pending, visible, occluded));
+    }
+
+    #[test]
+    fn repeated_visibility_requests_are_coalesced() {
+        let mut visible = false;
+        let mut occluded = false;
+        let mut render_pending = false;
+
+        assert_eq!(
+            apply_window_command(
+                Some(WindowCommand::Hide),
+                &mut visible,
+                &mut occluded,
+                &mut render_pending,
+            ),
+            None
+        );
+        assert_eq!(
+            apply_window_command(None, &mut visible, &mut occluded, &mut render_pending),
+            None
+        );
     }
 }
