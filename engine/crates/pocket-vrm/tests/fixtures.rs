@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use glam::Mat4;
+use glam::{Mat4, Quat};
 use pocket_vrm::{SpringSolver, VrmDoc, load_vrma_bytes, retarget};
 use pocket3d::anim::ChannelPath;
 
@@ -121,6 +121,48 @@ fn retargets_idle_loop_onto_model() {
         // well within a meter of the origin, at a plausible hips height.
         assert!(key[0].abs() < 1.0 && key[2].abs() < 1.0, "hips key {key:?}");
         assert!(key[1] > 0.5 && key[1] < 1.5, "hips height {key:?}");
+    }
+}
+
+#[test]
+fn retargets_persona_idle_in_three_vrm_humanoid_space() {
+    let Some(doc) = parse_model() else { return };
+    let Some(vrma_bytes) = fixture("persona_idle.vrma") else {
+        return;
+    };
+    let vrma = load_vrma_bytes(&vrma_bytes).expect("parse Persona idle.vrma");
+    let skeleton = doc.skeleton();
+    let clip = retarget(&vrma, &doc.humanoid, &skeleton).expect("retarget");
+
+    // three-vrm-animation 3.5.5 goldens at t=0 for the fixture hashes in
+    // fixtures/README.md. Quaternion sign is intentionally ignored because
+    // q and -q encode the same rotation.
+    for (bone, expected) in [
+        (
+            "leftShoulder",
+            [-0.00015870374, -0.000025635985, 0.0026245797, 0.9999966],
+        ),
+        (
+            "leftUpperLeg",
+            [-0.13836673, -0.064443536, 0.09937916, -0.98327285],
+        ),
+        (
+            "leftFoot",
+            [-0.019556088, -0.06355039, -0.055737823, -0.996229],
+        ),
+    ] {
+        let node = doc.humanoid_node(bone).expect("model humanoid bone");
+        let channel = clip
+            .channels
+            .iter()
+            .find(|channel| channel.node == node && channel.path == ChannelPath::Rotation)
+            .unwrap_or_else(|| panic!("missing {bone} rotation channel"));
+        let actual = Quat::from_array(channel.values[..4].try_into().unwrap()).normalize();
+        let expected = Quat::from_array(expected).normalize();
+        assert!(
+            actual.dot(expected).abs() > 1.0 - 1.0e-6,
+            "{bone}: actual={actual:?} expected={expected:?}"
+        );
     }
 }
 

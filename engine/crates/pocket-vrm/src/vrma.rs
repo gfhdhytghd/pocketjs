@@ -1,10 +1,10 @@
 //! `.vrma` (VRMC_vrm_animation) loading and retargeting onto a VRM model.
 //!
-//! Both rigs are VRM-normalized (identity rest rotations), so humanoid
-//! rotation channels transfer by bone name without basis conversion. Hips
-//! translation is scaled by the rest hips-height ratio and re-anchored so
-//! the first key sits over the origin in X/Z (mirrors airi's
-//! `reAnchorRootPositionTrack`).
+//! VRMA rotation tracks are authored on the animation file's raw glTF rig.
+//! They are first converted into VRM's normalized humanoid space, then into
+//! the target VRM 0.x rig's raw local bone space. Hips translation is scaled
+//! by the rest hips-height ratio and re-anchored so the first key sits over
+//! the origin in X/Z (mirrors airi's `reAnchorRootPositionTrack`).
 //!
 //! Heights are measured in *channel units* — parent chains accumulated with
 //! rotations but ancestor scales ignored — because glTF translation keys
@@ -14,6 +14,7 @@
 //! model's meters.
 
 use anyhow::{Context, Result, bail, ensure};
+use glam::{Mat4, Quat};
 use pocket3d::anim::{Channel, ChannelPath, Clip, Interpolation, NodeTrs, Skeleton};
 use serde_json::Value;
 
@@ -222,16 +223,60 @@ pub fn retarget(
         };
         match ch.path {
             ChannelPath::Rotation => {
-                // VRMC_vrm_animation poses live in the VRM 1.0 humanoid
-                // space (character faces +Z); VRM 0.x rigs face -Z. Conjugate
-                // every rotation by the 180° yaw between the spaces —
-                // R_y(π) q R_y(π)⁻¹ — which for quaternions is (-x, y, -z, w).
+                ensure!(
+                    ch.node < vrma.nodes.rest.len(),
+                    "vrma rotation node {} out of range",
+                    ch.node
+                );
+                ensure!(
+                    model_node < model_skeleton.rest.len(),
+                    "model rotation node {model_node} out of range"
+                );
+
+                // Match three-vrm's normalized humanoid pipeline instead of
+                // assigning the source rig's raw local quaternion directly:
+                //
+                //   normalized = sourceParentWorld * sourceLocal
+                //                * inverse(sourceBoneWorldRest)
+                //   targetLocal = inverse(targetParentWorld) * normalized
+                //                 * targetParentWorld * targetLocalRest
+                //
+                // Hands and feet commonly have very different raw rest axes
+                // between rigs, so skipping these basis changes produces the
+                // most visible errors at wrists and ankles.
+                let source_parent = source_humanoid_parent_rest_global_rotation(vrma, ch.node);
+                let source_bone =
+                    rest_global_rotation(ch.node, &vrma.nodes.parents, &vrma.nodes.rest);
+                let target_parent = parent_rest_global_rotation(
+                    model_node,
+                    &model_skeleton.parents,
+                    &model_skeleton.rest,
+                );
+                let target_rest = model_skeleton.rest[model_node].rotation;
                 let values: Vec<f32> = ch
                     .values
                     .as_chunks::<4>()
                     .0
                     .iter()
-                    .flat_map(|q| [-q[0], q[1], -q[2], q[3]])
+                    .flat_map(|q| {
+                        let source_local = Quat::from_xyzw(q[0], q[1], q[2], q[3]).normalize();
+                        let normalized =
+                            (source_parent * source_local * source_bone.inverse()).normalize();
+                        // VRMC_vrm_animation normalized poses face +Z; the
+                        // only target format supported by pocket-vrm today is
+                        // VRM 0.x, which faces -Z. Conjugating by a 180° yaw
+                        // changes quaternion components to (-x, y, -z, w).
+                        let normalized = Quat::from_xyzw(
+                            -normalized.x,
+                            normalized.y,
+                            -normalized.z,
+                            normalized.w,
+                        );
+                        let target_local =
+                            (target_parent.inverse() * normalized * target_parent * target_rest)
+                                .normalize();
+                        target_local.to_array()
+                    })
                     .collect();
                 channels.push(Channel {
                     node: model_node,
@@ -284,6 +329,98 @@ pub fn retarget(
     })
 }
 
+/// Rest-pose world rotation of a node's immediate parent. Walking the chain
+/// keeps this correct even when glTF node indices are not parents-first.
+fn parent_rest_global_rotation(node: usize, parents: &[usize], rest: &[NodeTrs]) -> Quat {
+    let parent = parents[node];
+    if parent == usize::MAX {
+        Quat::IDENTITY
+    } else {
+        rest_global_rotation(parent, parents, rest)
+    }
+}
+
+/// Rest-pose world rotation of `node`, independent of glTF node index order.
+fn rest_global_rotation(node: usize, parents: &[usize], rest: &[NodeTrs]) -> Quat {
+    let mut transform = Mat4::IDENTITY;
+    let mut chain = Vec::new();
+    let mut current = node;
+    while current != usize::MAX {
+        chain.push(current);
+        current = parents[current];
+    }
+    for ancestor in chain.into_iter().rev() {
+        transform *= rest[ancestor].matrix();
+    }
+    three_decomposed_rotation(transform)
+}
+
+/// Match `THREE.Matrix4.decompose` followed by
+/// `THREE.Quaternion.setFromRotationMatrix` for the world-space rest basis.
+///
+/// This deliberately does not use glam's matrix decomposition: the two
+/// libraries choose different matrix-to-quaternion branches for shear, which
+/// naturally appears below a rotated node with a non-uniformly scaled parent.
+fn three_decomposed_rotation(transform: Mat4) -> Quat {
+    let det = transform.determinant();
+    if det == 0.0 {
+        return Quat::IDENTITY;
+    }
+
+    // Three.js stores matrices column-major and removes the length of each
+    // basis column before converting the remaining 3x3 to a quaternion.
+    let mut sx = transform.x_axis.truncate().length();
+    let sy = transform.y_axis.truncate().length();
+    let sz = transform.z_axis.truncate().length();
+    if det < 0.0 {
+        sx = -sx;
+    }
+
+    let m11 = transform.x_axis.x / sx;
+    let m21 = transform.x_axis.y / sx;
+    let m31 = transform.x_axis.z / sx;
+    let m12 = transform.y_axis.x / sy;
+    let m22 = transform.y_axis.y / sy;
+    let m32 = transform.y_axis.z / sy;
+    let m13 = transform.z_axis.x / sz;
+    let m23 = transform.z_axis.y / sz;
+    let m33 = transform.z_axis.z / sz;
+
+    // Exact branch structure from THREE.Quaternion.setFromRotationMatrix.
+    let trace = m11 + m22 + m33;
+    let rotation = if trace > 0.0 {
+        let s = 0.5 / (trace + 1.0).sqrt();
+        Quat::from_xyzw((m32 - m23) * s, (m13 - m31) * s, (m21 - m12) * s, 0.25 / s)
+    } else if m11 > m22 && m11 > m33 {
+        let s = 2.0 * (1.0 + m11 - m22 - m33).sqrt();
+        Quat::from_xyzw(0.25 * s, (m12 + m21) / s, (m13 + m31) / s, (m32 - m23) / s)
+    } else if m22 > m33 {
+        let s = 2.0 * (1.0 + m22 - m11 - m33).sqrt();
+        Quat::from_xyzw((m12 + m21) / s, 0.25 * s, (m23 + m32) / s, (m13 - m31) / s)
+    } else {
+        let s = 2.0 * (1.0 + m33 - m11 - m22).sqrt();
+        Quat::from_xyzw((m13 + m31) / s, (m23 + m32) / s, 0.25 * s, (m21 - m12) / s)
+    };
+    rotation.normalize()
+}
+
+/// three-vrm normalizes a VRMA key relative to its closest mapped humanoid
+/// parent, not necessarily the raw glTF node's immediate parent. If a bone is
+/// the humanoid root, the hips node's raw parent provides that basis.
+fn source_humanoid_parent_rest_global_rotation(vrma: &VrmaDoc, node: usize) -> Quat {
+    let mut current = vrma.nodes.parents[node];
+    while current != usize::MAX {
+        if vrma.humanoid.iter().any(|&(_, mapped)| mapped == current) {
+            return rest_global_rotation(current, &vrma.nodes.parents, &vrma.nodes.rest);
+        }
+        current = vrma.nodes.parents[current];
+    }
+    vrma.humanoid_node("hips").map_or_else(
+        || parent_rest_global_rotation(node, &vrma.nodes.parents, &vrma.nodes.rest),
+        |hips| parent_rest_global_rotation(hips, &vrma.nodes.parents, &vrma.nodes.rest),
+    )
+}
+
 /// Rest-pose hips height in channel units: the parent chain accumulated
 /// with rotations applied but ancestor scales ignored, because animation
 /// translation keys are parent-local (see the module docs).
@@ -300,7 +437,7 @@ fn channel_units_height(node: usize, parents: &[usize], rest: &[NodeTrs]) -> f32
 
 #[cfg(test)]
 mod tests {
-    use glam::Vec3;
+    use glam::{Quat, Vec3};
 
     use super::*;
 
@@ -381,5 +518,141 @@ mod tests {
             .find(|c| c.path == ChannelPath::Rotation)
             .unwrap();
         assert_eq!(r.node, 0); // "spine" mapped onto model node 0
+    }
+
+    fn basis_retarget(normalized_pose: Quat) -> (Quat, Quat, Quat) {
+        let source_parent = Quat::from_rotation_y(0.4);
+        let source_helper = Quat::from_rotation_z(0.2);
+        let source_rest = Quat::from_rotation_x(-0.7);
+        let target_root = Quat::from_rotation_z(-0.3);
+        let target_helper = Quat::from_rotation_x(0.15);
+        let target_rest = Quat::from_rotation_y(0.8);
+        let source_parent_trs = NodeTrs {
+            rotation: source_parent,
+            scale: Vec3::new(2.0, 1.0, 0.5),
+            ..NodeTrs::IDENTITY
+        };
+        let source_helper_trs = NodeTrs {
+            rotation: source_helper,
+            scale: Vec3::new(0.7, 1.5, 1.1),
+            ..NodeTrs::IDENTITY
+        };
+        let source_rest_trs = NodeTrs {
+            rotation: source_rest,
+            ..NodeTrs::IDENTITY
+        };
+        let target_root_trs = NodeTrs {
+            translation: Vec3::Y,
+            rotation: target_root,
+            scale: Vec3::new(1.6, 0.8, 1.2),
+        };
+        let target_helper_trs = NodeTrs {
+            rotation: target_helper,
+            scale: Vec3::new(0.9, 1.4, 0.6),
+            ..NodeTrs::IDENTITY
+        };
+
+        // Invert the loader's source-normalization formula to author a raw
+        // source key representing `normalized_pose`. The unmapped helper node
+        // and non-uniform scales cover full matrixWorld decomposition.
+        let source_parent_world = three_decomposed_rotation(source_parent_trs.matrix());
+        let source_bone_world = three_decomposed_rotation(
+            source_parent_trs.matrix() * source_helper_trs.matrix() * source_rest_trs.matrix(),
+        );
+        let source_key =
+            (source_parent_world.inverse() * normalized_pose * source_bone_world).normalize();
+        let vrma = VrmaDoc {
+            name: "basis".into(),
+            duration: 1.0,
+            humanoid: vec![("hips".into(), 0), ("leftHand".into(), 2)],
+            channels: vec![Channel {
+                node: 2,
+                path: ChannelPath::Rotation,
+                interpolation: Interpolation::Linear,
+                times: vec![0.0],
+                values: source_key.to_array().to_vec(),
+            }],
+            nodes: GltfNodes {
+                names: vec![
+                    "source-hips".into(),
+                    "source-helper".into(),
+                    "source-hand".into(),
+                ],
+                parents: vec![usize::MAX, 0, 1],
+                rest: vec![source_parent_trs, source_helper_trs, source_rest_trs],
+                children: vec![vec![1], vec![2], vec![]],
+            },
+        };
+        let model = Skeleton {
+            parents: vec![usize::MAX, 0, 1],
+            rest: vec![
+                target_root_trs,
+                target_helper_trs,
+                NodeTrs {
+                    rotation: target_rest,
+                    ..NodeTrs::IDENTITY
+                },
+            ],
+            order: vec![0, 1, 2],
+        };
+
+        let clip = retarget(&vrma, &[("hips".into(), 0), ("leftHand".into(), 2)], &model)
+            .expect("retarget");
+        let actual = Quat::from_array(clip.channels[0].values[..4].try_into().unwrap());
+        let flipped_pose = Quat::from_xyzw(
+            -normalized_pose.x,
+            normalized_pose.y,
+            -normalized_pose.z,
+            normalized_pose.w,
+        );
+        let target_parent =
+            three_decomposed_rotation(target_root_trs.matrix() * target_helper_trs.matrix());
+        let expected =
+            (target_parent.inverse() * flipped_pose * target_parent * target_rest).normalize();
+        (actual, expected, target_rest)
+    }
+
+    #[test]
+    fn retarget_converts_between_source_and_target_bone_bases() {
+        let (actual, expected, _) = basis_retarget(Quat::from_rotation_x(0.25));
+        assert!(
+            actual.angle_between(expected) < 1e-5,
+            "actual={actual:?} expected={expected:?}"
+        );
+    }
+
+    #[test]
+    fn retarget_maps_source_rest_to_target_rest() {
+        let (actual, expected, target_rest) = basis_retarget(Quat::IDENTITY);
+        assert!(
+            actual.angle_between(expected) < 1e-5 && actual.angle_between(target_rest) < 1e-5,
+            "actual={actual:?} expected={expected:?} target_rest={target_rest:?}"
+        );
+    }
+
+    #[test]
+    fn rest_world_rotation_matches_three_decomposition_under_shear() {
+        // A rotated child below a non-uniformly scaled parent produces shear.
+        // This hard-coded golden comes from Three.js 0.180.0 Matrix4.decompose;
+        // glam's generic decomposition differs by about 1.84 radians here.
+        let root = NodeTrs {
+            rotation: Quat::from_rotation_x(2.5),
+            scale: Vec3::new(3.0, 0.5, 1.0),
+            ..NodeTrs::IDENTITY
+        };
+        let child = NodeTrs {
+            rotation: Quat::from_rotation_z(0.75),
+            scale: Vec3::new(0.7, 2.0, 1.3),
+            ..NodeTrs::IDENTITY
+        };
+        let actual = rest_global_rotation(1, &[usize::MAX, 0], &[root, child]);
+        let expected = Quat::from_xyzw(0.460_139_9, -0.060_026_97, 0.563_158_1, 0.683_755_1);
+        assert!(
+            actual.angle_between(expected) < 1e-5,
+            "actual={actual:?} expected={expected:?}"
+        );
+
+        let singular = Mat4::from_scale(Vec3::new(1.0, 0.0, 1.0));
+        assert_eq!(three_decomposed_rotation(singular), Quat::IDENTITY);
     }
 }
