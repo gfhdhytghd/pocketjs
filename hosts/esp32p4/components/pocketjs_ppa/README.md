@@ -1,7 +1,11 @@
 # pocketjs_ppa
 
-ESP-IDF component implementing blocking RGB565 FILL, A8-over-RGB565 BLEND, and
-PSP PSM5650-to-RGB565 SRM operations for PocketJS on ESP32-P4.
+ESP-IDF component implementing blocking RGB565 FILL, A8-over-RGB565 BLEND,
+straight-alpha PocketJS RGBA8-over-RGB565 BLEND, and PSP
+PSM5650-to-RGB565 SRM operations for PocketJS on ESP32-P4. RGBA8 texture bytes
+remain in the core's canonical `[R,G,B,A]` order; the component selects PPA
+ARGB8888 input and enables foreground RGB swap instead of allocating a
+reordered copy.
 
 The public C ABI is normally consumed by the `EspIdfPpaOps` Rust type. See the
 [ESP32-P4 host documentation](../../README.md) for integration, compatibility,

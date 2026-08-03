@@ -41,6 +41,25 @@ unsafe extern "C" {
         blue: u8,
         global_alpha: u8,
     ) -> i32;
+    fn pocketjs_ppa_blend_rgba8888_rgb565(
+        handle: *mut c_void,
+        destination: *mut u16,
+        destination_pixels: usize,
+        width: u32,
+        height: u32,
+        source: *const u8,
+        source_len: usize,
+        source_width: u32,
+        source_height: u32,
+        source_x: u32,
+        source_y: u32,
+        source_rect_width: u32,
+        source_rect_height: u32,
+        destination_x: u32,
+        destination_y: u32,
+        destination_rect_width: u32,
+        destination_rect_height: u32,
+    ) -> i32;
     fn pocketjs_ppa_srm_psm5650_rgb565(
         handle: *mut c_void,
         destination: *mut u16,
@@ -151,6 +170,40 @@ impl PpaOps for EspIdfPpaOps {
                 color[1],
                 color[2],
                 global_alpha,
+            ) != 0
+        }
+    }
+
+    fn blend_rgba8888_rgb565(
+        &mut self,
+        destination: &mut [u16],
+        width: u32,
+        height: u32,
+        source: &[u8],
+        source_width: u32,
+        source_height: u32,
+        source_rect: Rect,
+        destination_rect: Rect,
+    ) -> bool {
+        unsafe {
+            pocketjs_ppa_blend_rgba8888_rgb565(
+                self.handle,
+                destination.as_mut_ptr(),
+                destination.len(),
+                width,
+                height,
+                source.as_ptr(),
+                source.len(),
+                source_width,
+                source_height,
+                source_rect.x,
+                source_rect.y,
+                source_rect.w,
+                source_rect.h,
+                destination_rect.x,
+                destination_rect.y,
+                destination_rect.w,
+                destination_rect.h,
             ) != 0
         }
     }

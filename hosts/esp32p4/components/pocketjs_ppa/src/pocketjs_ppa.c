@@ -5,7 +5,10 @@
 #include <stdlib.h>
 
 #include "driver/ppa.h"
+#include "esp_cache.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_private/esp_cache_private.h"
 
 static const char *TAG = "pocketjs_ppa";
 
@@ -16,6 +19,7 @@ struct pocketjs_ppa_context {
     bool fill_error_logged;
     bool blend_error_logged;
     bool srm_error_logged;
+    bool srm_cache_error_logged;
 };
 
 static bool surface_is_valid(
@@ -143,7 +147,7 @@ esp_err_t pocketjs_ppa_create(pocketjs_ppa_handle_t *out_handle)
     }
 
     *out_handle = handle;
-    ESP_LOGI(TAG, "RGB565 backend ready: FILL + A8 BLEND + SRM");
+    ESP_LOGI(TAG, "RGB565 backend ready: FILL + A8/RGBA8 BLEND + SRM");
     return ESP_OK;
 }
 
@@ -312,6 +316,126 @@ int pocketjs_ppa_blend_a8_rgb565(
     return 1;
 }
 
+int pocketjs_ppa_blend_rgba8888_rgb565(
+    pocketjs_ppa_handle_t handle,
+    uint16_t *destination,
+    size_t destination_pixels,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *source,
+    size_t source_len,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t source_x,
+    uint32_t source_y,
+    uint32_t source_rect_width,
+    uint32_t source_rect_height,
+    uint32_t destination_x,
+    uint32_t destination_y,
+    uint32_t destination_rect_width,
+    uint32_t destination_rect_height
+)
+{
+    if (handle == NULL ||
+        handle->blend == NULL ||
+        !surface_is_valid(
+            destination,
+            destination_pixels,
+            width,
+            height,
+            sizeof(*destination)
+        ) ||
+        source == NULL ||
+        source_width == 0 ||
+        source_height == 0 ||
+        (size_t)source_width > SIZE_MAX / (size_t)source_height ||
+        (size_t)source_width * (size_t)source_height > SIZE_MAX / 4U) {
+        return 0;
+    }
+
+    const size_t source_required =
+        (size_t)source_width * (size_t)source_height * 4U;
+    const size_t destination_size =
+        destination_pixels * sizeof(*destination);
+    if (source_len < source_required ||
+        byte_ranges_overlap(
+            source,
+            source_required,
+            destination,
+            destination_size
+        ) ||
+        !rect_is_valid(
+            source_width,
+            source_height,
+            source_x,
+            source_y,
+            source_rect_width,
+            source_rect_height
+        ) ||
+        !rect_is_valid(
+            width,
+            height,
+            destination_x,
+            destination_y,
+            destination_rect_width,
+            destination_rect_height
+        ) ||
+        source_rect_width != destination_rect_width ||
+        source_rect_height != destination_rect_height) {
+        return 0;
+    }
+
+    const ppa_blend_oper_config_t operation = {
+        .in_bg = {
+            .buffer = destination,
+            .pic_w = width,
+            .pic_h = height,
+            .block_w = destination_rect_width,
+            .block_h = destination_rect_height,
+            .block_offset_x = destination_x,
+            .block_offset_y = destination_y,
+            .blend_cm = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .in_fg = {
+            .buffer = source,
+            .pic_w = source_width,
+            .pic_h = source_height,
+            .block_w = source_rect_width,
+            .block_h = source_rect_height,
+            .block_offset_x = source_x,
+            .block_offset_y = source_y,
+            .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888,
+        },
+        .out = {
+            .buffer = destination,
+            .buffer_size = destination_size,
+            .pic_w = width,
+            .pic_h = height,
+            .block_offset_x = destination_x,
+            .block_offset_y = destination_y,
+            .blend_cm = PPA_BLEND_COLOR_MODE_RGB565,
+        },
+        .bg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+        // PocketJS PSM8888 is [R,G,B,A]. The PPA's little-endian ARGB8888
+        // input is [B,G,R,A], so swapping foreground R/B maps the core bytes
+        // without a reorder buffer. Alpha remains straight/unpremultiplied.
+        .fg_rgb_swap = true,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+
+    const esp_err_t result = ppa_do_blend(handle->blend, &operation);
+    if (result != ESP_OK) {
+        log_operation_failure_once(
+            "RGBA8 blend",
+            result,
+            &handle->blend_error_logged
+        );
+        return 0;
+    }
+    return 1;
+}
+
 static bool exact_scale(
     uint32_t source_extent,
     uint32_t destination_extent,
@@ -331,6 +455,74 @@ static bool exact_scale(
     }
     *out_scale = (float)sixteenths / 16.0f;
     return true;
+}
+
+static esp_err_t writeback_srm_destination_window(
+    uint16_t *destination,
+    size_t destination_size,
+    uint32_t width,
+    uint32_t destination_y,
+    uint32_t destination_height
+)
+{
+    size_t alignment = 0;
+    esp_err_t result = esp_cache_get_alignment(
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA,
+        &alignment
+    );
+    if (result != ESP_OK) {
+        return result;
+    }
+
+    /* Match ESP-IDF 5.5's SRM output window exactly. The driver invalidates
+     * this aligned, full-stride row range before DMA, but unlike FILL it does
+     * not first write back dirty CPU lines. Preserve ordered software -> SRM
+     * rendering by committing those lines before the driver's invalidate. */
+    if (alignment == 0 ||
+        (alignment & (alignment - 1U)) != 0 ||
+        ((uintptr_t)destination & (alignment - 1U)) != 0 ||
+        (destination_size & (alignment - 1U)) != 0 ||
+        width > SIZE_MAX / sizeof(*destination)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const size_t row_bytes = (size_t)width * sizeof(*destination);
+    if (destination_y > SIZE_MAX / row_bytes ||
+        destination_height > SIZE_MAX / row_bytes) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t window_offset = (size_t)destination_y * row_bytes;
+    const size_t window_size = (size_t)destination_height * row_bytes;
+    if (window_offset > destination_size ||
+        window_size > destination_size - window_offset) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    const uintptr_t window_start =
+        (uintptr_t)destination + (uintptr_t)window_offset;
+    const uintptr_t aligned_start = window_start & ~(alignment - 1U);
+    const size_t leading_bytes = (size_t)(window_start - aligned_start);
+    if (window_size > SIZE_MAX - leading_bytes) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t covered_bytes = leading_bytes + window_size;
+    if (covered_bytes > SIZE_MAX - (alignment - 1U)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t aligned_size =
+        (covered_bytes + alignment - 1U) & ~(alignment - 1U);
+    const size_t aligned_offset =
+        (size_t)(aligned_start - (uintptr_t)destination);
+    if (aligned_offset > destination_size ||
+        aligned_size > destination_size - aligned_offset) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return esp_cache_msync(
+        (void *)aligned_start,
+        aligned_size,
+        ESP_CACHE_MSYNC_FLAG_DIR_C2M
+    );
 }
 
 int pocketjs_ppa_srm_psm5650_rgb565(
@@ -415,6 +607,22 @@ int pocketjs_ppa_srm_psm5650_rgb565(
     float scale_y = 0.0f;
     if (!exact_scale(source_rect_width, scaled_width, &scale_x) ||
         !exact_scale(source_rect_height, scaled_height, &scale_y)) {
+        return 0;
+    }
+
+    const esp_err_t cache_result = writeback_srm_destination_window(
+        destination,
+        destination_size,
+        width,
+        destination_y,
+        destination_rect_height
+    );
+    if (cache_result != ESP_OK) {
+        log_operation_failure_once(
+            "SRM destination cache writeback",
+            cache_result,
+            &handle->srm_cache_error_logged
+        );
         return 0;
     }
 

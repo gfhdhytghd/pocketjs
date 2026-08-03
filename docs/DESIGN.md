@@ -66,11 +66,18 @@ artifacts: `$JOB_TMP/map-*.json`).
   region and replay the complete DrawList under a root clip; framebuffer
   format/scale signatures and `Ui::raster_revision()` prevent stale reuse.
   Region limits and full-redraw thresholds remain backend policy.
+- **Rounded gradients are small retained layers**: the core bakes the exact
+  analytic-span pixels into bounded PSM 8888 `[R,G,B,A]` textures and emits
+  stable `TEX_QUAD` tiles. The cache is capped at 256 KiB, reuses
+  generation-tagged texture slots under phase churn, and falls back to the same
+  spans when a layer cannot fit. It never creates a full-frame 32-bit
+  intermediate.
 - **ESP32-P4 stays 16-bit**: `engine/backends/esp32p4-ppa/` consumes the same
   DrawList into an opaque RGB565 target. It maps flat fills, A8 coverage
-  blending, and compatible PSM 5650 texture transforms to the PPA, then
-  preserves ordering with the core RGB565 rasterizer for unsupported ops.
-  It never allocates a full-frame RGB888/ARGB8888 intermediate.
+  blending, straight-alpha PSM 8888 texture blending, and compatible PSM 5650
+  texture transforms to the PPA, then preserves ordering with the core RGB565
+  rasterizer for unsupported ops. It never allocates a full-frame
+  RGB888/ARGB8888 intermediate.
 - **Native animation**: tweens/springs tick in Rust per vblank with **fixed
   dt = 1/60 s** (frame content is a pure function of frame index — this is
   what makes byte-exact goldens possible **[R]**). JS only declares motion.

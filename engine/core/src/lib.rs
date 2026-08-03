@@ -35,8 +35,8 @@ pub mod codec;
 pub mod damage;
 pub mod draw;
 pub mod layout;
-pub mod pak;
 pub mod package;
+pub mod pak;
 pub mod raster;
 pub mod spec;
 pub mod stream;
@@ -88,9 +88,9 @@ impl Texture {
     pub fn palette(&self) -> Option<&[u8]> {
         // Safe: the palette Vec<u128> is always TEX_PALETTE_BYTES/16 chunks
         // (constructed only by copy_aligned(_, TEX_PALETTE_BYTES)).
-        self.palette
-            .as_ref()
-            .map(|p| unsafe { core::slice::from_raw_parts(p.as_ptr() as *const u8, TEX_PALETTE_BYTES) })
+        self.palette.as_ref().map(|p| unsafe {
+            core::slice::from_raw_parts(p.as_ptr() as *const u8, TEX_PALETTE_BYTES)
+        })
     }
 
     fn view(&self) -> TexView<'_> {
@@ -176,6 +176,25 @@ pub(crate) fn tex_alloc(slots: &mut Vec<TexSlot>, free: &mut Vec<u32>, tex: Text
     make_tex_handle(s.gen, slot)
 }
 
+/// Release one live texture slot without touching [`Ui::raster_revision`].
+///
+/// Core-owned immutable paint caches use this when evicting an entry. Their
+/// generation-tagged handle is part of the DrawList, so replacing an entry
+/// changes the corresponding draw op and damage stays local. Public texture
+/// mutations still go through [`Ui::free_texture`], which additionally bumps
+/// the resource revision because app-owned handles may be consumed outside a
+/// DrawList.
+pub(crate) fn tex_release(slots: &mut [TexSlot], free: &mut Vec<u32>, handle: i32) -> bool {
+    let Some(slot) = tex_resolve(slots, handle) else {
+        return false;
+    };
+    let s = &mut slots[slot as usize];
+    s.tex = None;
+    s.gen = ((s.gen as u32 + 1) & TEX_GEN_MASK) as u16;
+    free.push(slot);
+    true
+}
+
 /// Copy `byte_len` bytes of `src` (caller guarantees `src.len() >= byte_len`)
 /// into a fresh 16-byte-aligned `u128` backing store.
 fn copy_aligned(src: &[u8], byte_len: usize) -> Vec<u128> {
@@ -231,9 +250,12 @@ pub struct Ui {
     tex_free: Vec<u32>,
     /// Baked rounded-corner disc sprites (see draw::DiscCache).
     discs: draw::DiscCache,
+    /// Exact small RGBA layers for rounded gradients (see draw::GradientCache).
+    gradients: draw::GradientCache,
     /// Raster pixels baked for each logical UI pixel. Layout and DrawList
     /// coordinates always remain logical; only core-owned bitmap resources
-    /// (currently rounded-corner masks) use this density.
+    /// (rounded-corner masks and exact rounded-gradient layers) use this
+    /// density.
     raster_density: u32,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
@@ -295,6 +317,7 @@ impl Ui {
             textures: Vec::new(),
             tex_free: Vec::new(),
             discs: draw::DiscCache::new(),
+            gradients: draw::GradientCache::new(),
             raster_density,
             raster_revision: 1,
             focused: 0,
@@ -316,6 +339,16 @@ impl Ui {
     /// Raster pixels per logical UI pixel for core-owned bitmap resources.
     pub fn raster_density(&self) -> u32 {
         self.raster_density
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_gradient_cache(&mut self) {
+        self.gradients.disable();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gradient_cache_stats(&self) -> (usize, usize) {
+        self.gradients.stats()
     }
 
     /// Monotonic token for texture/font/style contents consumed by renderers.
@@ -380,7 +413,9 @@ impl Ui {
     /// Starts transitions for the animatable old→new diff if the node already
     /// had an established style and the new record carries a transition block.
     pub fn set_style(&mut self, id: i32, style_id: i32) {
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         let old = style::resolve(&self.tree.slots[slot as usize], &self.styles, true);
         let was_initialized = self.tree.slots[slot as usize].style_initialized;
         {
@@ -405,7 +440,9 @@ impl Ui {
         if kind == 0xff {
             return;
         }
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         let bits = prop_bits(kind, value);
         // A direct set wins over any running animation on the same prop.
         let nid = self.tree.slots[slot as usize].id(slot);
@@ -423,7 +460,9 @@ impl Ui {
     /// Set the UTF-8 content of a text node. Empty text nodes are excluded
     /// from layout until they become non-empty.
     pub fn set_text(&mut self, id: i32, text: &str) {
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         if self.tree.slots[slot as usize].node_type != spec::NodeType::Text as u8
             || self.tree.slots[slot as usize].text == text
         {
@@ -453,10 +492,8 @@ impl Ui {
             // the tree text directly, and any later relayout re-collects the
             // run from the tree (never from the stale taffy context).
             let r = style::resolve(&self.tree.slots[root_slot as usize], &self.styles, true);
-            let fixed = r.width.is_finite()
-                && r.width >= 0.0
-                && r.height.is_finite()
-                && r.height >= 0.0;
+            let fixed =
+                r.width.is_finite() && r.width >= 0.0 && r.height.is_finite() && r.height >= 0.0;
             if !fixed {
                 self.layout.mark_style(root_slot);
             }
@@ -492,7 +529,14 @@ impl Ui {
     /// stream (for PSM_T8: the index bytes AFTER the palette — the palette
     /// itself is never compressed) as PackBits-RLE, which must decode to
     /// EXACTLY w*h*bpp bytes; FLAG_LINEAR requests bilinear sampling.
-    pub fn upload_texture_flags(&mut self, data: &[u8], w: u32, h: u32, psm: u32, flags: u8) -> i32 {
+    pub fn upload_texture_flags(
+        &mut self,
+        data: &[u8],
+        w: u32,
+        h: u32,
+        psm: u32,
+        flags: u8,
+    ) -> i32 {
         let bpp = match psm {
             spec::psm::PSM_5650 | spec::psm::PSM_4444 => 2usize,
             spec::psm::PSM_8888 => 4usize,
@@ -508,7 +552,10 @@ impl Ui {
             if data.len() < TEX_PALETTE_BYTES {
                 return -1;
             }
-            (Some(copy_aligned(data, TEX_PALETTE_BYTES)), &data[TEX_PALETTE_BYTES..])
+            (
+                Some(copy_aligned(data, TEX_PALETTE_BYTES)),
+                &data[TEX_PALETTE_BYTES..],
+            )
         } else {
             (None, data)
         };
@@ -518,8 +565,9 @@ impl Ui {
             // decode to EXACTLY byte_len bytes (codec contract) — anything
             // else is a malformed asset.
             let mut chunks = alloc::vec![0u128; byte_len.div_ceil(16)];
-            let dst =
-                unsafe { core::slice::from_raw_parts_mut(chunks.as_mut_ptr() as *mut u8, byte_len) };
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(chunks.as_mut_ptr() as *mut u8, byte_len)
+            };
             if !codec::packbits_decode(stream, dst) {
                 return -1;
             }
@@ -552,7 +600,9 @@ impl Ui {
     /// then the payload — for PSM_T8 a 1024-byte palette then the pixel
     /// stream). Returns the texture handle, or -1 on malformed blobs.
     pub fn upload_img_entry(&mut self, blob: &[u8]) -> i32 {
-        let Some((w, h, psm, flags)) = parse_img_header(blob) else { return -1 };
+        let Some((w, h, psm, flags)) = parse_img_header(blob) else {
+            return -1;
+        };
         self.upload_texture_flags(&blob[8..], w, h, psm, flags)
     }
 
@@ -564,7 +614,9 @@ impl Ui {
     /// tiles), out-of-range indices and malformed blobs. Every offset/length
     /// read is bounds-checked: malformed blobs return -1, never panic.
     pub fn upload_tileset_tile(&mut self, blob: &[u8], index: u32) -> i32 {
-        let Some(tile) = parse_tileset_tile(blob, index) else { return -1 };
+        let Some(tile) = parse_tileset_tile(blob, index) else {
+            return -1;
+        };
         // Reassemble the upload_texture_flags PSM_T8 layout (palette, then
         // pixel stream) — palette and stream live at unrelated offsets in
         // the entry.
@@ -578,7 +630,13 @@ impl Ui {
         if tile.flags & spec::tileset::FLAG_LINEAR != 0 {
             img_flags |= spec::img::FLAG_LINEAR;
         }
-        self.upload_texture_flags(&data, tile.tile_w, tile.tile_h, spec::psm::PSM_T8, img_flags)
+        self.upload_texture_flags(
+            &data,
+            tile.tile_w,
+            tile.tile_h,
+            spec::psm::PSM_T8,
+            img_flags,
+        )
     }
 
     /// Overwrite a live PSM_T8 texture's palette + pixels IN PLACE (the video
@@ -591,15 +649,21 @@ impl Ui {
     /// Callers on the PSP must writeback the texture after (the GE samples
     /// RAM, not the dcache).
     pub fn update_texture_t8(&mut self, handle: i32, palette: &[u8], pixels: &[u8]) -> bool {
-        let Some(slot) = tex_resolve(&self.textures, handle) else { return false };
-        let Some(tex) = self.textures[slot as usize].tex.as_mut() else { return false };
+        let Some(slot) = tex_resolve(&self.textures, handle) else {
+            return false;
+        };
+        let Some(tex) = self.textures[slot as usize].tex.as_mut() else {
+            return false;
+        };
         if tex.psm != spec::psm::PSM_T8 || palette.len() != TEX_PALETTE_BYTES {
             return false;
         }
         if pixels.len() != tex.byte_len {
             return false;
         }
-        let Some(pal) = tex.palette.as_mut() else { return false };
+        let Some(pal) = tex.palette.as_mut() else {
+            return false;
+        };
         unsafe {
             core::ptr::copy_nonoverlapping(
                 palette.as_ptr(),
@@ -621,15 +685,12 @@ impl Ui {
     /// the slot's generation so every outstanding copy of the handle goes
     /// stale (resolves to nothing, draws nothing), and push the slot on the
     /// LIFO free list. Stale/unknown handles are silent no-ops. Freeing a
-    /// core-internal texture (a baked corner disc) is safe: the DiscCache
-    /// re-validates its handles each use and re-bakes dead ones.
+    /// core-internal texture (a baked corner disc or gradient layer) is safe:
+    /// paint caches re-validate handles and re-bake dead entries on demand.
     pub fn free_texture(&mut self, handle: i32) {
-        let Some(slot) = tex_resolve(&self.textures, handle) else { return };
-        let s = &mut self.textures[slot as usize];
-        s.tex = None;
-        s.gen = ((s.gen as u32 + 1) & TEX_GEN_MASK) as u16;
-        self.tex_free.push(slot);
-        self.bump_raster_revision();
+        if tex_release(&mut self.textures, &mut self.tex_free, handle) {
+            self.bump_raster_revision();
+        }
     }
 
     /// Bind an uploaded texture to an image node. Handles are 0-based, so
@@ -639,7 +700,9 @@ impl Ui {
         if tex >= 0 && tex_resolve(&self.textures, tex).is_none() {
             return;
         }
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         let node = &mut self.tree.slots[slot as usize];
         if node.node_type == spec::NodeType::Image as u8 {
             node.tex = if tex < 0 { -1 } else { tex };
@@ -658,7 +721,9 @@ impl Ui {
             return;
         }
         let frame = self.frame;
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         let node = &mut self.tree.slots[slot as usize];
         if node.node_type != spec::NodeType::Image as u8 {
             return;
@@ -717,10 +782,13 @@ impl Ui {
         if !spec::is_animatable(prop) || easing > spec::Easing::SpringBouncy as u8 {
             return -1;
         }
-        let Some(slot) = self.tree.resolve(id) else { return -1 };
+        let Some(slot) = self.tree.resolve(id) else {
+            return -1;
+        };
         let kind = spec::PROP_VALUE_KIND[prop as usize];
         let is_color = kind == spec::value_kind::COLOR;
-        let from = style::resolve(&self.tree.slots[slot as usize], &self.styles, true).get_bits(prop);
+        let from =
+            style::resolve(&self.tree.slots[slot as usize], &self.styles, true).get_bits(prop);
         let to_bits = prop_bits(kind, to);
         let nid = self.tree.slots[slot as usize].id(slot);
         if !is_color {
@@ -765,7 +833,9 @@ impl Ui {
     /// Cancel a running animation (leaves the prop at its current value, as a
     /// dynamic override).
     pub fn cancel_anim(&mut self, anim_id: i32) {
-        let Some(tslot) = self.anims.resolve(anim_id) else { return };
+        let Some(tslot) = self.anims.resolve(anim_id) else {
+            return;
+        };
         let (node_id, prop) = {
             let t = &self.anims.tracks[tslot as usize];
             (t.node, t.prop)
@@ -786,7 +856,13 @@ impl Ui {
     /// natively — zero JS runs on focus change. Variant swaps run through the
     /// record's transition block like `set_style`.
     pub fn set_focus(&mut self, id: i32) {
-        let target = if id == 0 { 0 } else if self.tree.resolve(id).is_some() { id } else { return };
+        let target = if id == 0 {
+            0
+        } else if self.tree.resolve(id).is_some() {
+            id
+        } else {
+            return;
+        };
         if target == self.focused {
             return;
         }
@@ -810,7 +886,9 @@ impl Ui {
     /// focus; spec op 26 — the JS input layer holds it while the press
     /// button is down).
     pub fn set_active(&mut self, id: i32, active: bool) {
-        let Some(slot) = self.tree.resolve(id) else { return };
+        let Some(slot) = self.tree.resolve(id) else {
+            return;
+        };
         if self.tree.slots[slot as usize].active == active {
             return;
         }
@@ -1083,7 +1161,10 @@ impl Ui {
             }
         }
         let style_id = self.tree.slots[slot as usize].style_id;
-        let Some(animation) = self.styles.record(style_id).and_then(|r| r.animation.clone())
+        let Some(animation) = self
+            .styles
+            .record(style_id)
+            .and_then(|r| r.animation.clone())
         else {
             return;
         };
@@ -1112,8 +1193,16 @@ impl Ui {
             tex_resolve(&self.textures, self.cursor_tex)
                 .and_then(|slot| self.textures[slot as usize].tex.as_ref())
                 .map(|t| {
-                    let w = if self.cursor_size.0 > 0.0 { self.cursor_size.0 } else { t.w as f32 };
-                    let h = if self.cursor_size.1 > 0.0 { self.cursor_size.1 } else { t.h as f32 };
+                    let w = if self.cursor_size.0 > 0.0 {
+                        self.cursor_size.0
+                    } else {
+                        t.w as f32
+                    };
+                    let h = if self.cursor_size.1 > 0.0 {
+                        self.cursor_size.1
+                    } else {
+                        t.h as f32
+                    };
                     (
                         self.cursor_tex as u32,
                         self.cursor_pos.0 - self.cursor_hot.0,
@@ -1134,6 +1223,7 @@ impl Ui {
             &mut self.textures,
             &mut self.tex_free,
             &mut self.discs,
+            &mut self.gradients,
             self.raster_density,
             &mut self.draw_list,
             self.inspect_id,
@@ -1306,7 +1396,9 @@ impl Ui {
     fn text_layout_root(&self, mut slot: u32) -> u32 {
         loop {
             let parent = self.tree.slots[slot as usize].parent;
-            let Some(parent_slot) = self.tree.resolve(parent) else { return slot };
+            let Some(parent_slot) = self.tree.resolve(parent) else {
+                return slot;
+            };
             if self.tree.slots[parent_slot as usize].node_type != spec::NodeType::Text as u8 {
                 return slot;
             }
@@ -1442,7 +1534,13 @@ fn parse_tileset_tile(blob: &[u8], index: u32) -> Option<TilesetTile<'_>> {
     let palette = blob.get(palette_off..palette_off.checked_add(TEX_PALETTE_BYTES)?)?;
     let start = data_off.checked_add(off as usize)?;
     let stream = blob.get(start..start.checked_add(len)?)?;
-    Some(TilesetTile { tile_w, tile_h, flags, palette, stream })
+    Some(TilesetTile {
+        tile_w,
+        tile_h,
+        flags,
+        palette,
+        stream,
+    })
 }
 
 /// Convert a `set_prop`/`animate` f64 payload to raw u32 prop bits per its

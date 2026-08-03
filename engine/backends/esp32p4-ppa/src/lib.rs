@@ -80,6 +80,15 @@ pub struct SrmTransform {
 /// subsequent CPU or PPA operations. Returning `false` requests the ordered
 /// software fallback.
 pub trait PpaOps {
+    /// Optional monotonic profiling clock used by [`Renderer`] receipts.
+    ///
+    /// Portable and `no_std` implementations can keep the default. Product
+    /// hosts that return microseconds get per-frame CPU-phase and blocking PPA
+    /// call timings without putting a platform timer in this backend.
+    fn profile_clock_us(&self) -> Option<u64> {
+        None
+    }
+
     /// Fill `rect` in the full RGB565 destination.
     fn fill_rgb565(
         &mut self,
@@ -102,6 +111,31 @@ pub trait PpaOps {
         color: [u8; 3],
         global_alpha: u8,
     ) -> bool;
+
+    /// Blend a straight-alpha PSM8888 source over the RGB565 destination.
+    ///
+    /// `source` uses PocketJS' canonical row-major `[R, G, B, A]` byte
+    /// layout. ESP-IDF implementations expose it to the PPA as ARGB8888 with
+    /// the foreground RGB-swap bit enabled; callers must not reorder or
+    /// premultiply the texture. Source and destination rectangles have equal
+    /// dimensions because the PPA blend engine does not scale.
+    ///
+    /// The default declines the operation so existing portable `PpaOps`
+    /// implementations retain the ordered software fallback.
+    #[allow(clippy::too_many_arguments)]
+    fn blend_rgba8888_rgb565(
+        &mut self,
+        _destination: &mut [u16],
+        _width: u32,
+        _height: u32,
+        _source: &[u8],
+        _source_width: u32,
+        _source_height: u32,
+        _source_rect: Rect,
+        _destination_rect: Rect,
+    ) -> bool {
+        false
+    }
 
     /// Copy an opaque PSP PSM 5650 texture into the RGB565 destination with
     /// PPA SRM. PSM 5650 stores R and B opposite to ESP RGB565, so the host
@@ -156,6 +190,41 @@ pub struct RenderStats {
     pub damage_bounds: Rect,
     /// True for an initial, invalidated, or heuristically promoted full frame.
     pub full_redraw: bool,
+    /// Wall time spent clearing damaged regions, including a PPA FILL when it
+    /// serviced the clear. This intentionally overlaps `ppa_fill_us`.
+    pub damage_clear_us: u32,
+    /// CPU time spent allocating, clearing, and constructing A8 masks.
+    pub mask_build_us: u32,
+    /// CPU time spent in ordered RGB565 software raster fallbacks.
+    pub software_us: u32,
+    /// Cumulative wall time inside every attempted blocking PPA FILL call.
+    pub ppa_fill_us: u32,
+    /// Cumulative wall time inside every attempted blocking PPA BLEND call.
+    pub ppa_blend_us: u32,
+    /// Cumulative wall time inside every attempted blocking PPA SRM call.
+    pub ppa_srm_us: u32,
+}
+
+#[inline]
+fn profile_elapsed<O: PpaOps>(ppa: &O, started_us: Option<u64>) -> u32 {
+    let Some(started_us) = started_us else {
+        return 0;
+    };
+    ppa.profile_clock_us()
+        .map(|ended_us| ended_us.saturating_sub(started_us).min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
+#[inline]
+fn add_profile_time(total_us: &mut u32, elapsed_us: u32) {
+    *total_us = total_us.saturating_add(elapsed_us);
+}
+
+#[inline]
+fn timed_ppa_call<O: PpaOps>(ppa: &mut O, operation: impl FnOnce(&mut O) -> bool) -> (bool, u32) {
+    let started_us = ppa.profile_clock_us();
+    let accepted = operation(ppa);
+    (accepted, profile_elapsed(ppa, started_us))
 }
 
 /// Core damage snapshot describing the pixels stored in one framebuffer.
@@ -270,8 +339,9 @@ impl Renderer {
     ///
     /// The destination must retain the pixels produced by the same
     /// `RenderTargetState`; double-buffered hosts therefore keep one state per
-    /// buffer. Structural DrawList changes, invalidated resources, and damage
-    /// covering most of the screen conservatively fall back to a full redraw.
+    /// buffer. Bounded structural edits are localized; invalidated resources,
+    /// target changes, and damage covering most of the screen conservatively
+    /// fall back to a full redraw.
     #[allow(clippy::too_many_arguments)]
     pub fn render_incremental<O: PpaOps>(
         &mut self,
@@ -364,14 +434,32 @@ impl Renderer {
             ..RenderStats::default()
         };
 
+        let mask_started_us = ppa.profile_clock_us();
         self.ensure_mask(destination.len());
-        if local.area() >= self.config.min_fill_pixels
-            && ppa.fill_rgb565(destination, width, height, local, 0)
-        {
-            stats.ppa_fills += 1;
+        add_profile_time(
+            &mut stats.mask_build_us,
+            profile_elapsed(ppa, mask_started_us),
+        );
+        let clear_started_us = ppa.profile_clock_us();
+        let cleared_by_ppa = if local.area() >= self.config.min_fill_pixels {
+            let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                ppa.fill_rgb565(destination, width, height, local, 0)
+            });
+            add_profile_time(&mut stats.ppa_fill_us, elapsed_us);
+            if accepted {
+                stats.ppa_fills += 1;
+            }
+            accepted
         } else {
+            false
+        };
+        if !cleared_by_ppa {
             fill_rgb565_rect(destination, width, local, 0);
         }
+        add_profile_time(
+            &mut stats.damage_clear_us,
+            profile_elapsed(ppa, clear_started_us),
+        );
         self.render_region(
             ui,
             words,
@@ -453,23 +541,59 @@ impl Renderer {
             return Some(stats);
         }
 
-        self.ensure_mask(destination.len());
         for &region in damage.regions() {
+            // PPA cache maintenance and its A8 input scale with the declared
+            // surface, not merely the operation rectangle. A logical damage
+            // region occupies contiguous full-width rows in the persistent
+            // target, so expose only those rows as a compact surface. Pixels
+            // outside `region.x0..region.x1` remain untouched, while every op
+            // keeps its global DrawList coordinates through `strip_surface`.
             let physical = local_physical_rect(region, surface, scale);
-            if physical.area() >= self.config.min_fill_pixels
-                && ppa.fill_rgb565(destination, width, height, physical, 0)
-            {
-                stats.ppa_fills += 1;
+            let strip_start = physical.y as usize * width as usize;
+            let strip_end = (physical.y + physical.h) as usize * width as usize;
+            let strip = destination.get_mut(strip_start..strip_end)?;
+            let strip_height = physical.h;
+            let strip_surface = Clip {
+                x0: surface.x0,
+                y0: region.y0,
+                x1: surface.x1,
+                y1: region.y1,
+            };
+            let local = local_physical_rect(region, strip_surface, scale);
+
+            let mask_started_us = ppa.profile_clock_us();
+            self.ensure_mask(strip.len());
+            add_profile_time(
+                &mut stats.mask_build_us,
+                profile_elapsed(ppa, mask_started_us),
+            );
+            let clear_started_us = ppa.profile_clock_us();
+            let cleared_by_ppa = if local.area() >= self.config.min_fill_pixels {
+                let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                    ppa.fill_rgb565(strip, width, strip_height, local, 0)
+                });
+                add_profile_time(&mut stats.ppa_fill_us, elapsed_us);
+                if accepted {
+                    stats.ppa_fills += 1;
+                }
+                accepted
             } else {
-                fill_rgb565_rect(destination, width, physical, 0);
+                false
+            };
+            if !cleared_by_ppa {
+                fill_rgb565_rect(strip, width, local, 0);
             }
+            add_profile_time(
+                &mut stats.damage_clear_us,
+                profile_elapsed(ppa, clear_started_us),
+            );
             self.render_region(
                 ui,
                 words,
-                destination,
+                strip,
                 width,
-                height,
-                surface,
+                strip_height,
+                strip_surface,
                 region,
                 ppa,
                 &mut stats,
@@ -512,7 +636,7 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                        self.software_op(ui, destination, surface, clip, op, ppa, stats);
                     }
                     i += 4;
                 }
@@ -521,7 +645,15 @@ impl Renderer {
                         .intersect(clip)
                         .is_empty()
                     {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 6], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 6],
+                            ppa,
+                            stats,
+                        );
                     }
                     i += 6;
                 }
@@ -545,7 +677,7 @@ impl Renderer {
                             stats,
                         )
                     {
-                        self.software_op(ui, destination, surface, clip, op, stats);
+                        self.software_op(ui, destination, surface, clip, op, ppa, stats);
                     }
                     i = next;
                 }
@@ -572,7 +704,15 @@ impl Renderer {
                     if let Some(next) = next {
                         i = next;
                     } else {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 9], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 9],
+                            ppa,
+                            stats,
+                        );
                         i += 9;
                     }
                 }
@@ -597,14 +737,30 @@ impl Renderer {
                 spec::draw_op::TRI if i + 7 <= words.len() => {
                     if !triangle_bounds([words[i + 1], words[i + 2], words[i + 3]], clip).is_empty()
                     {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 7], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 7],
+                            ppa,
+                            stats,
+                        );
                     }
                     i += 7;
                 }
                 spec::draw_op::TEX_TRI if i + 12 <= words.len() => {
                     if !triangle_bounds([words[i + 2], words[i + 5], words[i + 8]], clip).is_empty()
                     {
-                        self.software_op(ui, destination, surface, clip, &words[i..i + 12], stats);
+                        self.software_op(
+                            ui,
+                            destination,
+                            surface,
+                            clip,
+                            &words[i..i + 12],
+                            ppa,
+                            stats,
+                        );
                     }
                     i += 12;
                 }
@@ -631,22 +787,35 @@ impl Renderer {
         }
         let rect = local_physical_rect(logical, surface, self.config.scale);
         if a == 255 && rect.area() >= self.config.min_fill_pixels {
-            if ppa.fill_rgb565(destination, width, height, rect, pack_rgb565(r, g, b)) {
+            let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                ppa.fill_rgb565(destination, width, height, rect, pack_rgb565(r, g, b))
+            });
+            add_profile_time(&mut stats.ppa_fill_us, elapsed_us);
+            if accepted {
                 stats.ppa_fills += 1;
                 return true;
             }
         } else if rect.area() >= self.config.min_blend_pixels {
+            let mask_started_us = ppa.profile_clock_us();
             let mask = self.mask_mut();
             fill_mask_rect(mask, width, rect, a as u8);
-            if ppa.blend_a8_rgb565(
-                destination,
-                width,
-                height,
-                mask,
-                rect,
-                [r as u8, g as u8, b as u8],
-                255,
-            ) {
+            add_profile_time(
+                &mut stats.mask_build_us,
+                profile_elapsed(ppa, mask_started_us),
+            );
+            let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                ppa.blend_a8_rgb565(
+                    destination,
+                    width,
+                    height,
+                    mask,
+                    rect,
+                    [r as u8, g as u8, b as u8],
+                    255,
+                )
+            });
+            add_profile_time(&mut stats.ppa_blend_us, elapsed_us);
+            if accepted {
                 stats.ppa_blends += 1;
                 return true;
             }
@@ -698,6 +867,7 @@ impl Renderer {
         if rect.is_empty() || rect.area() < self.config.min_blend_pixels {
             return false;
         }
+        let mask_started_us = ppa.profile_clock_us();
         let mask = self.mask_mut();
         fill_mask_rect(mask, width, rect, 0);
         let density = atlas.raster_density as i32;
@@ -729,15 +899,23 @@ impl Renderer {
                 }
             }
         }
-        if ppa.blend_a8_rgb565(
-            destination,
-            width,
-            height,
-            mask,
-            rect,
-            [r as u8, g as u8, b as u8],
-            255,
-        ) {
+        add_profile_time(
+            &mut stats.mask_build_us,
+            profile_elapsed(ppa, mask_started_us),
+        );
+        let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+            ppa.blend_a8_rgb565(
+                destination,
+                width,
+                height,
+                mask,
+                rect,
+                [r as u8, g as u8, b as u8],
+                255,
+            )
+        });
+        add_profile_time(&mut stats.ppa_blend_us, elapsed_us);
+        if accepted {
             stats.ppa_blends += 1;
             true
         } else {
@@ -776,17 +954,21 @@ impl Renderer {
                         mirror_y,
                         ..SrmTransform::default()
                     };
-                    if ppa.srm_psm5650_to_rgb565(
-                        destination,
-                        width,
-                        height,
-                        view.pixels,
-                        view.w,
-                        view.h,
-                        source_rect,
-                        destination_rect,
-                        transform,
-                    ) {
+                    let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                        ppa.srm_psm5650_to_rgb565(
+                            destination,
+                            width,
+                            height,
+                            view.pixels,
+                            view.w,
+                            view.h,
+                            source_rect,
+                            destination_rect,
+                            transform,
+                        )
+                    });
+                    add_profile_time(&mut stats.ppa_srm_us, elapsed_us);
+                    if accepted {
                         stats.ppa_srm += 1;
                         return Some(start + 9);
                     }
@@ -796,6 +978,40 @@ impl Renderer {
         }
 
         if !self.is_white_alpha_texture(handle, &view) {
+            if view.psm == spec::psm::PSM_8888
+                && ui.raster_density() == self.config.scale
+                && op[8] == 0xffff_ffff
+            {
+                let logical = logical_rect(op[2], op[3]).intersect(clip);
+                let destination_rect = local_physical_rect(logical, surface, self.config.scale);
+                if destination_rect.area() >= self.config.min_blend_pixels {
+                    let (source_rect, mirror_x, mirror_y) =
+                        texture_source_rect(&view, op, logical)?;
+                    if !mirror_x
+                        && !mirror_y
+                        && source_rect.w == destination_rect.w
+                        && source_rect.h == destination_rect.h
+                    {
+                        let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+                            ppa.blend_rgba8888_rgb565(
+                                destination,
+                                width,
+                                height,
+                                view.pixels,
+                                view.w,
+                                view.h,
+                                source_rect,
+                                destination_rect,
+                            )
+                        });
+                        add_profile_time(&mut stats.ppa_blend_us, elapsed_us);
+                        if accepted {
+                            stats.ppa_blends += 1;
+                            return Some(start + 9);
+                        }
+                    }
+                }
+            }
             return None;
         }
         let modulate = op[8];
@@ -809,6 +1025,46 @@ impl Renderer {
             bounds = bounds.union(logical_rect(words[end + 2], words[end + 3]).intersect(clip));
             end += 9;
         }
+        let quad_end = end;
+
+        // Core flat rounded boxes are emitted as four white-alpha corner
+        // quads followed by three same-color rectangular bands. Fold those
+        // disjoint pieces into the same A8 mask so one rounded layer costs one
+        // blocking PPA transaction. Requiring the complete packed color and
+        // pairwise-disjoint bounds is intentional: merging overlapping shadow
+        // layers with merely equal RGB would remove their intermediate RGB565
+        // quantization and change pixels.
+        let mut rect_count = 0usize;
+        while rect_count < 3
+            && end + 4 <= words.len()
+            && words[end] == spec::draw_op::RECT
+            && words[end + 3] == modulate
+        {
+            let candidate = logical_rect(words[end + 1], words[end + 2]).intersect(clip);
+            let mut cursor = start;
+            let mut overlaps = false;
+            while cursor < end {
+                let existing = if cursor < quad_end {
+                    let rect = logical_rect(words[cursor + 2], words[cursor + 3]).intersect(clip);
+                    cursor += 9;
+                    rect
+                } else {
+                    let rect = logical_rect(words[cursor + 1], words[cursor + 2]).intersect(clip);
+                    cursor += 4;
+                    rect
+                };
+                if clips_overlap(candidate, existing) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if overlaps {
+                break;
+            }
+            bounds = bounds.union(candidate);
+            end += 4;
+            rect_count += 1;
+        }
         let (r, g, b, a) = channels(modulate);
         if a == 0 {
             return Some(end);
@@ -818,10 +1074,11 @@ impl Renderer {
             return None;
         }
         let scale = self.config.scale;
+        let mask_started_us = ppa.profile_clock_us();
         let mask = self.mask_mut();
         fill_mask_rect(mask, width, rect, 0);
         let mut cursor = start;
-        while cursor < end {
+        while cursor < quad_end {
             alpha_quad_into_mask(
                 &view,
                 &words[cursor..cursor + 9],
@@ -834,15 +1091,29 @@ impl Renderer {
             );
             cursor += 9;
         }
-        if ppa.blend_a8_rgb565(
-            destination,
-            width,
-            height,
-            mask,
-            rect,
-            [r as u8, g as u8, b as u8],
-            255,
-        ) {
+        while cursor < end {
+            let logical = logical_rect(words[cursor + 1], words[cursor + 2]).intersect(clip);
+            let physical = local_physical_rect(logical, surface, scale);
+            fill_mask_rect(mask, width, physical, a as u8);
+            cursor += 4;
+        }
+        add_profile_time(
+            &mut stats.mask_build_us,
+            profile_elapsed(ppa, mask_started_us),
+        );
+        let (accepted, elapsed_us) = timed_ppa_call(ppa, |ppa| {
+            ppa.blend_a8_rgb565(
+                destination,
+                width,
+                height,
+                mask,
+                rect,
+                [r as u8, g as u8, b as u8],
+                255,
+            )
+        });
+        add_profile_time(&mut stats.ppa_blend_us, elapsed_us);
+        if accepted {
             stats.ppa_blends += 1;
             Some(end)
         } else {
@@ -850,18 +1121,20 @@ impl Renderer {
         }
     }
 
-    fn software_op(
+    fn software_op<O: PpaOps>(
         &mut self,
         ui: &Ui,
         destination: &mut [u16],
         surface: Clip,
         clip: Clip,
         op: &[u32],
+        ppa: &O,
         stats: &mut RenderStats,
     ) {
         if clip.is_empty() {
             return;
         }
+        let started_us = ppa.profile_clock_us();
         self.fallback_words.clear();
         self.fallback_words.push(spec::draw_op::SCISSOR);
         self.fallback_words.push(pack_xy(clip.x0, clip.y0));
@@ -890,6 +1163,7 @@ impl Renderer {
         }
         stats.software_ops += 1;
         stats.software_words += op.len() as u32;
+        add_profile_time(&mut stats.software_us, profile_elapsed(ppa, started_us));
     }
 
     fn ensure_mask(&mut self, len: usize) {
@@ -1064,6 +1338,16 @@ fn composite_mask(destination: &mut u8, source: u8) {
     *destination = (s + (d * (255 - s) + 127) / 255) as u8;
 }
 
+#[inline]
+fn clips_overlap(first: Clip, second: Clip) -> bool {
+    !first.is_empty()
+        && !second.is_empty()
+        && first.x0 < second.x1
+        && second.x0 < first.x1
+        && first.y0 < second.y1
+        && second.y0 < first.y1
+}
+
 fn texture_source_rect(
     view: &TexView<'_>,
     op: &[u32],
@@ -1232,12 +1516,17 @@ fn alpha_quad_into_mask(
 mod tests {
     use super::*;
     use alloc::vec;
+    use core::cell::Cell;
 
     #[derive(Default)]
     struct MockPpa {
         fills: u32,
         blends: u32,
+        rgba_blends: u32,
         srm: u32,
+        decline_rgba: bool,
+        profiling: bool,
+        profile_clock_us: Cell<u64>,
         last_mask_max: u8,
         last_mask: Vec<u8>,
         last_global_alpha: u8,
@@ -1249,9 +1538,19 @@ mod tests {
         last_source_rect: Rect,
         last_destination_rect: Rect,
         last_transform: SrmTransform,
+        last_rgba_source: Vec<u8>,
     }
 
     impl PpaOps for MockPpa {
+        fn profile_clock_us(&self) -> Option<u64> {
+            if !self.profiling {
+                return None;
+            }
+            let now = self.profile_clock_us.get();
+            self.profile_clock_us.set(now + 1);
+            Some(now)
+        }
+
         fn fill_rgb565(
             &mut self,
             destination: &mut [u16],
@@ -1295,6 +1594,45 @@ mod tests {
                     let index = y as usize * width as usize + x as usize;
                     let alpha = (mask[index] as u32 * global_alpha as u32 + 127) / 255;
                     blend_rgb565(&mut destination[index], color, alpha);
+                }
+            }
+            true
+        }
+
+        fn blend_rgba8888_rgb565(
+            &mut self,
+            destination: &mut [u16],
+            width: u32,
+            _height: u32,
+            source: &[u8],
+            source_width: u32,
+            _source_height: u32,
+            source_rect: Rect,
+            destination_rect: Rect,
+        ) -> bool {
+            self.rgba_blends += 1;
+            self.last_source_rect = source_rect;
+            self.last_destination_rect = destination_rect;
+            self.last_rgba_source.clear();
+            self.last_rgba_source.extend_from_slice(source);
+            if self.decline_rgba
+                || source_rect.w != destination_rect.w
+                || source_rect.h != destination_rect.h
+            {
+                return false;
+            }
+            for dy in 0..destination_rect.h {
+                for dx in 0..destination_rect.w {
+                    let source_index =
+                        ((source_rect.y + dy) * source_width + source_rect.x + dx) as usize * 4;
+                    let rgba: [u8; 4] = source[source_index..source_index + 4].try_into().unwrap();
+                    let destination_index = (destination_rect.y + dy) as usize * width as usize
+                        + (destination_rect.x + dx) as usize;
+                    blend_rgb565(
+                        &mut destination[destination_index],
+                        [rgba[0], rgba[1], rgba[2]],
+                        rgba[3] as u32,
+                    );
                 }
             }
             true
@@ -1655,21 +1993,17 @@ mod tests {
             )
             .unwrap();
 
+        let mut ppa = MockPpa::default();
         let stats = renderer
-            .render_incremental(
-                &mut state,
-                &ui,
-                &current,
-                &mut output,
-                32,
-                16,
-                &mut MockPpa::default(),
-            )
+            .render_incremental(&mut state, &ui, &current, &mut output, 32, 16, &mut ppa)
             .unwrap();
         assert!(!stats.full_redraw);
         assert_eq!(stats.damage_regions, 2);
         assert_eq!(stats.damage_pixels, 32);
         assert_eq!(stats.software_ops, 0, "unchanged off-damage gradient");
+        assert_eq!(ppa.last_surface_width, 32);
+        assert_eq!(ppa.last_surface_height, 4);
+        assert_eq!(renderer.mask_len, 32 * 4);
         assert_eq!(output, full_reference(&ui, &current, 32, 16));
     }
 
@@ -1825,7 +2159,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_render_falls_back_for_structural_changes_and_invalidation() {
+    fn incremental_render_localizes_structural_changes_and_honors_invalidation() {
         let mut ui = Ui::new();
         ui.set_viewport(16.0, 8.0);
         let previous = vec![
@@ -1870,7 +2204,8 @@ mod tests {
                 &mut MockPpa::default(),
             )
             .unwrap();
-        assert!(structural.full_redraw);
+        assert!(!structural.full_redraw);
+        assert_eq!(structural.damage_pixels, 3 * 3);
         assert_eq!(output, full_reference(&ui, &current, 16, 8));
 
         state.invalidate();
@@ -1950,6 +2285,131 @@ mod tests {
         assert_eq!(stats.ppa_blends, 1);
         assert_eq!(stats.software_ops, 0);
         assert_eq!(ppa.blends, 1);
+    }
+
+    #[test]
+    fn fuses_disjoint_same_color_rect_tail_with_alpha_quad_run() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 4.0);
+        let handle = ui.upload_texture(&[255, 255, 255, 255], 1, 1, spec::psm::PSM_8888);
+        let color = 0x8000_00ff;
+        let words = [
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(8, 4),
+            0xff20_1008,
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(1, 1),
+            wh_word(2, 2),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            color,
+            spec::draw_op::RECT,
+            xy_word(3, 1),
+            wh_word(3, 2),
+            color,
+        ];
+        let expected = full_reference(&ui, &words, 8, 4);
+        let mut output = vec![0u16; 8 * 4];
+        let mut ppa = MockPpa::default();
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 4, &mut ppa)
+            .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(stats.ppa_fills, 2, "damage clear plus background fill");
+        assert_eq!(stats.ppa_blends, 1);
+        assert_eq!(stats.software_ops, 0);
+    }
+
+    #[test]
+    fn fuses_opaque_disjoint_rect_tail_without_extra_fills() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 4.0);
+        let handle = ui.upload_texture(&[255, 255, 255, 255], 1, 1, spec::psm::PSM_8888);
+        let color = 0xff00_ff00;
+        let words = [
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(8, 4),
+            0xff20_1008,
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(1, 1),
+            wh_word(2, 2),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            color,
+            spec::draw_op::RECT,
+            xy_word(3, 1),
+            wh_word(3, 2),
+            color,
+        ];
+        let expected = full_reference(&ui, &words, 8, 4);
+        let mut output = vec![0u16; 8 * 4];
+        let mut ppa = MockPpa::default();
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 8, 4, &mut ppa)
+            .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(stats.ppa_fills, 2, "damage clear plus background fill");
+        assert_eq!(stats.ppa_blends, 1);
+    }
+
+    #[test]
+    fn overlapping_or_different_alpha_rects_keep_ordered_transactions() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 4.0);
+        let handle = ui.upload_texture(&[255, 255, 255, 255], 1, 1, spec::psm::PSM_8888);
+        let quad = [
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(1, 1),
+            wh_word(3, 2),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0x8000_00ff,
+        ];
+        for tail in [
+            [
+                spec::draw_op::RECT,
+                xy_word(3, 1),
+                wh_word(3, 2),
+                0x8000_00ff,
+            ],
+            [
+                spec::draw_op::RECT,
+                xy_word(4, 1),
+                wh_word(3, 2),
+                0x4000_00ff,
+            ],
+        ] {
+            let mut words = vec![
+                spec::draw_op::RECT,
+                xy_word(0, 0),
+                wh_word(8, 4),
+                0xffff_ffff,
+            ];
+            words.extend_from_slice(&quad);
+            words.extend_from_slice(&tail);
+            let expected = full_reference(&ui, &words, 8, 4);
+            let mut output = vec![0u16; 8 * 4];
+            let mut ppa = MockPpa::default();
+            let stats = renderer()
+                .render(&ui, &words, &mut output, 8, 4, &mut ppa)
+                .unwrap();
+
+            assert_eq!(output, expected);
+            assert_eq!(stats.ppa_blends, 2);
+        }
     }
 
     #[test]
@@ -2093,6 +2553,201 @@ mod tests {
         assert_eq!(ppa.blends, 1);
         assert_eq!(ppa.last_global_alpha, 255);
         assert_eq!(ppa.last_mask_max, 192);
+    }
+
+    #[test]
+    fn routes_identity_rgba_texture_to_one_ordered_blend_without_reordering() {
+        let mut ui = Ui::new();
+        ui.set_viewport(4.0, 2.0);
+        let pixels = vec![
+            255, 0, 0, 255, // opaque red
+            0, 255, 0, 128, // half-alpha green
+            0, 0, 255, 64, // quarter-alpha blue
+            17, 33, 65, 0, // transparent colored texel
+            240, 128, 16, 224, // non-symmetric channels pin RGBA order
+            9, 201, 73, 177, 80, 40, 200, 96, 33, 66, 99, 255,
+        ];
+        let handle = ui.upload_texture(&pixels, 4, 2, spec::psm::PSM_8888);
+        let words = [
+            spec::draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(4, 2),
+            0xff30_2010,
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(0, 0),
+            wh_word(4, 2),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0xffff_ffff,
+            // A following op proves the blocking blend remains in DrawList
+            // order instead of being deferred past software/PPA work.
+            spec::draw_op::RECT,
+            xy_word(3, 1),
+            wh_word(1, 1),
+            0x8000_ffff,
+        ];
+        let expected = full_reference(&ui, &words, 4, 2);
+        let mut output = vec![0u16; 8];
+        let mut ppa = MockPpa::default();
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 4, 2, &mut ppa)
+            .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(stats.ppa_blends, 2, "RGBA texture plus translucent rect");
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(ppa.rgba_blends, 1);
+        assert_eq!(
+            ppa.last_rgba_source, pixels,
+            "core RGBA bytes pass through unchanged"
+        );
+        assert_eq!(
+            ppa.last_source_rect,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 2,
+            }
+        );
+        assert_eq!(ppa.last_destination_rect, ppa.last_source_rect);
+    }
+
+    #[test]
+    fn rgba_blend_maps_clipped_integral_uvs_to_matching_source_block() {
+        let mut ui = Ui::new();
+        ui.set_viewport(4.0, 4.0);
+        let mut pixels = Vec::new();
+        for y in 0..4u8 {
+            for x in 0..4u8 {
+                pixels.extend_from_slice(&[x * 50 + 1, y * 50 + 2, x * 7 + y * 11 + 3, 255]);
+            }
+        }
+        let handle = ui.upload_texture(&pixels, 4, 4, spec::psm::PSM_8888);
+        let words = [
+            spec::draw_op::SCISSOR,
+            xy_word(1, 1),
+            wh_word(2, 2),
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(0, 0),
+            wh_word(4, 4),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0xffff_ffff,
+            spec::draw_op::SCISSOR_POP,
+        ];
+        let expected = full_reference(&ui, &words, 4, 4);
+        let mut output = vec![0u16; 16];
+        let mut ppa = MockPpa::default();
+        let stats = renderer()
+            .render(&ui, &words, &mut output, 4, 4, &mut ppa)
+            .unwrap();
+
+        assert_eq!(output, expected);
+        assert_eq!(stats.software_ops, 0);
+        assert_eq!(ppa.rgba_blends, 1);
+        assert_eq!(
+            ppa.last_source_rect,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 2,
+                h: 2,
+            }
+        );
+        assert_eq!(ppa.last_destination_rect, ppa.last_source_rect);
+    }
+
+    #[test]
+    fn rgba_modulation_and_declined_hardware_keep_ordered_software_fallback() {
+        let mut ui = Ui::new();
+        ui.set_viewport(2.0, 1.0);
+        let pixels = [200, 20, 80, 192, 10, 220, 40, 128];
+        let handle = ui.upload_texture(&pixels, 2, 1, spec::psm::PSM_8888);
+        let quad = |modulate| {
+            [
+                spec::draw_op::TEX_QUAD,
+                handle as u32,
+                xy_word(0, 0),
+                wh_word(2, 1),
+                0.0f32.to_bits(),
+                0.0f32.to_bits(),
+                1.0f32.to_bits(),
+                1.0f32.to_bits(),
+                modulate,
+            ]
+        };
+
+        let modulated = quad(0x80ff_80ff);
+        let mut expected = vec![0u16; 2];
+        pocketjs_core::raster::render_scaled_rgb565(&ui, &modulated, &mut expected, 1);
+        let mut output = vec![0u16; 2];
+        let mut ppa = MockPpa::default();
+        let stats = renderer()
+            .render(&ui, &modulated, &mut output, 2, 1, &mut ppa)
+            .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(ppa.rgba_blends, 0, "PPA cannot express RGB modulation");
+        assert_eq!(stats.software_ops, 1);
+
+        let identity = quad(0xffff_ffff);
+        let mut expected = vec![0u16; 2];
+        pocketjs_core::raster::render_scaled_rgb565(&ui, &identity, &mut expected, 1);
+        let mut output = vec![0u16; 2];
+        let mut ppa = MockPpa {
+            decline_rgba: true,
+            ..MockPpa::default()
+        };
+        let stats = renderer()
+            .render(&ui, &identity, &mut output, 2, 1, &mut ppa)
+            .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(ppa.rgba_blends, 1, "hardware was attempted once");
+        assert_eq!(stats.ppa_blends, 0);
+        assert_eq!(stats.software_ops, 1);
+    }
+
+    #[test]
+    fn rgba_blend_requires_renderer_scale_to_match_core_resource_density() {
+        let mut ui = Ui::new();
+        ui.set_viewport(2.0, 2.0);
+        let pixels = vec![12, 34, 56, 200].repeat(16);
+        let handle = ui.upload_texture(&pixels, 4, 4, spec::psm::PSM_8888);
+        let words = [
+            spec::draw_op::TEX_QUAD,
+            handle as u32,
+            xy_word(0, 0),
+            wh_word(2, 2),
+            0.0f32.to_bits(),
+            0.0f32.to_bits(),
+            1.0f32.to_bits(),
+            1.0f32.to_bits(),
+            0xffff_ffff,
+        ];
+        let mut output = vec![0u16; 16];
+        let mut ppa = MockPpa::default();
+        let mut renderer = Renderer::new(RendererConfig {
+            scale: 2,
+            min_fill_pixels: 1,
+            min_blend_pixels: 1,
+            min_srm_pixels: 1,
+        })
+        .unwrap();
+        let stats = renderer
+            .render(&ui, &words, &mut output, 4, 4, &mut ppa)
+            .unwrap();
+        let mut expected = vec![0u16; 16];
+        pocketjs_core::raster::render_scaled_rgb565(&ui, &words, &mut expected, 2);
+
+        assert_eq!(output, expected);
+        assert_eq!(ppa.rgba_blends, 0);
+        assert_eq!(stats.software_ops, 1);
     }
 
     #[test]

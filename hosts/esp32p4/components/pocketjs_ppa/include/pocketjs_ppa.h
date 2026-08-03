@@ -61,6 +61,32 @@ int pocketjs_ppa_blend_a8_rgb565(
     uint8_t global_alpha
 );
 
+/**
+ * Blend a PocketJS PSM8888 texture over RGB565. Source bytes are straight
+ * alpha RGBA (`R,G,B,A`); the implementation maps them to the PPA's
+ * little-endian ARGB8888 input without modifying the source buffer.
+ * Source and destination rectangles must have identical dimensions.
+ */
+int pocketjs_ppa_blend_rgba8888_rgb565(
+    pocketjs_ppa_handle_t handle,
+    uint16_t *destination,
+    size_t destination_pixels,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *source,
+    size_t source_len,
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t source_x,
+    uint32_t source_y,
+    uint32_t source_rect_width,
+    uint32_t source_rect_height,
+    uint32_t destination_x,
+    uint32_t destination_y,
+    uint32_t destination_rect_width,
+    uint32_t destination_rect_height
+);
+
 int pocketjs_ppa_srm_psm5650_rgb565(
     pocketjs_ppa_handle_t handle,
     uint16_t *destination,

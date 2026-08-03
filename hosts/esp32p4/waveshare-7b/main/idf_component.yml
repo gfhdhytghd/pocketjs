@@ -4,5 +4,8 @@
 # https://github.com/waveshareteam/ESP32-P4-WIFI6-Touch-LCD-7B/tree/c39554b3299f86403cd36820f6fa4767c84ef5f1/examples/ESP-IDF/10_lvgl_demo_v9
 dependencies:
   waveshare/esp32_p4_wifi6_touch_lcd_7b: "1.0.4"
+  # The upstream BSP still declares these graphically optional components as
+  # dependencies even when BSP_CONFIG_NO_GRAPHIC_LIB excludes their runtime
+  # path. Pin them so the reproducible board graph cannot drift during builds.
   espressif/esp_lvgl_port: "2.7.2"
   lvgl/lvgl: "9.2.*"

@@ -32,6 +32,17 @@ pub struct Guest {
     ctx: Context,
 }
 
+/// Milestones inside one guest frame. Hosts can observe these without putting
+/// a clock or platform dependency into `pocket-mod` itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestFrameEvent {
+    PrepareBegin,
+    CallBegin,
+    CallEnd,
+    JobsBegin,
+    JobsEnd { jobs_run: u32 },
+}
+
 impl Guest {
     /// Create an empty realm with `console.*` installed. Mount surfaces and
     /// eval the product bundle next; drop and rebuild for a hot reload.
@@ -129,13 +140,31 @@ impl Guest {
         touches: &[u32],
         hits: &[i32],
     ) -> Result<()> {
+        self.frame_with_touch_hits_observed(buttons, analog, touches, hits, |_| {})
+    }
+
+    /// [`Guest::frame_with_touch_hits`] with additive phase observation for
+    /// host profiling. The observer cannot affect guest semantics; events are
+    /// emitted around argument preparation, the synchronous `frame()` call,
+    /// and the subsequent pending-job drain.
+    pub fn frame_with_touch_hits_observed<F>(
+        &self,
+        buttons: u32,
+        analog: u32,
+        touches: &[u32],
+        hits: &[i32],
+        observe: F,
+    ) -> Result<()>
+    where
+        F: FnMut(GuestFrameEvent),
+    {
         ensure!(
             touches.len() == hits.len(),
             "pocket-mod: touch/hit arrays must be parallel ({} touches, {} hits)",
             touches.len(),
             hits.len()
         );
-        self.frame_with_touch_data(buttons, analog, touches, Some(hits))
+        self.frame_with_touch_data_observed(buttons, analog, touches, Some(hits), observe)
     }
 
     fn frame_with_touch_data(
@@ -145,6 +174,21 @@ impl Guest {
         touches: &[u32],
         hits: Option<&[i32]>,
     ) -> Result<()> {
+        self.frame_with_touch_data_observed(buttons, analog, touches, hits, |_| {})
+    }
+
+    fn frame_with_touch_data_observed<F>(
+        &self,
+        buttons: u32,
+        analog: u32,
+        touches: &[u32],
+        hits: Option<&[i32]>,
+        mut observe: F,
+    ) -> Result<()>
+    where
+        F: FnMut(GuestFrameEvent),
+    {
+        observe(GuestFrameEvent::PrepareBegin);
         self.ctx.with(|ctx| -> Result<()> {
             let frame: Option<Function> = ctx.globals().get("frame").ok();
             if let Some(frame) = frame {
@@ -162,35 +206,49 @@ impl Guest {
                             .set(i, *hit)
                             .map_err(|e| anyhow!("pocket-mod: setting touch hit {i}: {e}"))?;
                     }
+                    observe(GuestFrameEvent::CallBegin);
                     frame
                         .call::<_, ()>((buttons, analog, arr, hit_arr))
                         .catch(&ctx)
                         .map_err(|e| anyhow!("pocket-mod: frame() threw: {e}"))?;
                 } else {
+                    observe(GuestFrameEvent::CallBegin);
                     frame
                         .call::<_, ()>((buttons, analog, arr))
                         .catch(&ctx)
                         .map_err(|e| anyhow!("pocket-mod: frame() threw: {e}"))?;
                 }
+            } else {
+                observe(GuestFrameEvent::CallBegin);
             }
+            observe(GuestFrameEvent::CallEnd);
             Ok(())
         })?;
-        self.drain_jobs();
+        observe(GuestFrameEvent::JobsBegin);
+        let jobs_run = self.drain_jobs_counted();
+        observe(GuestFrameEvent::JobsEnd { jobs_run });
         Ok(())
     }
 
     /// Drain the microtask/job queue (promise reactions). Job exceptions are
     /// logged, not fatal — matching how hosts treat stray rejections.
     pub fn drain_jobs(&self) {
+        self.drain_jobs_counted();
+    }
+
+    fn drain_jobs_counted(&self) -> u32 {
+        let mut jobs_run = 0u32;
         loop {
             match self.rt.execute_pending_job() {
-                Ok(true) => continue,
+                Ok(true) => jobs_run = jobs_run.saturating_add(1),
                 Ok(false) => break,
                 Err(e) => {
+                    jobs_run = jobs_run.saturating_add(1);
                     log::error!(target: "guest", "pocket-mod: pending job threw: {e:?}");
                 }
             }
         }
+        jobs_run
     }
 
     /// Whether the evaluated bundle installed `globalThis.frame`.
@@ -385,6 +443,35 @@ mod tests {
             .frame_with_touch_hits(0, pocketjs_core::spec::ANALOG_CENTER, &[packed], &[])
             .unwrap_err();
         assert!(err.to_string().contains("must be parallel"));
+    }
+
+    #[test]
+    fn observed_frame_reports_ordered_phases_and_drained_jobs() {
+        let g = Guest::new().unwrap();
+        g.eval(
+            "boot",
+            "globalThis.frame = () => { Promise.resolve().then(() => {}); };",
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        g.frame_with_touch_hits_observed(
+            0,
+            pocketjs_core::spec::ANALOG_CENTER,
+            &[],
+            &[],
+            |event| events.push(event),
+        )
+        .unwrap();
+        assert_eq!(
+            events,
+            [
+                GuestFrameEvent::PrepareBegin,
+                GuestFrameEvent::CallBegin,
+                GuestFrameEvent::CallEnd,
+                GuestFrameEvent::JobsBegin,
+                GuestFrameEvent::JobsEnd { jobs_run: 1 },
+            ]
+        );
     }
 
     #[test]

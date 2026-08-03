@@ -12,10 +12,20 @@ idf_component_register(
         waveshare__esp32_p4_wifi6_touch_lcd_7b
         pocketjs_ppa
         esp_driver_uart
+        esp_lcd
+        esp_lcd_touch
         esp_mm
+        esp_timer
         heap
         pthread
         vfs
+)
+
+# ESP-IDF's DPI driver uses this private helper for its own stride-aware
+# DMA2D framebuffer copy. PocketJS uses the same pinned-v5.5.4 primitive to
+# populate an inactive native framebuffer before a tear-free page flip.
+target_include_directories(${COMPONENT_LIB} PRIVATE
+    "$ENV{IDF_PATH}/components/esp_lcd/priv_include"
 )
 
 # ESP-IDF includes component CMake files once in an isolated early-expansion

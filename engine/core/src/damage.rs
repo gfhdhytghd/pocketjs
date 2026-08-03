@@ -380,7 +380,17 @@ fn target_screen(ui: &Ui, target: DamageTarget) -> Result<DamageRect, DamageErro
 struct DecodedOp<'a> {
     code: u32,
     words: &'a [u32],
+    clip_before: DamageRect,
     bounds: DamageRect,
+}
+
+impl DecodedOp<'_> {
+    fn is_identical_to(&self, other: &Self) -> bool {
+        self.code == other.code
+            && self.words == other.words
+            && self.clip_before == other.clip_before
+            && self.bounds == other.bounds
+    }
 }
 
 struct DamageDecoder<'a> {
@@ -429,6 +439,7 @@ impl<'a> DamageDecoder<'a> {
         let end = start.checked_add(len).ok_or(())?;
         let words = self.words.get(start..end).ok_or(())?;
         self.index = end;
+        let clip_before = self.clip;
 
         let bounds = match code {
             spec::draw_op::RECT | spec::draw_op::GRAD_RECT => {
@@ -460,6 +471,7 @@ impl<'a> DamageDecoder<'a> {
         Ok(Some(DecodedOp {
             code,
             words,
+            clip_before,
             bounds,
         }))
     }
@@ -493,13 +505,77 @@ fn draw_list_damage<const MAX_REGIONS: usize>(
                     damage.add(new_op.bounds, screen);
                 }
             }
-            _ => return Ok(DamagePlan::full(screen)),
+            _ => {
+                return structural_draw_list_damage(ui, previous, current, screen);
+            }
         }
     }
     if !old.is_balanced() || !new.is_balanced() {
         return Err(DamageError::MalformedDrawList);
     }
     Ok(damage)
+}
+
+fn structural_draw_list_damage<const MAX_REGIONS: usize>(
+    ui: &Ui,
+    previous: &[u32],
+    current: &[u32],
+    screen: DamageRect,
+) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
+    // Stable DrawLists stay on the allocation-free lockstep path above. Once
+    // their structure diverges, decode both complete lists again so an
+    // insertion with the same opcode as its following sibling cannot shift
+    // every later comparison. Only an exactly identical prefix and suffix may
+    // be retained; the backend clears the unmatched bounds and replays the
+    // complete current DrawList there, preserving painter and clip semantics.
+    let old_ops = decode_draw_list(ui, previous, screen)?;
+    let new_ops = decode_draw_list(ui, current, screen)?;
+    let mut prefix_len = 0usize;
+    while old_ops
+        .get(prefix_len)
+        .zip(new_ops.get(prefix_len))
+        .is_some_and(|(old_op, new_op)| old_op.is_identical_to(new_op))
+    {
+        prefix_len += 1;
+    }
+
+    let mut old_end = old_ops.len();
+    let mut new_end = new_ops.len();
+    while old_end > prefix_len
+        && new_end > prefix_len
+        && old_ops[old_end - 1].is_identical_to(&new_ops[new_end - 1])
+    {
+        old_end -= 1;
+        new_end -= 1;
+    }
+
+    let mut damage = DamagePlan::empty(screen);
+    for old_op in &old_ops[prefix_len..old_end] {
+        damage.add(old_op.bounds, screen);
+    }
+    for new_op in &new_ops[prefix_len..new_end] {
+        damage.add(new_op.bounds, screen);
+    }
+    Ok(damage)
+}
+
+fn decode_draw_list<'a>(
+    ui: &Ui,
+    words: &'a [u32],
+    screen: DamageRect,
+) -> Result<Vec<DecodedOp<'a>>, DamageError> {
+    let mut decoder = DamageDecoder::new(words, screen);
+    let mut ops = Vec::new();
+    while let Some(op) = decoder
+        .next(ui)
+        .map_err(|_| DamageError::MalformedDrawList)?
+    {
+        ops.push(op);
+    }
+    if !decoder.is_balanced() {
+        return Err(DamageError::MalformedDrawList);
+    }
+    Ok(ops)
 }
 
 fn validate_draw_list(ui: &Ui, words: &[u32], screen: DamageRect) -> Result<(), DamageError> {
@@ -605,6 +681,58 @@ mod tests {
         ]
     }
 
+    fn append_rect(words: &mut Vec<u32>, x: i16, y: i16, w: u16, h: u16, color: u32) {
+        words.extend_from_slice(&[spec::draw_op::RECT, xy_word(x, y), wh_word(w, h), color]);
+    }
+
+    fn append_grad_rect(words: &mut Vec<u32>, x: i16, y: i16, w: u16, h: u16, color: u32) {
+        words.extend_from_slice(&[
+            spec::draw_op::GRAD_RECT,
+            xy_word(x, y),
+            wh_word(w, h),
+            color,
+            color,
+            spec::GradDir::ToRight as u32,
+        ]);
+    }
+
+    fn append_scissor(words: &mut Vec<u32>, x: i16, y: i16, w: u16, h: u16) {
+        words.extend_from_slice(&[spec::draw_op::SCISSOR, xy_word(x, y), wh_word(w, h)]);
+    }
+
+    fn assert_pixel_changes_are_covered<const MAX_REGIONS: usize>(
+        ui: &Ui,
+        previous: &[u32],
+        current: &[u32],
+        plan: &DamagePlan<MAX_REGIONS>,
+    ) {
+        let (width, height) = ui.viewport();
+        let width = width as usize;
+        let height = height as usize;
+        let mut previous_pixels = vec![0u8; width * height * 4];
+        let mut current_pixels = vec![0u8; width * height * 4];
+        crate::raster::render_scaled(ui, previous, &mut previous_pixels, 1);
+        crate::raster::render_scaled(ui, current, &mut current_pixels, 1);
+
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y * width + x) * 4;
+                if previous_pixels[offset..offset + 4] == current_pixels[offset..offset + 4] {
+                    continue;
+                }
+                assert!(
+                    plan.regions().iter().any(|rect| {
+                        (x as i32) >= rect.x0
+                            && (x as i32) < rect.x1
+                            && (y as i32) >= rect.y0
+                            && (y as i32) < rect.y1
+                    }),
+                    "changed pixel ({x}, {y}) escaped structural damage {plan:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn first_unchanged_and_disjoint_frames_are_classified() {
         let mut ui = Ui::new();
@@ -629,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn structure_target_and_invalidation_force_full_redraws() {
+    fn structural_removal_is_local_but_target_and_invalidation_force_full_redraws() {
         let mut ui = Ui::new();
         ui.set_viewport(16.0, 8.0);
         let previous = vec![
@@ -643,7 +771,8 @@ mod tests {
         tracker.commit(&ui, &previous, target(16, 8, 1));
 
         let structural = tracker.prepare(&ui, &current, target(16, 8, 1)).unwrap();
-        assert!(structural.is_full_redraw());
+        assert!(!structural.is_full_redraw());
+        assert_eq!(structural.bounds(), DamageRect::new(1, 1, 4, 4));
 
         tracker.commit(&ui, &current, target(16, 8, 1));
         tracker.invalidate();
@@ -663,6 +792,131 @@ mod tests {
             .prepare(&ui, &current, DamageTarget::new(32, 16, 2, 2),)
             .unwrap()
             .is_full_redraw());
+    }
+
+    #[test]
+    fn structural_insertions_and_removals_preserve_an_identical_suffix() {
+        let mut ui = Ui::new();
+        ui.set_viewport(32.0, 12.0);
+
+        let mut without = Vec::new();
+        append_rect(&mut without, 0, 0, 32, 12, 0xff10_1010);
+        append_rect(&mut without, 24, 2, 4, 4, 0xff00_ff00);
+        let mut with = Vec::new();
+        append_rect(&mut with, 0, 0, 32, 12, 0xff10_1010);
+        append_grad_rect(&mut with, 4, 2, 4, 4, 0xff00_00ff);
+        append_rect(&mut with, 24, 2, 4, 4, 0xff00_ff00);
+
+        let mut insertion_tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        insertion_tracker.commit(&ui, &without, target(32, 12, 1));
+        let insertion = insertion_tracker
+            .prepare(&ui, &with, target(32, 12, 1))
+            .unwrap();
+        assert!(!insertion.is_full_redraw());
+        assert_eq!(insertion.bounds(), DamageRect::new(4, 2, 8, 6));
+        assert_pixel_changes_are_covered(&ui, &without, &with, &insertion);
+
+        let mut removal_tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        removal_tracker.commit(&ui, &with, target(32, 12, 1));
+        let removal = removal_tracker
+            .prepare(&ui, &without, target(32, 12, 1))
+            .unwrap();
+        assert!(!removal.is_full_redraw());
+        assert_eq!(removal.bounds(), DamageRect::new(4, 2, 8, 6));
+        assert_pixel_changes_are_covered(&ui, &with, &without, &removal);
+    }
+
+    #[test]
+    fn structural_reorder_damages_both_paint_orders_not_the_common_suffix() {
+        let mut ui = Ui::new();
+        ui.set_viewport(32.0, 12.0);
+
+        let mut previous = Vec::new();
+        append_rect(&mut previous, 0, 0, 32, 12, 0xff10_1010);
+        append_rect(&mut previous, 4, 2, 8, 6, 0xff00_00ff);
+        append_grad_rect(&mut previous, 8, 2, 8, 6, 0xffff_0000);
+        append_rect(&mut previous, 24, 2, 4, 4, 0xff00_ff00);
+        let mut current = Vec::new();
+        append_rect(&mut current, 0, 0, 32, 12, 0xff10_1010);
+        append_grad_rect(&mut current, 8, 2, 8, 6, 0xffff_0000);
+        append_rect(&mut current, 4, 2, 8, 6, 0xff00_00ff);
+        append_rect(&mut current, 24, 2, 4, 4, 0xff00_ff00);
+
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        tracker.commit(&ui, &previous, target(32, 12, 1));
+        let plan = tracker.prepare(&ui, &current, target(32, 12, 1)).unwrap();
+        assert!(!plan.is_full_redraw());
+        assert_eq!(plan.bounds(), DamageRect::new(4, 2, 16, 8));
+        assert_pixel_changes_are_covered(&ui, &previous, &current, &plan);
+    }
+
+    #[test]
+    fn structural_clip_changes_require_suffix_bounds_to_match() {
+        let mut ui = Ui::new();
+        ui.set_viewport(20.0, 12.0);
+
+        let mut previous = Vec::new();
+        append_rect(&mut previous, 0, 0, 20, 12, 0xff10_1010);
+        append_scissor(&mut previous, 1, 1, 18, 10);
+        append_scissor(&mut previous, 2, 2, 6, 6);
+        append_rect(&mut previous, 0, 0, 18, 10, 0xff00_00ff);
+        previous.push(spec::draw_op::SCISSOR_POP);
+        previous.push(spec::draw_op::SCISSOR_POP);
+
+        let mut current = Vec::new();
+        append_rect(&mut current, 0, 0, 20, 12, 0xff10_1010);
+        append_scissor(&mut current, 1, 1, 18, 10);
+        append_grad_rect(&mut current, 17, 1, 2, 2, 0xff00_ff00);
+        append_scissor(&mut current, 10, 2, 6, 6);
+        append_rect(&mut current, 0, 0, 18, 10, 0xff00_00ff);
+        current.push(spec::draw_op::SCISSOR_POP);
+        current.push(spec::draw_op::SCISSOR_POP);
+
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        tracker.commit(&ui, &previous, target(20, 12, 1));
+        let plan = tracker.prepare(&ui, &current, target(20, 12, 1)).unwrap();
+        assert!(!plan.is_full_redraw());
+        assert_eq!(plan.bounds(), DamageRect::new(2, 1, 19, 8));
+        assert_pixel_changes_are_covered(&ui, &previous, &current, &plan);
+
+        let shared_words = [spec::draw_op::RECT, xy_word(0, 0), wh_word(4, 4), 1];
+        let old = DecodedOp {
+            code: spec::draw_op::RECT,
+            words: &shared_words,
+            clip_before: DamageRect::new(0, 0, 2, 4),
+            bounds: DamageRect::new(0, 0, 2, 4),
+        };
+        let new = DecodedOp {
+            code: spec::draw_op::RECT,
+            words: &shared_words,
+            clip_before: DamageRect::new(2, 0, 4, 4),
+            bounds: DamageRect::new(2, 0, 4, 4),
+        };
+        assert!(
+            !old.is_identical_to(&new),
+            "clip-derived bounds are part of structural suffix identity",
+        );
+    }
+
+    #[test]
+    fn structural_same_opcode_insertion_does_not_damage_the_shifted_suffix() {
+        let mut ui = Ui::new();
+        ui.set_viewport(32.0, 12.0);
+
+        let mut previous = Vec::new();
+        append_rect(&mut previous, 0, 0, 32, 12, 0xff10_1010);
+        append_rect(&mut previous, 24, 2, 4, 4, 0xff00_ff00);
+        let mut current = Vec::new();
+        append_rect(&mut current, 0, 0, 32, 12, 0xff10_1010);
+        append_rect(&mut current, 4, 2, 4, 4, 0xff00_00ff);
+        append_rect(&mut current, 24, 2, 4, 4, 0xff00_ff00);
+
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        tracker.commit(&ui, &previous, target(32, 12, 1));
+        let plan = tracker.prepare(&ui, &current, target(32, 12, 1)).unwrap();
+        assert!(!plan.is_full_redraw());
+        assert_eq!(plan.bounds(), DamageRect::new(4, 2, 8, 6));
+        assert_pixel_changes_are_covered(&ui, &previous, &current, &plan);
     }
 
     #[test]
@@ -739,6 +993,35 @@ mod tests {
                 target(16, 8, 1),
             ),
             Err(DamageError::MalformedDrawList)
+        );
+
+        let mut unbalanced_current = Vec::new();
+        append_grad_rect(&mut unbalanced_current, 1, 1, 3, 3, 0xff00_00ff);
+        append_scissor(&mut unbalanced_current, 0, 0, 4, 4);
+        assert_eq!(
+            tracker.prepare(&ui, &unbalanced_current, target(16, 8, 1)),
+            Err(DamageError::MalformedDrawList),
+            "structural tail decoding must reject an unclosed current clip",
+        );
+
+        let mut malformed_current = Vec::new();
+        append_grad_rect(&mut malformed_current, 1, 1, 3, 3, 0xff00_00ff);
+        malformed_current.push(u32::MAX);
+        assert_eq!(
+            tracker.prepare(&ui, &malformed_current, target(16, 8, 1)),
+            Err(DamageError::MalformedDrawList),
+            "structural tail decoding must reject a malformed current opcode",
+        );
+
+        let mut unbalanced_previous = Vec::new();
+        append_scissor(&mut unbalanced_previous, 0, 0, 4, 4);
+        append_rect(&mut unbalanced_previous, 1, 1, 2, 2, 0xff00_00ff);
+        let mut invalid_snapshot = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        invalid_snapshot.commit(&ui, &unbalanced_previous, target(16, 8, 1));
+        assert_eq!(
+            invalid_snapshot.prepare(&ui, &current, target(16, 8, 1)),
+            Err(DamageError::MalformedDrawList),
+            "structural tail decoding must reject an unclosed previous clip",
         );
     }
 

@@ -198,6 +198,7 @@ struct Rgb565WindowTarget<'a> {
     pixels: &'a mut [u16],
     full_stride: usize,
     full_pixel_len: usize,
+    origin_row_start: usize,
     origin_x: usize,
     origin_y: usize,
     width: usize,
@@ -259,6 +260,21 @@ impl RenderTarget for Rgb565Target<'_> {
 impl Rgb565WindowTarget<'_> {
     #[inline]
     fn local_offset(&self, full_offset: usize) -> usize {
+        // A full-width row band is already laid out exactly like the source
+        // surface, just with its leading rows removed. Large software damage
+        // replays use this shape, so avoid a division and remainder for every
+        // blended pixel while retaining the same fail-fast bounds contract.
+        if self.origin_x == 0 && self.width == self.full_stride {
+            let local = full_offset
+                .checked_sub(self.origin_row_start)
+                .unwrap_or(self.pixels.len());
+            assert!(
+                local < self.pixels.len(),
+                "raster write escaped the compact RGB565 window"
+            );
+            return local;
+        }
+
         let y = full_offset / self.full_stride;
         let x = full_offset % self.full_stride;
         assert!(
@@ -426,6 +442,7 @@ pub fn render_scaled_rgb565_window_over(
         pixels: fb,
         full_stride: full_width as usize,
         full_pixel_len: full_width as usize * full_height as usize,
+        origin_row_start: physical.y0 as usize * full_width as usize,
         origin_x: physical.x0 as usize,
         origin_y: physical.y0 as usize,
         width,
@@ -1306,6 +1323,92 @@ mod tests {
         fb[offset..offset + 4].try_into().unwrap()
     }
 
+    fn rgb565_window_scene() -> Vec<u32> {
+        vec![
+            draw_op::RECT,
+            xy_word(0, 1),
+            wh_word(13, 7),
+            0x8030_70d0,
+            draw_op::GRAD_RECT,
+            xy_word(1, 2),
+            wh_word(11, 4),
+            0x9050_d020,
+            0xc0e0_3050,
+            spec::GradDir::ToRight as u32,
+            draw_op::TRI,
+            xy_word(2, 1),
+            xy_word(12, 7),
+            xy_word(1, 8),
+            0x7020_40f0,
+            0xa0f0_9030,
+            0x60b0_e080,
+        ]
+    }
+
+    fn patterned_rgb565(len: usize) -> Vec<u16> {
+        (0..len)
+            .map(|index| (index as u16).wrapping_mul(4051) ^ 0x5a5a)
+            .collect()
+    }
+
+    fn extract_rgb565_window(
+        full: &[u16],
+        full_width: usize,
+        scale: usize,
+        window: DamageRect,
+    ) -> Vec<u16> {
+        let x0 = window.x0 as usize * scale;
+        let x1 = window.x1 as usize * scale;
+        let y0 = window.y0 as usize * scale;
+        let y1 = window.y1 as usize * scale;
+        (y0..y1)
+            .flat_map(|y| full[y * full_width + x0..y * full_width + x1].iter())
+            .copied()
+            .collect()
+    }
+
+    #[test]
+    fn full_width_nonzero_y_rgb565_window_matches_full_target_at_scale_two() {
+        let mut ui = Ui::new();
+        ui.set_viewport(13.0, 9.0);
+        let scale = 2usize;
+        let full_width = 13 * scale;
+        let mut full = patterned_rgb565(full_width * 9 * scale);
+        let window = DamageRect::new(0, 2, 13, 7);
+        let mut compact = extract_rgb565_window(&full, full_width, scale, window);
+        let words = rgb565_window_scene();
+
+        render_scaled_rgb565_over(&ui, &words, &mut full, scale as u32);
+        render_scaled_rgb565_window_over(&ui, &words, &mut compact, scale as u32, window);
+
+        assert_eq!(
+            compact,
+            extract_rgb565_window(&full, full_width, scale, window),
+            "the contiguous full-width fast path must preserve painter-order RGB565 quantization"
+        );
+    }
+
+    #[test]
+    fn offset_rgb565_window_still_matches_full_target_at_scale_two() {
+        let mut ui = Ui::new();
+        ui.set_viewport(13.0, 9.0);
+        let scale = 2usize;
+        let full_width = 13 * scale;
+        let mut full = patterned_rgb565(full_width * 9 * scale);
+        let window = DamageRect::new(2, 1, 11, 8);
+        let mut compact = extract_rgb565_window(&full, full_width, scale, window);
+        let words = rgb565_window_scene();
+
+        render_scaled_rgb565_over(&ui, &words, &mut full, scale as u32);
+        render_scaled_rgb565_window_over(&ui, &words, &mut compact, scale as u32, window);
+
+        assert_eq!(
+            compact,
+            extract_rgb565_window(&full, full_width, scale, window),
+            "the offset compact-window mapping must remain byte-exact"
+        );
+    }
+
     #[test]
     fn linear_sample_coordinates_pin_clamped_edge_semantics() {
         assert_eq!(
@@ -1623,12 +1726,7 @@ mod tests {
         let mut ui = Ui::new();
         ui.set_viewport(96.0, 8.0);
         let frame = |color: u32| {
-            let mut words = vec![
-                draw_op::RECT,
-                xy_word(0, 0),
-                wh_word(96, 8),
-                0xff10_0804,
-            ];
+            let mut words = vec![draw_op::RECT, xy_word(0, 0), wh_word(96, 8), 0xff10_0804];
             for index in 0..9 {
                 words.extend_from_slice(&[
                     draw_op::RECT,

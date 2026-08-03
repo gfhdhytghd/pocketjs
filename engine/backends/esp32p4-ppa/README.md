@@ -18,10 +18,13 @@ Accelerated paths:
 - antialiased font runs (`A8` coverage composed once, then `BLEND`);
 - single-color alpha textures such as PocketJS rounded-corner masks (`A8`
   `BLEND`);
+- straight-alpha PocketJS PSM 8888 `[R,G,B,A]` texture quads (`RGBA8`
+  `BLEND`), including bounded retained rounded-gradient layers;
 - opaque PSM 5650 texture quads (`SRM`) when scaling semantics are compatible.
 
-Gradients, arbitrary triangles, textured triangles, and unsupported texture
-formats fall back to `pocketjs_core::raster::render_scaled_rgb565_over`.
+Uncached gradients, arbitrary triangles, textured triangles, and unsupported
+texture formats fall back to
+`pocketjs_core::raster::render_scaled_rgb565_over`.
 No full-frame RGB888 or ARGB8888 surface is allocated.
 
 ## Incremental rendering
@@ -36,10 +39,12 @@ composition without touching unchanged pixels.
 
 Keep one `RenderTargetState` per framebuffer. This is required for
 double-buffered hosts because each target contains a different older frame.
-The first render and structural DrawList changes use a conservative full
-redraw. This backend additionally promotes damage covering at least 75
-percent of the viewport; that transaction-cost policy is deliberately kept
-outside the common damage planner.
+The first render uses a conservative full redraw. Bounded structural edits
+are localized by retaining identical DrawList prefixes and suffixes; malformed
+lists and changes that cannot be localized fail closed. This backend also
+promotes damage covering at least 75 percent of the viewport; that
+transaction-cost policy is deliberately kept outside the common damage
+planner.
 
 Core-managed texture, font, and style mutations bump `Ui::raster_revision()`,
 so every `RenderTargetState` automatically forces a complete repaint and the

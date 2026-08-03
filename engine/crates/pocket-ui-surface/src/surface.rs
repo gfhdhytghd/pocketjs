@@ -10,7 +10,7 @@
 //! `ui.__viewport = {w, h}` tells the framework the logical UI size (the PSP
 //! host omits it and the framework defaults to 480x272).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -55,10 +55,119 @@ struct Inner {
     host_abi: Option<u32>,
 }
 
+/// Per-category measurements for calls that crossed the JavaScript HostOps
+/// boundary since the previous snapshot.
+///
+/// `*_us` measures only time spent inside the Rust HostOps closure, including
+/// its borrow and core call. JavaScript execution and argument conversion done
+/// by QuickJS before entering the closure are intentionally excluded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostOpsProfileSnapshot {
+    pub create_calls: u32,
+    pub create_us: u64,
+    pub insert_calls: u32,
+    pub insert_us: u64,
+    pub style_calls: u32,
+    pub style_us: u64,
+    pub prop_calls: u32,
+    pub prop_us: u64,
+    pub text_calls: u32,
+    pub text_us: u64,
+    pub animate_calls: u32,
+    pub animate_us: u64,
+    pub other_calls: u32,
+    pub other_us: u64,
+}
+
+#[derive(Clone, Copy)]
+enum HostOpCategory {
+    Create,
+    Insert,
+    Style,
+    Prop,
+    Text,
+    Animate,
+    Other,
+}
+
+struct HostOpsProfiler {
+    clock_us: Cell<Option<fn() -> u64>>,
+    snapshot: Cell<HostOpsProfileSnapshot>,
+}
+
+impl HostOpsProfiler {
+    fn new() -> Self {
+        Self {
+            clock_us: Cell::new(None),
+            snapshot: Cell::new(HostOpsProfileSnapshot::default()),
+        }
+    }
+
+    #[inline]
+    fn measure<R>(&self, category: HostOpCategory, op: impl FnOnce() -> R) -> R {
+        let Some(clock_us) = self.clock_us.get() else {
+            return op();
+        };
+        let started_us = clock_us();
+        let result = op();
+        let elapsed_us = clock_us().saturating_sub(started_us);
+        let mut snapshot = self.snapshot.get();
+        match category {
+            HostOpCategory::Create => {
+                snapshot.create_calls = snapshot.create_calls.saturating_add(1);
+                snapshot.create_us = snapshot.create_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Insert => {
+                snapshot.insert_calls = snapshot.insert_calls.saturating_add(1);
+                snapshot.insert_us = snapshot.insert_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Style => {
+                snapshot.style_calls = snapshot.style_calls.saturating_add(1);
+                snapshot.style_us = snapshot.style_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Prop => {
+                snapshot.prop_calls = snapshot.prop_calls.saturating_add(1);
+                snapshot.prop_us = snapshot.prop_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Text => {
+                snapshot.text_calls = snapshot.text_calls.saturating_add(1);
+                snapshot.text_us = snapshot.text_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Animate => {
+                snapshot.animate_calls = snapshot.animate_calls.saturating_add(1);
+                snapshot.animate_us = snapshot.animate_us.saturating_add(elapsed_us);
+            }
+            HostOpCategory::Other => {
+                snapshot.other_calls = snapshot.other_calls.saturating_add(1);
+                snapshot.other_us = snapshot.other_us.saturating_add(elapsed_us);
+            }
+        }
+        self.snapshot.set(snapshot);
+        result
+    }
+}
+
+#[derive(Clone)]
+struct HostOpsHandle {
+    inner: Rc<RefCell<Inner>>,
+    profiler: Rc<HostOpsProfiler>,
+}
+
+impl HostOpsHandle {
+    #[inline]
+    fn call<R>(&self, category: HostOpCategory, op: impl FnOnce(&mut Inner) -> R) -> R {
+        self.profiler.measure(category, || {
+            let mut inner = self.inner.borrow_mut();
+            op(&mut inner)
+        })
+    }
+}
+
 /// The `ui` surface. Clone-cheap handle; single-threaded like the guest.
 #[derive(Clone)]
 pub struct UiSurface {
     inner: Rc<RefCell<Inner>>,
+    host_ops_profiler: Rc<HostOpsProfiler>,
 }
 
 impl UiSurface {
@@ -88,6 +197,32 @@ impl UiSurface {
                 host_id: "desktop".into(),
                 host_abi: None,
             })),
+            host_ops_profiler: Rc::new(HostOpsProfiler::new()),
+        }
+    }
+
+    /// Install or remove the monotonic microsecond clock used for HostOps
+    /// profiling. Changing clocks also clears the pending snapshot so samples
+    /// from different time domains can never mix.
+    pub fn set_host_ops_profile_clock(&self, clock_us: Option<fn() -> u64>) {
+        self.host_ops_profiler.clock_us.set(clock_us);
+        self.host_ops_profiler
+            .snapshot
+            .set(HostOpsProfileSnapshot::default());
+    }
+
+    /// Return all HostOps measurements accumulated so far and atomically clear
+    /// them. The surface is single-threaded, matching the QuickJS guest.
+    pub fn take_host_ops_profile(&self) -> HostOpsProfileSnapshot {
+        self.host_ops_profiler
+            .snapshot
+            .replace(HostOpsProfileSnapshot::default())
+    }
+
+    fn host_ops_handle(&self) -> HostOpsHandle {
+        HostOpsHandle {
+            inner: self.inner.clone(),
+            profiler: self.host_ops_profiler.clone(),
         }
     }
 
@@ -230,261 +365,319 @@ impl UiSurface {
                 };
             }
 
-            let ui = self.inner.clone();
-            op!("createNode", move |t: i32| ui
-                .borrow_mut()
-                .ui
-                .create_node(t as u8));
+            let ui = self.host_ops_handle();
+            op!("createNode", move |t: i32| ui.call(
+                HostOpCategory::Create,
+                |inner| inner.ui.create_node(t as u8)
+            ));
 
-            let ui = self.inner.clone();
-            op!("destroyNode", move |id: i32| ui
-                .borrow_mut()
-                .ui
-                .destroy_node(id));
+            let ui = self.host_ops_handle();
+            op!("destroyNode", move |id: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.destroy_node(id)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("insertBefore", move |p: i32, c: i32, a: i32| {
-                ui.borrow_mut().ui.insert_before(p, c, a)
+                ui.call(HostOpCategory::Insert, |inner| {
+                    inner.ui.insert_before(p, c, a)
+                })
             });
 
-            let ui = self.inner.clone();
-            op!("removeChild", move |p: i32, c: i32| ui
-                .borrow_mut()
-                .ui
-                .remove_child(p, c));
+            let ui = self.host_ops_handle();
+            op!("removeChild", move |p: i32, c: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.remove_child(p, c)
+            ));
 
-            let ui = self.inner.clone();
-            op!("setStyle", move |id: i32, style: i32| ui
-                .borrow_mut()
-                .ui
-                .set_style(id, style));
+            let ui = self.host_ops_handle();
+            op!("setStyle", move |id: i32, style: i32| ui.call(
+                HostOpCategory::Style,
+                |inner| inner.ui.set_style(id, style)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("setProp", move |id: i32, prop: i32, v: f64| {
-                ui.borrow_mut().ui.set_prop(id, prop as u8, v)
+                ui.call(HostOpCategory::Prop, |inner| {
+                    inner.ui.set_prop(id, prop as u8, v)
+                })
             });
 
             // Text ops coerce like the PSP FFI does (JS_ToCString semantics —
             // Solid legitimately passes numbers through replaceText).
-            let ui = self.inner.clone();
-            op!("setText", move |id: i32, s: Coerced<String>| ui
-                .borrow_mut()
-                .ui
-                .set_text(id, &s.0));
+            let ui = self.host_ops_handle();
+            op!("setText", move |id: i32, s: Coerced<String>| ui.call(
+                HostOpCategory::Text,
+                |inner| inner.ui.set_text(id, &s.0)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("replaceText", move |id: i32, s: Coerced<String>| {
-                ui.borrow_mut().ui.replace_text(id, &s.0)
+                ui.call(HostOpCategory::Text, |inner| {
+                    inner.ui.replace_text(id, &s.0)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!(
                 "uploadTexture",
                 move |buf: TypedArray<u8>, w: i32, h: i32, psm: i32| {
-                    let Some(bytes) = buf.as_bytes() else {
-                        return -1;
-                    };
-                    ui.borrow_mut()
-                        .ui
-                        .upload_texture(bytes, w as u32, h as u32, psm as u32)
+                    ui.call(HostOpCategory::Other, |inner| {
+                        let Some(bytes) = buf.as_bytes() else {
+                            return -1;
+                        };
+                        inner
+                            .ui
+                            .upload_texture(bytes, w as u32, h as u32, psm as u32)
+                    })
                 }
             );
 
-            let ui = self.inner.clone();
-            op!("setImage", move |id: i32, tex: i32| ui
-                .borrow_mut()
-                .ui
-                .set_image(id, tex));
+            let ui = self.host_ops_handle();
+            op!("setImage", move |id: i32, tex: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.set_image(id, tex)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("setSprite", move |id: i32,
                                    atlas: i32,
                                    frames: i32,
                                    cols: i32,
                                    step: i32| {
-                ui.borrow_mut().ui.set_sprite(
-                    id,
-                    atlas,
-                    frames.max(0) as u32,
-                    cols.max(0) as u32,
-                    step.max(0) as u32,
-                )
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.set_sprite(
+                        id,
+                        atlas,
+                        frames.max(0) as u32,
+                        cols.max(0) as u32,
+                        step.max(0) as u32,
+                    )
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("animate", move |id: i32,
                                  prop: i32,
                                  to: f64,
                                  dur_ms: f64,
                                  easing: i32,
                                  delay_ms: f64| {
-                ui.borrow_mut().ui.animate(
-                    id,
-                    prop as u8,
-                    to,
-                    dur_ms.max(0.0) as u32,
-                    easing as u8,
-                    delay_ms.max(0.0) as u32,
-                )
+                ui.call(HostOpCategory::Animate, |inner| {
+                    inner.ui.animate(
+                        id,
+                        prop as u8,
+                        to,
+                        dur_ms.max(0.0) as u32,
+                        easing as u8,
+                        delay_ms.max(0.0) as u32,
+                    )
+                })
             });
 
-            let ui = self.inner.clone();
-            op!("cancelAnim", move |id: i32| ui
-                .borrow_mut()
-                .ui
-                .cancel_anim(id));
+            let ui = self.host_ops_handle();
+            op!("cancelAnim", move |id: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.cancel_anim(id)
+            ));
 
-            let ui = self.inner.clone();
-            op!("setFocus", move |id: i32| ui.borrow_mut().ui.set_focus(id));
+            let ui = self.host_ops_handle();
+            op!("setFocus", move |id: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.set_focus(id)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("setActive", move |id: i32, active: i32| {
-                ui.borrow_mut().ui.set_active(id, active != 0)
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.set_active(id, active != 0)
+                })
             });
 
             // Virtual cursor ops (spec ops 27..29, input.cursor).
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("hitTest", move |x: f64, y: f64| {
-                ui.borrow_mut().ui.hit_test(x as f32, y as f32)
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.hit_test(x as f32, y as f32)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("hitTestBounds", move |x: f64, y: f64| {
-                ui.borrow_mut().ui.hit_test_bounds(x as f32, y as f32)
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.hit_test_bounds(x as f32, y as f32)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("setCursor", move |tex: i32, hot_x: f64, hot_y: f64, w: f64, h: f64| {
-                ui.borrow_mut().ui.set_cursor(tex, hot_x as f32, hot_y as f32, w as f32, h as f32)
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner
+                        .ui
+                        .set_cursor(tex, hot_x as f32, hot_y as f32, w as f32, h as f32)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("setCursorPos", move |x: f64, y: f64| {
-                ui.borrow_mut().ui.set_cursor_pos(x as f32, y as f32)
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.set_cursor_pos(x as f32, y as f32)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("loadStyles", move |buf: TypedArray<u8>| {
-                let Some(bytes) = buf.as_bytes() else {
-                    return false;
-                };
-                ui.borrow_mut().ui.load_styles(bytes)
+                ui.call(HostOpCategory::Other, |inner| {
+                    let Some(bytes) = buf.as_bytes() else {
+                        return false;
+                    };
+                    inner.ui.load_styles(bytes)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("loadFontAtlas", move |buf: TypedArray<u8>| {
-                let Some(bytes) = buf.as_bytes() else {
-                    return false;
-                };
-                ui.borrow_mut().ui.load_font_atlas(bytes)
+                ui.call(HostOpCategory::Other, |inner| {
+                    let Some(bytes) = buf.as_bytes() else {
+                        return false;
+                    };
+                    inner.ui.load_font_atlas(bytes)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("measureText", move |s: Coerced<String>, slot: i32| {
-                ui.borrow_mut().ui.measure_text(&s.0, slot as u8) as f64
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.ui.measure_text(&s.0, slot as u8) as f64
+                })
             });
 
             // ---- streamed textures (spec ops 23..25) ---------------------
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("loadTileTexture", move |key: Coerced<String>, index: i32| {
-                if index < 0 {
-                    return -1;
-                }
-                let mut inner = ui.borrow_mut();
-                let inner = &mut *inner; // split borrow: pak read, core write
-                match crate::pak::find_pak(&inner.pak, &key.0) {
-                    Some(blob) => inner.ui.upload_tileset_tile(blob, index as u32),
-                    None => -1,
-                }
+                ui.call(HostOpCategory::Other, |inner| {
+                    if index < 0 {
+                        return -1;
+                    }
+                    // Split borrow: pak read, core write.
+                    match crate::pak::find_pak(&inner.pak, &key.0) {
+                        Some(blob) => inner.ui.upload_tileset_tile(blob, index as u32),
+                        None => -1,
+                    }
+                })
             });
 
-            let ui = self.inner.clone();
-            op!("freeTexture", move |handle: i32| ui
-                .borrow_mut()
-                .ui
-                .free_texture(handle));
+            let ui = self.host_ops_handle();
+            op!("freeTexture", move |handle: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.free_texture(handle)
+            ));
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("uploadImgEntry", move |buf: TypedArray<u8>| {
-                let Some(bytes) = buf.as_bytes() else {
-                    return -1;
-                };
-                ui.borrow_mut().ui.upload_img_entry(bytes)
+                ui.call(HostOpCategory::Other, |inner| {
+                    let Some(bytes) = buf.as_bytes() else {
+                        return -1;
+                    };
+                    inner.ui.upload_img_entry(bytes)
+                })
             });
 
             // ---- DevTools ops (spec ops 18..22) + mailbox transport ------
             // Same names and semantics as the PSP FFI (hosts/psp/src/ffi.rs +
             // hosts/psp/src/dbg.rs): the shim's transport resolution and the
             // devtools bridge work against this host unchanged.
-            let ui = self.inner.clone();
-            op!("debugInspect", move |id: i32| ui
-                .borrow_mut()
-                .ui
-                .debug_inspect(id));
+            let ui = self.host_ops_handle();
+            op!("debugInspect", move |id: i32| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.debug_inspect(id)
+            ));
 
-            let ui = self.inner.clone();
-            op!("debugRectXY", move || ui.borrow().ui.debug_rect_xy());
+            let ui = self.host_ops_handle();
+            op!("debugRectXY", move || ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.debug_rect_xy()
+            ));
 
-            let ui = self.inner.clone();
-            op!("debugRectWH", move || ui.borrow().ui.debug_rect_wh());
+            let ui = self.host_ops_handle();
+            op!("debugRectWH", move || ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.debug_rect_wh()
+            ));
 
-            let ui = self.inner.clone();
-            op!("debugPause", move |on: bool| ui
-                .borrow_mut()
-                .ui
-                .debug_pause(on));
+            let ui = self.host_ops_handle();
+            op!("debugPause", move |on: bool| ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.debug_pause(on)
+            ));
 
-            let ui = self.inner.clone();
-            op!("debugStep", move || ui.borrow_mut().ui.debug_step());
+            let ui = self.host_ops_handle();
+            op!("debugStep", move || ui.call(
+                HostOpCategory::Other,
+                |inner| inner.ui.debug_step()
+            ));
 
             let mbox = Rc::new(RefCell::new(DbgMailbox::probe()));
             let m = mbox.clone();
-            op!("__dbgActive", move || m.borrow().is_some());
+            let ui = self.host_ops_handle();
+            op!("__dbgActive", move || ui.call(HostOpCategory::Other, |_| {
+                m.borrow().is_some()
+            }));
 
             let m = mbox.clone();
+            let ui = self.host_ops_handle();
             op!("__dbgPoll", move || -> Option<String> {
-                m.borrow_mut().as_mut().and_then(|b| b.poll())
+                ui.call(HostOpCategory::Other, |_| {
+                    m.borrow_mut().as_mut().and_then(|b| b.poll())
+                })
             });
 
             let m = mbox;
+            let ui = self.host_ops_handle();
             op!("__dbgSend", move |line: Coerced<String>| {
-                if let Some(b) = m.borrow().as_ref() {
-                    b.send(&line.0);
-                }
+                ui.call(HostOpCategory::Other, |_| {
+                    if let Some(b) = m.borrow().as_ref() {
+                        b.send(&line.0);
+                    }
+                })
             });
 
             // ---- host service channel (spec ops 30..32) ------------------
             // A stage advertises a companion service only when its package
             // provides one. Lines cross an in-process queue instead of a
             // tethered share; apps feature-detect exactly like on PSP.
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("svcOpen", move |app: Coerced<String>| {
-                let inner = ui.borrow();
-                match &inner.svc_allowlist {
-                    None => true,
-                    Some(names) => names.iter().any(|name| name == &app.0),
-                }
+                ui.call(HostOpCategory::Other, |inner| {
+                    match &inner.svc_allowlist {
+                        None => true,
+                        Some(names) => names.iter().any(|name| name == &app.0),
+                    }
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("svcPoll", move || -> Option<String> {
-                let mut inner = ui.borrow_mut();
-                if inner.svc_in.is_empty() {
-                    return None;
-                }
-                // Batch per the HostOps contract: complete JSON lines,
-                // newline-terminated, possibly several per poll.
-                let mut batch = String::new();
-                for line in inner.svc_in.drain(..) {
-                    batch.push_str(&line);
-                    batch.push('\n');
-                }
-                Some(batch)
+                ui.call(HostOpCategory::Other, |inner| {
+                    if inner.svc_in.is_empty() {
+                        return None;
+                    }
+                    // Batch per the HostOps contract: complete JSON lines,
+                    // newline-terminated, possibly several per poll.
+                    let mut batch = String::new();
+                    for line in inner.svc_in.drain(..) {
+                        batch.push_str(&line);
+                        batch.push('\n');
+                    }
+                    Some(batch)
+                })
             });
 
-            let ui = self.inner.clone();
+            let ui = self.host_ops_handle();
             op!("svcSend", move |line: Coerced<String>| {
-                ui.borrow_mut().svc_out.push_back(line.0);
+                ui.call(HostOpCategory::Other, |inner| {
+                    inner.svc_out.push_back(line.0);
+                })
             });
 
             // ---- boot tables (PSP contract) + desktop viewport ----------
@@ -543,6 +736,48 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROFILE_CLOCK_US: AtomicU64 = AtomicU64::new(0);
+
+    fn profile_clock_us() -> u64 {
+        PROFILE_CLOCK_US.fetch_add(10, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn profiles_host_ops_by_category_and_take_clears_the_snapshot() {
+        PROFILE_CLOCK_US.store(0, Ordering::Relaxed);
+        let guest = Guest::new().unwrap();
+        let surface = UiSurface::new((16.0, 16.0));
+        surface.set_host_ops_profile_clock(Some(profile_clock_us));
+        surface.mount(&guest).unwrap();
+        guest
+            .eval(
+                "profile",
+                "const node = ui.createNode(0);\
+                 ui.insertBefore(0, node, 0);\
+                 ui.setStyle(node, 0);\
+                 ui.setProp(node, 3, 4);\
+                 ui.setText(node, 'first');\
+                 ui.replaceText(node, 'second');\
+                 ui.animate(node, 3, 5, 10, 0, 0);\
+                 ui.setFocus(node);",
+            )
+            .unwrap();
+
+        let profile = surface.take_host_ops_profile();
+        assert_eq!((profile.create_calls, profile.create_us), (1, 10));
+        assert_eq!((profile.insert_calls, profile.insert_us), (1, 10));
+        assert_eq!((profile.style_calls, profile.style_us), (1, 10));
+        assert_eq!((profile.prop_calls, profile.prop_us), (1, 10));
+        assert_eq!((profile.text_calls, profile.text_us), (2, 20));
+        assert_eq!((profile.animate_calls, profile.animate_us), (1, 10));
+        assert_eq!((profile.other_calls, profile.other_us), (1, 10));
+        assert_eq!(
+            surface.take_host_ops_profile(),
+            HostOpsProfileSnapshot::default()
+        );
+    }
 
     #[test]
     fn mounts_bounds_hit_fallback_for_touch_guests() {
