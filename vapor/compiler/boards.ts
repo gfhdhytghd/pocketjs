@@ -215,7 +215,7 @@ export function parseBoard(name: string, raw: unknown): VaporBoard {
         controller: ESP32P4_PANEL.controller,
         width,
         height,
-        cell,
+        cell: ESP32P4_PANEL.cell,
       },
       input: { kind: "touch", controller: "gt911", virtualButtons, absent },
     };
