@@ -194,9 +194,9 @@ oxlint plugin would give red squiggles without booting the compiler. The
 Each target presents a fixed logical cell screen: 30×20 on GBA, 20×18 on
 GB and ESP32, 22×18 on NES, and 50×30 on Playdate. The ESP32 MeowBit profile rasterizes its
 20×18 grid as 8×7 cells into a 160×126 content area on the 160×128 ST7735
-panel. The JSX vocabulary is deliberately one intrinsic with two
-interpreters — the C cell grid on device, and a ~60-line tree walker over
-the oracle's micro-DOM:
+panel. The portable, cross-target cell vocabulary is deliberately one
+intrinsic with two interpreters — the C cell grid on device, and a ~60-line
+tree walker over the oracle's micro-DOM:
 
 - `<row y={n} x={n} pal={p}>` — paints its text children at (x, y) in
   palette `p`, padded with spaces to the right edge; later rows overwrite
@@ -209,6 +209,40 @@ the oracle's micro-DOM:
 - Conditional rows are plain Vue too: `{cond ? <row …/> : null}`.
 - Looks come from the class DSL (§4.5); the painter and every runtime
   agree on pair ids, and the oracle asserts them as a per-cell grid.
+
+There is one deliberately target-specific exception to that portable cell
+vocabulary: the experimental GBA RPG host. It is a narrow vertical slice,
+not a new general-purpose JSX renderer, and non-GBA target admission rejects
+it. Its responsibilities are split four ways:
+
+1. **Static assets — `defineRpgMap(...)`.** Map rows, solid characters,
+   event-character ids, and dialogue records are build-time declarations.
+   The compiler validates the 30×20 bound, equal row widths and byte-oriented
+   ids, then emits flat tile/collision data plus event and dialogue tables in
+   ROM. None of this is mutable gameplay state.
+2. **Pure world queries — `rpgBlocked(...)` / `rpgEventAt(...)`.** The host
+   module provides real, deterministic JS lookup semantics; AOT recognizes
+   the same calls and emits calls to fixed C helpers over the generated map.
+   Out-of-bounds movement fails closed.
+3. **Reactive gameplay — ordinary Vue Vapor.** Mode, player position and
+   facing, quest state, current dialogue/choice, HP and battle selection are
+   ordinary `ref` slots; derived gates are `computed`; `onButton` keymaps and
+   setup functions implement movement, interaction, dialogue and battle.
+   They use the same dirty-bit graph and direct C lowering as Todo. There is
+   no residual script bytecode, stack machine, hidden controller state, or
+   second gameplay VM.
+4. **Fixed presentation — `<RpgScreen .../>`.** The component is stateless:
+   every dynamic input arrives as a prop and therefore participates in the
+   normal dependency mask. The GBA runtime renders the tile world on BG1 and
+   characters through OBJ, with its fixed dialogue/battle presentation; it
+   does not expose GBA registers or SDK concepts to application code.
+
+The current RPG movement contract consumes the same hardware-neutral
+`onButton` press edges as the rest of Vapor and advances one cell per press.
+The JS `RpgScreen` currently returns no pixels, so collision/event behavior
+can run in the JS/oracle path but pixel-frame acceptance is mGBA-only for
+this POC. A browser pixel renderer, continuous held-button movement, saves,
+audio and CJK text are follow-ups, not implied capabilities.
 
 Input is not DOM events. The host module exposes two explicit capabilities:
 

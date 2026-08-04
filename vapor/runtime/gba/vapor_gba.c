@@ -1,9 +1,9 @@
 /* vapor/runtime/gba/vapor_gba.c — the GBA half of the runtime.
  *
- * Mode 0, BG0 only: the 30x20 cell grid from vapor_core.c rendered as font
- * tiles with real per-bank palettes. Cells diff at write time and mark row
- * bits; the commit after vblank copies only dirty rows into the
- * screenblock. The debug block is mirrored to EWRAM each frame.
+ * Mode 0 always keeps the 30x20 BG0 cell grid from vapor_core.c. RPG apps
+ * additionally enable the fixed BG1 tile-world + OBJ host; their generated
+ * refs still own every gameplay transition. Commits happen after vblank and
+ * the debug block is mirrored to EWRAM each frame.
  */
 #include "vapor.h"
 
@@ -96,6 +96,9 @@ int main(void) {
   for (i = 0; i < (u16)(vp_palette_count * 16); i++) PAL_BG[i] = vp_palettes[i];
   PAL_BG[0] = vp_backdrop;
   upload_font();
+#if defined(VP_ENABLE_RPG)
+  if (vp_rpg_enabled) vp_rpg_video_init();
+#endif
   REG_BG0CNT = (SB_MAP << 8) | 0; /* 4bpp, charblock 0, priority 0 */
   REG_BG0HOFS = 0;
   REG_BG0VOFS = 0;
@@ -105,13 +108,21 @@ int main(void) {
   app_flush();
   flushes++;
 
-  REG_DISPCNT = 0x0100; /* mode 0, BG0 on */
+  /* RPG: mode 0 + 1D OBJ mapping + BG0/BG1/OBJ. Text apps remain BG0-only. */
+#if defined(VP_ENABLE_RPG)
+  REG_DISPCNT = vp_rpg_enabled ? 0x1340 : 0x0100;
+#else
+  REG_DISPCNT = 0x0100;
+#endif
 
   for (;;) {
     u16 keys, edges;
     u8 b;
     vsync();
     commit_rows();
+#if defined(VP_ENABLE_RPG)
+    if (vp_rpg_enabled) vp_rpg_video_commit();
+#endif
     frame++;
     debug_commit(frame, flushes);
 

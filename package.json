@@ -131,6 +131,8 @@
     "site:build": "bun tools/site-build.ts",
     "gba:imagegen": "bun imagegen",
     "vapor": "bun vapor/compiler/cli.ts vapor/examples/todo/todo.tsx",
+    "vapor:rpg": "bun vapor/compiler/cli.ts vapor/examples/rpg/rpg.tsx",
+    "vapor:rpg:play": "bun vapor/scripts/play.ts vapor/examples/rpg/rpg.tsx",
     "vapor:play": "bun vapor/scripts/play.ts",
     "vapor:test": "bun test vapor/tests/",
     "serve": "bun hosts/web/serve.ts",

@@ -47,6 +47,7 @@ describe("pocket vapor compiler", () => {
     const a = compileVaporApp(ENTRY, source, "VAPOR TODO");
     const b = compileVaporApp(ENTRY, source, "VAPOR TODO");
     expect(a.c).toBe(b.c);
+    expect(a.rpgEnabled).toBe(false);
     expect(a.c).toContain("vp_mark");
     expect(a.graph).toContain("visible: view(maxLen 12)");
     expect(a.plan).toContain("pools");
