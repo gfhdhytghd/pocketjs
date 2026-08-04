@@ -13,7 +13,7 @@
 // phase guards, no input blocking needed for this demo's script.
 
 import { createMemo, createSignal, For, Show, onMount } from "solid-js";
-import { Text, View, type NodeMirror } from "@pocketjs/framework/components";
+import { Focusable, Text, View, type NodeMirror } from "@pocketjs/framework/components";
 import { onButtonPress } from "@pocketjs/framework/lifecycle";
 import { BTN, pushFocusScope } from "@pocketjs/framework/input";
 import { runEffect } from "@pocketjs/framework/effects";
@@ -57,7 +57,7 @@ export default function Cafe() {
     setQty((q) => q.map((n, j) => (j === i ? n + 1 : n)));
   };
 
-  onButtonPress(BTN.START, () => {
+  const placeOrder = () => {
     if (phase() !== "menu" || total() === 0) return;
     setPhase("placing");
     const order = items()
@@ -73,7 +73,8 @@ export default function Cafe() {
         setPhase("menu");
       });
     });
-  });
+  };
+  onButtonPress(BTN.START, placeOrder);
 
   return (
     <View class="w-full h-full flex-col" style={{ bgColor: "#05080c" }}>
@@ -116,9 +117,15 @@ export default function Cafe() {
             <Show
               when={phase() === "placing"}
               fallback={
-                <Text class="text-xs tracking-wide" style={{ textColor: DIM }}>
-                  ↕ BROWSE · ○ ADD · START = PLACE ORDER
-                </Text>
+                /* Tapping the hint places the order too — the touch twin of
+                   START (menu rows already add on tap via activation). The
+                   active: wash is the only visual, so untouched frames stay
+                   byte-identical. */
+                <Focusable onPress={placeOrder} class="active:bg-[#12202c]">
+                  <Text class="text-xs tracking-wide" style={{ textColor: DIM }}>
+                    ↕ BROWSE · ○ ADD · START = PLACE ORDER
+                  </Text>
+                </Focusable>
               }
             >
               <Text class="text-xs tracking-wide animate-pulse" style={{ textColor: AMBER }}>

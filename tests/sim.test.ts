@@ -93,6 +93,21 @@ describe("the virtual clock", () => {
   });
 });
 
+describe("touch activation reaches the demo fleet", () => {
+  test("hero: taps on the button increment the count", async () => {
+    // The button is a bare Focusable with onPress — no touch code in the
+    // app. Each tap rides its hit fact into the default activation
+    // recognizer (docs/TOUCH.md §0) exactly like CIRCLE does. Four taps
+    // cross the count>3 gate, mounting an unambiguous beacon line.
+    const taps = [0.5, 0.7, 0.9, 1.1].flatMap((at, i) => [
+      { at, touch: [{ id: i + 1, x: 70, y: 234 }] },
+      { at: at + 0.1, touch: [] },
+    ]);
+    const t = await runScenario({ app: "hero-main", hz: 60, seconds: 2, script: taps });
+    expect(treeHasText(t.tree, "Reactive on real hardware.")).toBe(true);
+  });
+});
+
 describe("the journey actually happened", () => {
   test("order placed, cart reset, world settled", () => {
     // The trace's tree probe (a DevTools getTree after the final frame) is

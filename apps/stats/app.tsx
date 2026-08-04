@@ -11,6 +11,7 @@ import { createMemo, createSignal, onMount, Show } from "solid-js";
 import { Text, View, type NodeMirror } from "@pocketjs/framework/components";
 import { animate } from "@pocketjs/framework/animation";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
+import { createGesture } from "@pocketjs/framework/gesture";
 import { BTN } from "@pocketjs/framework/input";
 
 const COUNT_FRAMES = 75;
@@ -161,11 +162,20 @@ export default function Stats() {
   const [tab, setTab] = createSignal(0);
   const [systemsFrame, setSystemsFrame] = createSignal(0);
 
-  onButtonPress(BTN.RIGHT, () => {
+  const toSystems = () => {
     setTab(1);
     setSystemsFrame(0);
-  });
+  };
+  onButtonPress(BTN.RIGHT, toSystems);
   onButtonPress(BTN.LEFT, () => setTab(0));
+  // Touch: swipe between the two boards, mirroring LEFT/RIGHT.
+  createGesture({
+    axis: "x",
+    onPanEnd: (c) => {
+      if (c.dx <= -40 || c.vx <= -300) toSystems();
+      else if (c.dx >= 40 || c.vx >= 300) setTab(0);
+    },
+  });
   onFrame(() => {
     if (frameN() < COUNT_FRAMES) setFrameN(frameN() + 1);
     if (tab() === 1 && systemsFrame() < SYSTEMS_MAX_FRAMES) {

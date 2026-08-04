@@ -16,6 +16,7 @@ import { Show, createSignal } from "solid-js";
 import type { JSX } from "solid-js";
 import { Image, Text, View } from "@pocketjs/framework/components";
 import { onButtonPress } from "@pocketjs/framework/lifecycle";
+import { createGesture } from "@pocketjs/framework/gesture";
 import { BTN } from "@pocketjs/framework/input";
 
 // ---------------------------------------------------------------------------
@@ -654,8 +655,19 @@ const PAGES: PageDef[] = [
 export default function Motions() {
   const [index, setIndex] = createSignal(0);
   const page = () => PAGES[index()];
-  onButtonPress(BTN.RIGHT | BTN.RTRIGGER, () => setIndex((i) => (i + 1) % PAGES.length));
-  onButtonPress(BTN.LEFT | BTN.LTRIGGER, () => setIndex((i) => (i + PAGES.length - 1) % PAGES.length));
+  const next = () => setIndex((i) => (i + 1) % PAGES.length);
+  const prev = () => setIndex((i) => (i + PAGES.length - 1) % PAGES.length);
+  onButtonPress(BTN.RIGHT | BTN.RTRIGGER, next);
+  onButtonPress(BTN.LEFT | BTN.LTRIGGER, prev);
+  // Touch: the paging idiom is a horizontal swipe anywhere on the deck —
+  // swipe left = forward, matching the L/R buttons (docs/TOUCH.md §3).
+  createGesture({
+    axis: "x",
+    onPanEnd: (c) => {
+      if (c.dx <= -40 || c.vx <= -300) next();
+      else if (c.dx >= 40 || c.vx >= 300) prev();
+    },
+  });
   return (
     <View debugName="MotionsScreen" class="w-full h-full bg-[#191919]">
       <View debugName="Header" class="absolute left-0 top-[1] w-full flex-row justify-between px-[8]">
