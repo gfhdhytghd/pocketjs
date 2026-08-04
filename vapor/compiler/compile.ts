@@ -266,12 +266,14 @@ class AppCompiler {
   private computeds: ComputedBinding[] = [];
   private fns: FnBinding[] = [];
   private handler: ts.ArrowFunction | null = null;
+  private repeatHandler: ts.ArrowFunction | null = null;
   private axisHandlers = new Map<number, ts.ArrowFunction>();
   private template: ts.JsxFragment | null = null;
 
   private vueRef = "";
   private vueComputed = "";
   private hostOnButton = "";
+  private hostOnButtonRepeat = "";
   private hostButton = "";
   private hostOnAxisDelta = "";
   private hostDefineRpgMap = "";
@@ -349,6 +351,7 @@ class AppCompiler {
         else this.err(spec, `unsupported vue import: ${imported} (subset allows ref, computed)`);
       } else if (/\/host\/input(\.ts)?$/.test(from)) {
         if (imported === "onButton") this.hostOnButton = local;
+        else if (imported === "onButtonRepeat") this.hostOnButtonRepeat = local;
         else if (imported === "Button") this.hostButton = local;
         else if (imported === "onAxisDelta") this.hostOnAxisDelta = local;
         else if (imported === "RelativeAxis")
@@ -618,6 +621,17 @@ class AppCompiler {
           const arg = call.arguments[0];
           if (!arg || !ts.isArrowFunction(arg)) this.err(call, "onButton takes an arrow");
           this.handler = arg;
+        } else if (
+          ts.isCallExpression(call) &&
+          ts.isIdentifier(call.expression) &&
+          call.expression.text === this.hostOnButtonRepeat
+        ) {
+          if (this.target.name !== "gba")
+            this.err(call, "onButtonRepeat is currently supported only on the gba target");
+          if (this.repeatHandler) this.err(call, "only one onButtonRepeat handler is supported");
+          const arg = call.arguments[0];
+          if (!arg || !ts.isArrowFunction(arg)) this.err(call, "onButtonRepeat takes an arrow");
+          this.repeatHandler = arg;
         } else if (
           ts.isCallExpression(call) &&
           ts.isIdentifier(call.expression) &&
@@ -2293,6 +2307,24 @@ class AppCompiler {
       this.scope = saved;
     }
 
+    let repeatHandlerOut: string[] = [];
+    if (this.repeatHandler) {
+      const saved = new Map(this.scope);
+      const param = this.repeatHandler.parameters[0]?.name.getText(this.sf);
+      if (!param) this.err(this.repeatHandler, "onButtonRepeat arrow needs a (b) param");
+      this.scope.set(param, { kind: "local", cName: "b_arg", ty: NUM });
+      const repeatHandlerArrow = this.repeatHandler;
+      const { decls, body } = this.withHoist((out) => {
+        if (ts.isBlock(repeatHandlerArrow.body)) {
+          for (const stmt of repeatHandlerArrow.body.statements) this.compileStmt(stmt, out, "  ");
+        } else {
+          this.compileExprStmt(repeatHandlerArrow.body, out, "  ");
+        }
+      });
+      repeatHandlerOut = [...decls, ...body];
+      this.scope = saved;
+    }
+
     const axisHandlerFns: string[] = [];
     const axisHandlerCases: string[] = [];
     for (const [axis, handler] of [...this.axisHandlers].sort(([a], [b]) => a - b)) {
@@ -2456,6 +2488,15 @@ class AppCompiler {
 
     // handler
     c.push(`void app_on_button(u8 b) {\n  s32 b_arg = (s32)b;\n${handlerOut.join("\n")}\n}\n`);
+    if (this.target.name === "gba") {
+      if (this.repeatHandler) {
+        c.push(
+          `void app_on_button_repeat(u8 b) {\n  s32 b_arg = (s32)b;\n${repeatHandlerOut.join("\n")}\n}\n`,
+        );
+      } else {
+        c.push("void app_on_button_repeat(u8 b) {\n  (void)b;\n}\n");
+      }
+    }
     c.push(axisHandlerFns.join("\n\n"));
     if (axisHandlerCases.length > 0) {
       c.push(
@@ -2547,6 +2588,7 @@ class AppCompiler {
           .join(", ") || "none"
       }`,
     );
+    graphLines.push(`  button repeats: ${this.repeatHandler ? "directional (gba)" : "none"}`);
     graphLines.push(
       `  relative axes: ${
         [...this.axisHandlers.keys()]

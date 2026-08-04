@@ -14,6 +14,9 @@
 #define REG_BG0HOFS REG(0x04000010)
 #define REG_BG0VOFS REG(0x04000012)
 #define REG_KEYINPUT REG(0x04000130)
+#define VP_DPAD_MASK 0x00f0
+#define VP_REPEAT_DELAY_FRAMES 12
+#define VP_REPEAT_INTERVAL_FRAMES 6
 #define PAL_BG ((volatile u16 *)0x05000000)
 #define VRAM ((volatile u16 *)0x06000000)
 #define SB_MAP 8
@@ -91,6 +94,7 @@ static void vsync(void) {
 int main(void) {
   u16 i;
   u16 prev_keys = 0x03ff;
+  u8 repeat_frames[10] = { 0 };
   u32 frame = 0, flushes = 0;
 
   for (i = 0; i < (u16)(vp_palette_count * 16); i++) PAL_BG[i] = vp_palettes[i];
@@ -116,7 +120,7 @@ int main(void) {
 #endif
 
   for (;;) {
-    u16 keys, edges;
+    u16 keys, edges, held;
     u8 b;
     vsync();
     commit_rows();
@@ -128,9 +132,23 @@ int main(void) {
 
     keys = (u16)(REG_KEYINPUT & 0x03ff);
     edges = (u16)(prev_keys & ~keys); /* KEYINPUT is active-low */
+    held = (u16)(~keys & 0x03ff);
     prev_keys = keys;
-    for (b = 0; b < 10; b++)
-      if (edges & (u16)(1 << b)) app_on_button(b);
+    for (b = 0; b < 10; b++) {
+      u16 bit = (u16)(1 << b);
+      if (edges & bit) {
+        app_on_button(b);
+        repeat_frames[b] = (bit & VP_DPAD_MASK) ? VP_REPEAT_DELAY_FRAMES : 0;
+      } else if ((held & bit) && repeat_frames[b]) {
+        repeat_frames[b]--;
+        if (!repeat_frames[b]) {
+          app_on_button_repeat(b);
+          repeat_frames[b] = VP_REPEAT_INTERVAL_FRAMES;
+        }
+      } else {
+        repeat_frames[b] = 0;
+      }
+    }
     if (app_flush()) flushes++;
   }
 }

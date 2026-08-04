@@ -12,7 +12,7 @@
 // Right, A to complete the quest.
 
 import { computed, ref } from "vue";
-import { Button, onButton } from "../../host/input.ts";
+import { Button, onButton, onButtonRepeat } from "../../host/input.ts";
 import {
   defineRpgMap,
   RpgScreen,
@@ -270,6 +270,13 @@ export default () => {
           ? battleKeys
           : worldKeys)[button]?.(),
   );
+
+  // The GBA host normalizes held D-pad input into delayed repeat events.
+  // Only the world consumes them: dialogue and battle remain one choice per
+  // physical press while map movement continues at a predictable cadence.
+  onButtonRepeat((button) => {
+    if (mode.value === Mode.World) worldKeys[button]?.();
+  });
 
   return (
     <>

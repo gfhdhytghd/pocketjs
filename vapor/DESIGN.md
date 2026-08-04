@@ -237,22 +237,27 @@ it. Its responsibilities are split four ways:
    characters through OBJ, with its fixed dialogue/battle presentation; it
    does not expose GBA registers or SDK concepts to application code.
 
-The current RPG movement contract consumes the same hardware-neutral
-`onButton` press edges as the rest of Vapor and advances one cell per press.
+The RPG movement contract consumes hardware-neutral `onButton` press edges
+for immediate steps and a separate `onButtonRepeat` registration for held
+D-pad movement. The GBA host waits 12 frames after the edge, then emits a
+repeat every 6 frames. The app routes repeats only to its world keymap, so
+dialogue and battle choices still advance once per physical press.
 The JS `RpgScreen` currently returns no pixels, so collision/event behavior
 can run in the JS/oracle path but pixel-frame acceptance is mGBA-only for
-this POC. A browser pixel renderer, continuous held-button movement, saves,
-audio and CJK text are follow-ups, not implied capabilities.
+this POC. A browser pixel renderer, saves, audio and CJK text are follow-ups,
+not implied capabilities.
 
-Input is not DOM events. The host module exposes two explicit capabilities:
+Input is not DOM events. The host module exposes three explicit capabilities:
 
 - `onButton((b: Button) => void)` for frame-latched press edges;
+- `onButtonRepeat((b: Button) => void)` for normalized held-D-pad repeats
+  (currently supplied by the GBA target);
 - `onAxisDelta(RelativeAxis.Primary, (delta) => void)` for signed,
   hardware-neutral incremental movement in canonical units.
 
 Under the oracle the module executes and the test tape feeds it; under the
-compiler registrations become `app_on_button()` and
-`app_on_axis_delta(axis, delta)`. Physical hosts own normalization:
+compiler registrations become `app_on_button()`, `app_on_button_repeat()`
+and `app_on_axis_delta(axis, delta)`. Physical hosts own normalization:
 rotary adapters preserve signed motion as millidegrees, while applications
 own detents, acceleration, and sensitivity. Playdate forwards crank motion
 to Primary; a future ESP32 board can adapt an encoder without exposing pins

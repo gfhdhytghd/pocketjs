@@ -19,6 +19,8 @@ const DEBUG_STATE = 0x02000010;
 let source = "";
 let app: CompiledApp;
 let runReads: Record<string, string | number>;
+let holdReads: Record<string, string | number>;
+let repeatBoundaryX: number[];
 
 function press(button: number): string {
   return `P ${(1 << button).toString(16)} 2 4`;
@@ -92,8 +94,11 @@ beforeAll(async () => {
   readState(lines, "offer", ["mode", "playerX", "playerY", "facing", "quest", "dialog", "choice"]);
   lines.push(`S ${dialogShot}`);
 
-  // Exercise NO, close, talk again, then accept YES.
-  lines.push(press(Button.Down), press(Button.A));
+  // Exercise NO with a long hold: repeats are world-only, so the two-choice
+  // dialog must not toggle back and forth. Close, talk again, then accept YES.
+  lines.push(`P ${(1 << Button.Down).toString(16)} 20 4`);
+  readState(lines, "offerHeld", ["choice"]);
+  lines.push(press(Button.A));
   readState(lines, "declined", ["mode", "quest", "dialog", "choice"]);
   lines.push(press(Button.A), press(Button.A), press(Button.A));
   readState(lines, "accepted", ["mode", "quest", "dialog", "choice"]);
@@ -107,8 +112,9 @@ beforeAll(async () => {
   lines.push("D battle_bg1 0x06004800 2048");
   lines.push("D battle_oam 0x07000000 24");
 
-  // HEAL once, then ATTACK three times. Victory is a reactive dialog state.
-  lines.push(press(Button.Down), press(Button.A));
+  // HEAL once after another long hold; battle selection also ignores repeats.
+  // Then ATTACK three times. Victory is a reactive dialog state.
+  lines.push(`P ${(1 << Button.Down).toString(16)} 25 4`, press(Button.A));
   readState(lines, "healed", ["mode", "heroHp", "enemyHp", "battleCursor"]);
   lines.push(press(Button.Up), press(Button.A), press(Button.A), press(Button.A));
   readState(lines, "won", ["mode", "quest", "dialog", "heroHp", "enemyHp"]);
@@ -128,6 +134,56 @@ beforeAll(async () => {
   const parsed = JSON.parse(output) as { ok: boolean; reads: Record<string, string | number> };
   expect(parsed.ok).toBe(true);
   runReads = parsed.reads;
+
+  // A single held direction must move immediately, wait for the normalized
+  // delay, then continue at the fixed repeat cadence. Releasing must stop it.
+  const holdScenario = join(OUT, "rpg-hold-tape.txt");
+  await Bun.write(
+    holdScenario,
+    [
+      "A 8",
+      `P ${(1 << Button.Right).toString(16)} 25 4`,
+      `R held_x 0x${stateAddress("playerX").toString(16)} 4`,
+      `R held_y 0x${stateAddress("playerY").toString(16)} 4`,
+      `R held_facing 0x${stateAddress("facing").toString(16)} 4`,
+      "A 30",
+      `R released_x 0x${stateAddress("playerX").toString(16)} 4`,
+      "R hold_trips 0x0200000c 1",
+      "",
+    ].join("\n"),
+  );
+  const holdOutput = await $`${RUNNER} ${ROM} ${holdScenario}`.text();
+  const holdParsed = JSON.parse(holdOutput) as {
+    ok: boolean;
+    reads: Record<string, string | number>;
+  };
+  expect(holdParsed.ok).toBe(true);
+  holdReads = holdParsed.reads;
+
+  // Host video scheduling means setKeys() and the runtime input loop do not
+  // share a frame boundary. Adjacent holds pin the first two observed repeats.
+  repeatBoundaryX = [];
+  for (const hold of [14, 15, 22, 23]) {
+    const boundaryScenario = join(OUT, `rpg-hold-${hold}-tape.txt`);
+    await Bun.write(
+      boundaryScenario,
+      [
+        "A 8",
+        `P ${(1 << Button.Right).toString(16)} ${hold} 4`,
+        `R x 0x${stateAddress("playerX").toString(16)} 4`,
+        "R trips 0x0200000c 1",
+        "",
+      ].join("\n"),
+    );
+    const boundaryOutput = await $`${RUNNER} ${ROM} ${boundaryScenario}`.text();
+    const boundaryParsed = JSON.parse(boundaryOutput) as {
+      ok: boolean;
+      reads: Record<string, string | number>;
+    };
+    expect(boundaryParsed.ok).toBe(true);
+    expect(boundaryParsed.reads.trips).toBe(0);
+    repeatBoundaryX.push(boundaryParsed.reads.x as number);
+  }
 }, 120000);
 
 describe("Pocket Vapor RPG host", () => {
@@ -186,6 +242,16 @@ describe("Pocket Vapor RPG host", () => {
 });
 
 describe("native GBA RPG play tape", () => {
+  test("holding a direction repeats world movement and release stops it", () => {
+    expect([holdReads.held_x, holdReads.held_y, holdReads.held_facing]).toEqual([5, 2, 3]);
+    expect(holdReads.released_x).toBe(5);
+    expect(holdReads.hold_trips).toBe(0);
+  });
+
+  test("libmGBA pacing crosses the first two held-movement repeat boundaries", () => {
+    expect(repeatBoundaryX).toEqual([3, 4, 4, 5]);
+  });
+
   test("collision turns without moving and A opens the elder offer", () => {
     expect([value("boot", "mode"), value("boot", "playerX"), value("boot", "playerY")]).toEqual([0, 2, 2]);
     expect([value("wall", "playerX"), value("wall", "playerY"), value("wall", "facing")]).toEqual([2, 1, 1]);
@@ -200,6 +266,7 @@ describe("native GBA RPG play tape", () => {
   });
 
   test("choice, quest gate, heal, battle, and report form one complete loop", () => {
+    expect(value("offerHeld", "choice")).toBe(1);
     expect([value("declined", "quest"), value("declined", "dialog")]).toEqual([0, 3]);
     expect([value("accepted", "mode"), value("accepted", "quest"), value("accepted", "dialog")]).toEqual([1, 1, 2]);
     expect([

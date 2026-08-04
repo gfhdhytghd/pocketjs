@@ -202,8 +202,9 @@ three attacks, then return to the Elder to complete the quest.
 
 Controls:
 
-- World: D-pad moves one cell per press; A talks to the event cell directly
-  in front of the player.
+- World: D-pad moves one cell immediately; holding it waits 12 frames, then
+  continues every 6 frames. A talks to the event cell directly in front of
+  the player.
 - Dialogue: Up/Down selects YES or NO; A confirms or advances.
 - Battle: Up/Down selects ATTACK or HEAL; A performs the action.
 
@@ -213,7 +214,7 @@ bun run vapor:rpg:play  # build and open the ROM in mGBA
 ```
 
 The POC deliberately keeps a narrow evidence and product boundary. It is
-GBA-only, step-based, and uses printable English ASCII; there is no save
+GBA-only, tile-based, and uses printable English ASCII; there is no save
 data, audio, or CJK text yet. The JS collision/event helpers are real, but
 the browser `RpgScreen` is currently a stateless placeholder rather than a
 pixel oracle renderer. Validation is scoped to mGBA; this section does not

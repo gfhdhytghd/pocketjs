@@ -6,6 +6,14 @@ import { loadBoard } from "../compiler/boards.ts";
 import { compileVaporApp, VAPOR_TARGETS, VaporCompileError } from "../compiler/compile.ts";
 import { esp32BuildId } from "../compiler/esp32.ts";
 import { FONT8 } from "../compiler/font.gen.ts";
+import {
+  __dispatchButton,
+  __dispatchButtonRepeat,
+  __resetButtons,
+  Button,
+  onButton,
+  onButtonRepeat,
+} from "../host/input.ts";
 
 const ENTRY = join(import.meta.dir, "..", "examples", "todo", "todo.tsx");
 
@@ -169,6 +177,36 @@ export default () => {
     expect(app.c).toContain("KM_editKeys");
     expect(app.c).toMatch(/\? KM_editKeys : KM_listKeys/); // dispatch ternary
     expect(app.c).toContain("fn_closeEditor"); // bare fn reference as keymap value
+  });
+
+  test("GBA button repeat is explicit and lowers to a separate native hook", () => {
+    const source = minimal(`
+  onButtonRepeat((b) => {
+    if (b === Button.Right) count.value = count.value + 10;
+  });`).replace("{ Button, onButton }", "{ Button, onButton, onButtonRepeat }");
+    const app = compileVaporApp("repeat.tsx", source, "REPEAT", "gba");
+    expect(app.c).toContain("void app_on_button_repeat(u8 b)");
+    expect(app.c).toMatch(/app_on_button_repeat[\s\S]*g_count \+ 10/);
+    expect(app.graph).toContain("button repeats: directional (gba)");
+    expect(() => compileVaporApp("repeat.tsx", source, "REPEAT", "gb")).toThrow(
+      /onButtonRepeat is currently supported only on the gba target/,
+    );
+  });
+
+  test("oracle repeat dispatch stays separate from physical press edges", () => {
+    let presses = 0;
+    let repeats = 0;
+    __resetButtons();
+    try {
+      onButton(() => presses++);
+      onButtonRepeat(() => repeats++);
+      __dispatchButtonRepeat(Button.Right);
+      expect([presses, repeats]).toEqual([0, 1]);
+      __dispatchButton(Button.Right);
+      expect([presses, repeats]).toEqual([1, 1]);
+    } finally {
+      __resetButtons();
+    }
   });
 
   test("computed can yield a record reference (current todo)", async () => {
