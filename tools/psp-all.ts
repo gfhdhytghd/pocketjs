@@ -31,7 +31,7 @@
 // is 100% a pure function of its text.
 
 import { $ } from "bun";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
@@ -58,6 +58,19 @@ const MAIN_SUFFIX = "-main.tsx";
 // Demo discovery + metadata
 // ---------------------------------------------------------------------------
 
+/** Not memory-stick material: framework labs and per-framework variants of
+ *  hero, the launcher (its real EBOOT embeds a registry via
+ *  tools/launcher.ts — a bare build would collide with that install), and
+ *  apps whose primary target is another host class entirely. */
+const SKIP = new Set([
+  "launcher",
+  "note",
+  "ipod-nano",
+  "vue-sfc-lab",
+  "hero-vue-sfc",
+  "hero-vue-vapor",
+]);
+
 function listDemos(): string[] {
   const names = new Set<string>();
   for (const f of readdirSync(demosDir)) {
@@ -66,6 +79,7 @@ function listDemos(): string[] {
     else if (f.endsWith(MAIN_SUFFIX)) names.add(f.slice(0, -MAIN_SUFFIX.length));
   }
   return [...names]
+    .filter((n) => !SKIP.has(n))
     .sort();
 }
 
@@ -609,7 +623,15 @@ if (import.meta.main) {
     const folder = folderName(name);
     const destDir = join(pspGameRoot, folder);
     mkdirSync(destDir, { recursive: true });
-    await repackEboot(name, title, eboot, destDir);
+    if (existsSync(join(demosDir, name, "psp", "Psp.toml"))) {
+      // The demo carries a committed cover fragment (tools/gen-demo-covers.ts
+      // -> apps/<name>/psp/): cargo-psp already packed its ICON0/PIC1/title,
+      // so ship the EBOOT untouched instead of repacking procedural art
+      // over the authored covers.
+      copyFileSync(eboot, join(destDir, "EBOOT.PBP"));
+    } else {
+      await repackEboot(name, title, eboot, destDir);
+    }
     built.push({ name, title, folder });
   }
 

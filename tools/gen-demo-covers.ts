@@ -211,6 +211,106 @@ const DEMOS: DemoCover[] = [
       g.fill();
     },
   },
+  {
+    dir: "cafe",
+    bundle: "cafe-main",
+    title: "PocketJS Cafe",
+    word: ["POCKET", "CAFE"],
+    accent: "#f59e0b",
+    seconds: 2.0,
+    script: [{ at: 1.2, press: BTN.CIRCLE }],
+    mark: (g) => {
+      roundRect(g, 16, 30, 30, 26, 6);
+      g.fillStyle = "#f59e0b";
+      g.fill();
+      g.beginPath();
+      g.arc(50, 40, 8, -Math.PI / 2, Math.PI / 2);
+      g.lineWidth = 5;
+      g.strokeStyle = "#b45309";
+      g.stroke();
+      for (const x of [24, 34]) {
+        roundRect(g, x, 16, 4, 9, 2);
+        g.fillStyle = "#fcd34d";
+        g.fill();
+      }
+    },
+  },
+  {
+    dir: "chrome",
+    bundle: "chrome-main",
+    title: "PocketJS Chrome",
+    word: ["POCKET", "CHROME"],
+    accent: "#a78bfa",
+    seconds: 1.5,
+    mark: (g) => {
+      for (const [i, hue] of ["#7c3aed", "#a78bfa", "#ddd6fe"].entries()) {
+        g.beginPath();
+        g.moveTo(14 + i * 6, 18);
+        g.bezierCurveTo(30 + i * 6, 30, 22 + i * 6, 46, 38 + i * 6, 60);
+        g.lineWidth = 6;
+        g.strokeStyle = hue;
+        g.stroke();
+      }
+    },
+  },
+  {
+    dir: "cursor",
+    bundle: "cursor-main",
+    title: "PocketJS Cursor",
+    word: ["POCKET", "CURSOR"],
+    accent: "#f472b6",
+    seconds: 1.5,
+    mark: (g) => {
+      g.beginPath();
+      g.moveTo(20, 16);
+      g.lineTo(20, 56);
+      g.lineTo(30, 46);
+      g.lineTo(38, 60);
+      g.lineTo(44, 56);
+      g.lineTo(36, 43);
+      g.lineTo(50, 41);
+      g.closePath();
+      g.fillStyle = "#f472b6";
+      g.fill();
+    },
+  },
+  {
+    dir: "motions",
+    bundle: "motions-main",
+    title: "PocketJS Motions",
+    word: ["POCKET", "MOTIONS"],
+    accent: "#fb7185",
+    seconds: 1.5,
+    mark: (g) => {
+      for (const [i, r] of [14, 10, 6].entries()) {
+        g.beginPath();
+        g.arc(24 + i * 14, 38 + (i % 2 ? 10 : -6), r, 0, Math.PI * 2);
+        g.fillStyle = i % 2 ? "#fb7185" : "#fda4af";
+        g.fill();
+      }
+    },
+  },
+  {
+    dir: "zoomlab",
+    bundle: "zoomlab-main",
+    title: "PocketJS ZoomLab",
+    word: ["POCKET", "ZOOM"],
+    accent: "#38bdf8",
+    seconds: 1.5,
+    mark: (g) => {
+      g.beginPath();
+      g.arc(30, 34, 14, 0, Math.PI * 2);
+      g.lineWidth = 6;
+      g.strokeStyle = "#38bdf8";
+      g.stroke();
+      g.beginPath();
+      g.moveTo(41, 45);
+      g.lineTo(52, 58);
+      g.lineWidth = 7;
+      g.strokeStyle = "#0ea5e9";
+      g.stroke();
+    },
+  },
 ];
 
 const only = new Set(Bun.argv.slice(2));
