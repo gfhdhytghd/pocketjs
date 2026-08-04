@@ -89,14 +89,14 @@ const RPG_MAP = defineRpgMap({
   dialogs: [
     {
       speaker: "ELDER",
-      line1: "SLIME BLOCKS THE EAST ROAD.",
+      line1: "SLIME BLOCKS EAST ROAD.",
       line2: "WILL YOU HELP?",
       choice0: "YES",
       choice1: "NO",
     },
     {
       speaker: "ELDER",
-      line1: "THANK YOU, BRAVE TRAVELER.",
+      line1: "THANK YOU, BRAVE HERO.",
       line2: "FOLLOW THE ROAD EAST.",
     },
     {
@@ -110,7 +110,7 @@ const RPG_MAP = defineRpgMap({
     },
     {
       speaker: "ELDER",
-      line1: "THE VILLAGE IS SAFE AGAIN.",
+      line1: "THE VILLAGE IS SAFE.",
       line2: "QUEST COMPLETE!",
     },
   ],

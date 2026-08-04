@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "provider": "PixelLab",
+  "apiBase": "https://api.pixellab.ai/v2",
+  "artDirection": "Vapor Quest: bright field, deep-navy information layer, one-pixel silhouettes",
+  "assets": {
+    "styleAnchor": {
+      "endpoint": "/create-image-bitforge",
+      "seed": 22051,
+      "size": {
+        "width": 96,
+        "height": 64
+      },
+      "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. A tiny forest village clearing: grass, a tan footpath, blue stream, gray stone wall, leafy tree, one blue-tunic adventurer, one white-haired elder, and one teal slime. Compose it as a clean asset style board, with no text or UI."
+    },
+    "terrainSets": [
+      {
+        "name": "field",
+        "endpoint": "/tilesets",
+        "seed": 22061,
+        "lower": "Original cheerful early-2000s handheld cartridge RPG terrain pixel art. Strict high top-down orthographic view, crisp hard-edged native pixels. Small flat color clusters, fixed top-left lighting, restrained readable texture. No characters, items, icons, perspective, canvas border or imitation of an existing game. Seamless bright green meadow grass, quiet walkable ground, only two or three tiny dark grass clusters, no objects or border.",
+        "upper": "Original cheerful early-2000s handheld cartridge RPG terrain pixel art. Strict high top-down orthographic view, crisp hard-edged native pixels. Small flat color clusters, fixed top-left lighting, restrained readable texture. No characters, items, icons, perspective, canvas border or imitation of an existing game. Seamless warm tan compacted village footpath, quiet walkable ground, only two or three tiny brown stone marks, no grass edge or border.",
+        "lowerFile": "grass.png",
+        "upperFile": "path.png"
+      },
+      {
+        "name": "barriers",
+        "endpoint": "/tilesets",
+        "seed": 22062,
+        "lower": "Original cheerful early-2000s handheld cartridge RPG terrain pixel art. Strict high top-down orthographic view, crisp hard-edged native pixels. Small flat color clusters, fixed top-left lighting, restrained readable texture. No characters, items, icons, perspective, canvas border or imitation of an existing game. Seamless deep blue stream water, clearly impassable, two restrained horizontal ripple marks, quiet even field, no shore or border.",
+        "upper": "Original cheerful early-2000s handheld cartridge RPG terrain pixel art. Strict high top-down orthographic view, crisp hard-edged native pixels. Small flat color clusters, fixed top-left lighting, restrained readable texture. No characters, items, icons, perspective, canvas border or imitation of an existing game. Seamless gray stone barrier, clearly solid and impassable, chunky rectangular stones, dark mortar and bright top-left edges, no grass or border.",
+        "lowerFile": "water.png",
+        "upperFile": "wall.png"
+      }
+    ],
+    "mapObjects": [
+      {
+        "name": "tree",
+        "endpoint": "/map-objects",
+        "seed": 22069,
+        "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. One centered top-down deciduous tree map object on transparent background. A single compact, solid, filled round dome canopy occupies most of the image and must never form a hollow ring, split crown, doorway or arch. Dense leaves read as impassable, with dark lower-right foliage, bright top-left leaf clusters and exactly one short centered trunk. No grass tile and no cast shadow."
+      },
+      {
+        "name": "flower",
+        "endpoint": "/map-objects",
+        "seed": 22066,
+        "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. One tiny gold-and-cream meadow flower map object on transparent background. Low-profile walkable decoration, delicate stem, no enclosing outline, no ground tile and no cast shadow."
+      }
+    ],
+    "heroSouth": {
+      "endpoint": "/create-image-bitforge",
+      "seed": 22053,
+      "size": {
+        "width": 32,
+        "height": 32
+      },
+      "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. One south-facing 32x32 source sprite designed to reduce cleanly to a 16x16 GBA character. Full-body compact chibi adventurer with a readable head, torso, two arms and two separated feet. Blue tunic is the largest color block, warm orange-red scarf is the identity accent, warm skin, deep-navy outline. Centered, feet at the bottom, strong silhouette, no weapon, no detached pixels."
+    },
+    "heroRotations": {
+      "endpoint": "/create-character-v3",
+      "seed": 22054,
+      "prompt": "The same compact blue-tunic adventurer with orange-red scarf, rotated consistently for a high top-down RPG; preserve head height, shoulder width, palette, outline and foot anchor in every direction."
+    },
+    "elder": {
+      "endpoint": "/create-image-bitforge",
+      "seed": 22055,
+      "size": {
+        "width": 32,
+        "height": 32
+      },
+      "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. One south-facing 32x32 source sprite designed to reduce cleanly to a 16x16 GBA character. Full-body chibi village elder with white hair, short white beard, broad gray robe, warm skin, deep-navy outline, two arms and a grounded hem. Same height, head ratio, lighting and foot anchor as the blue-tunic adventurer. No staff, centered, no detached pixels."
+    },
+    "slime": {
+      "endpoint": "/create-image-bitforge",
+      "seed": 22056,
+      "size": {
+        "width": 32,
+        "height": 32
+      },
+      "prompt": "Original cheerful early-2000s handheld cartridge RPG pixel art. High top-down world view, compact chibi characters, crisp hard-edged native pixels. One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting. Readable silhouettes and restrained surface texture; no imitation of any existing game. One 32x32 source sprite designed to reduce cleanly to a 16x16 GBA monster. A low, wide, rounded slime whose body is at least ninety percent bright teal and dark teal, with a deep-navy outline and broad grounded base. White is allowed only for exactly two tiny separated eye highlights; never make the body, face or outline white. Cute but clearly an enemy, no limbs, no floating parts."
+    }
+  },
+  "records": {
+    "styleAnchor": {
+      "hash": "ab120dde50b3a08e4e86333d487232a7b5b476acd50e888fb54d95abad061183"
+    },
+    "heroSouth": {
+      "hash": "55bf3ce1e947a3f08912d19cb338a56927f759c69d7fb55aca635a9a83ef066f"
+    },
+    "heroRotations": {
+      "backgroundJobId": "c5f0607e-43b4-4902-9143-5775f2a2afe0",
+      "characterId": "d1745cff-c0e0-49d3-83ab-83c5f181ea15",
+      "hashes": {
+        "south": "fd63f529e6145dc87a9cef5be49636debd049b3d79475f6a5ca3600b0b297f26",
+        "north": "5d4655028fe5aec7421ad2db926b3914791c2acf5d33e83764bb30c9f168673f",
+        "west": "049af787c8bbefeebd5a8aac8c49ceb771c0283b2eab758b6d8a183f75dcdfe5",
+        "east": "e58f4bb26908694014db51ce6448ed1339d2167aab0ca39fc32f577198be9fdc"
+      }
+    },
+    "elder": {
+      "hash": "95bc2babbff0540f9d0502d15fec05488df8da677abc170292d0f9ade38fa7ac"
+    },
+    "slime": {
+      "hash": "ab5626b6524a80f9ffbfe810d12ab1ab13cc7e09c1f8f9d23a99c773d4fc880c"
+    },
+    "world": {
+      "field": {
+        "tilesetId": "d4f046c2-c51a-4320-9105-d57229be90e0",
+        "grass.png": "dea109cc2095b20ff667b1898c13c2c8bf04296a7107efc57ddd333d2a9f6752",
+        "path.png": "5d8b8931fb0531a2f707af44b49ec0a8556ec5eaf7a047d721d88c6022906ea3"
+      },
+      "barriers": {
+        "tilesetId": "e198ed1e-9fa9-4c0a-98fd-d43ed4b89d4c",
+        "water.png": "ac4164f53771c6815d73eebef4a2abddf6046f741abc5a4f90fe27f57b05a736",
+        "wall.png": "aad4267bcc739461db3c8ffd4df7704726ce0e4a0eb9bd6365371098a8c393df"
+      },
+      "tree": {
+        "backgroundJobId": "5a47e287-515e-44a4-92d2-05e84b1c338d",
+        "objectId": "2a08cbfa-921a-412d-8409-18537fc69b09",
+        "hash": "a7b53e141a9c77e7c9e844b593359f1f49f3138875c60303f8770c921034424a"
+      },
+      "flower": {
+        "backgroundJobId": "8804c7ae-f599-40af-8436-cc7a817fa7cb",
+        "objectId": "8109e860-4c59-472c-acb7-78684633994e",
+        "hash": "00127e82c04bc84466ee9bd88ff3729728fd1cff93ec832deb4c2797d9bded1e"
+      }
+    }
+  },
+  "sourceHashes": {
+    "style-anchor.png": "ab120dde50b3a08e4e86333d487232a7b5b476acd50e888fb54d95abad061183",
+    "grass.png": "dea109cc2095b20ff667b1898c13c2c8bf04296a7107efc57ddd333d2a9f6752",
+    "path.png": "5d8b8931fb0531a2f707af44b49ec0a8556ec5eaf7a047d721d88c6022906ea3",
+    "water.png": "ac4164f53771c6815d73eebef4a2abddf6046f741abc5a4f90fe27f57b05a736",
+    "wall.png": "aad4267bcc739461db3c8ffd4df7704726ce0e4a0eb9bd6365371098a8c393df",
+    "tree.png": "a7b53e141a9c77e7c9e844b593359f1f49f3138875c60303f8770c921034424a",
+    "flower.png": "00127e82c04bc84466ee9bd88ff3729728fd1cff93ec832deb4c2797d9bded1e",
+    "hero-south-reference.png": "55bf3ce1e947a3f08912d19cb338a56927f759c69d7fb55aca635a9a83ef066f",
+    "hero-south.png": "fd63f529e6145dc87a9cef5be49636debd049b3d79475f6a5ca3600b0b297f26",
+    "hero-north.png": "5d4655028fe5aec7421ad2db926b3914791c2acf5d33e83764bb30c9f168673f",
+    "hero-west.png": "049af787c8bbefeebd5a8aac8c49ceb771c0283b2eab758b6d8a183f75dcdfe5",
+    "hero-east.png": "e58f4bb26908694014db51ce6448ed1339d2167aab0ca39fc32f577198be9fdc",
+    "elder.png": "95bc2babbff0540f9d0502d15fec05488df8da677abc170292d0f9ade38fa7ac",
+    "slime.png": "ab5626b6524a80f9ffbfe810d12ab1ab13cc7e09c1f8f9d23a99c773d4fc880c"
+  }
+}

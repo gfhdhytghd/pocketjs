@@ -2632,6 +2632,7 @@ class AppCompiler {
       planLines.push(
         `RPG assets: ${this.rpgMaps.length} map(s), ${tileCount} tiles + collision bytes, ${eventCount} events, ${dialogCount} dialogs; ${this.rpgScreenCount} full-screen effect(s)`,
       );
+      planLines.push("RPG art: 24 BG tiles + 6 world and 2 battle OBJ frames, 4 palette banks; 2688 B ROM copied to VRAM");
       planLines.push("RPG host RAM: 3076 B fixed BG1 tilemap + OAM shadow buffers");
     }
 

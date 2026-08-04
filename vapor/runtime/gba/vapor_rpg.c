@@ -5,6 +5,7 @@
  * existing (now transparent) Vapor font, and OBJ contains the actors.
  */
 #include "vapor.h"
+#include "vapor_rpg_assets.generated.h"
 
 #define REG16(addr) (*(volatile u16 *)(addr))
 #define REG_DISPCNT REG16(0x04000000)
@@ -52,240 +53,14 @@ enum {
   TILE_COUNT
 };
 
-enum {
-  C_CLEAR,
-  C_DARK,
-  C_GRASS_DARK,
-  C_GRASS,
-  C_PATH_DARK,
-  C_PATH,
-  C_WALL_DARK,
-  C_WALL,
-  C_WATER_DARK,
-  C_WATER,
-  C_TREE_DARK,
-  C_TREE,
-  C_GOLD,
-  C_BOX,
-  C_BORDER,
-  C_ACCENT
-};
+typedef char vp_rpg_bg_tile_count_must_match[
+    TILE_COUNT == VP_RPG_BG_TILE_COUNT ? 1 : -1];
 
 static u16 rpg_bg_shadow[32 * 32];
 static u16 rpg_oam_shadow[128 * 4];
 static u8 rpg_bg_dirty;
 static u8 rpg_oam_dirty;
 static u8 rpg_ready;
-
-static void pixels_clear(u8 *pixels, u16 count, u8 color) {
-  u16 i;
-  for (i = 0; i < count; i++) pixels[i] = color;
-}
-
-static void pixels_rect(u8 *pixels, u8 stride, s16 x0, s16 y0,
-                        s16 x1, s16 y1, u8 color) {
-  s16 x, y;
-  for (y = y0; y <= y1; y++)
-    for (x = x0; x <= x1; x++)
-      if (x >= 0 && x < stride && y >= 0 && y < stride)
-        pixels[(u16)y * stride + (u16)x] = color;
-}
-
-static void pixel(u8 *pixels, u8 stride, s16 x, s16 y, u8 color) {
-  if (x >= 0 && x < stride && y >= 0 && y < stride)
-    pixels[(u16)y * stride + (u16)x] = color;
-}
-
-static void upload_bg_tile(u8 tile, const u8 *pixels) {
-  volatile u16 *dst = RPG_BG_VRAM + (u16)tile * 16;
-  u16 i;
-  for (i = 0; i < 16; i++) {
-    u16 p = (u16)i * 4;
-    dst[i] = (u16)(pixels[p] | ((u16)pixels[p + 1] << 4) |
-                       ((u16)pixels[p + 2] << 8) |
-                       ((u16)pixels[p + 3] << 12));
-  }
-}
-
-static void upload_obj(u8 base, const u8 *pixels) {
-  u8 tx, ty, row, col;
-  for (ty = 0; ty < 2; ty++) {
-    for (tx = 0; tx < 2; tx++) {
-      volatile u16 *dst = RPG_OBJ_VRAM +
-                          (u16)(base + ty * 2 + tx) * 16;
-      for (row = 0; row < 8; row++) {
-        for (col = 0; col < 8; col += 4) {
-          u16 at = (u16)(ty * 8 + row) * 16 + tx * 8 + col;
-          *dst++ = (u16)(pixels[at] |
-                         ((u16)pixels[at + 1] << 4) |
-                         ((u16)pixels[at + 2] << 8) |
-                         ((u16)pixels[at + 3] << 12));
-        }
-      }
-    }
-  }
-}
-
-static void make_bg_tile(u8 tile, u8 *p) {
-  u8 x, y;
-  pixels_clear(p, 64, C_CLEAR);
-  switch (tile) {
-    case TILE_BLANK:
-      pixels_clear(p, 64, C_DARK);
-      break;
-    case TILE_GRASS_A:
-    case TILE_GRASS_B:
-      pixels_clear(p, 64, C_GRASS);
-      pixel(p, 8, tile == TILE_GRASS_A ? 1 : 5, 2, C_GRASS_DARK);
-      pixel(p, 8, tile == TILE_GRASS_A ? 6 : 2, 6, C_GRASS_DARK);
-      pixel(p, 8, tile == TILE_GRASS_A ? 2 : 6, 7, C_GRASS_DARK);
-      break;
-    case TILE_PATH_A:
-    case TILE_PATH_B:
-      pixels_clear(p, 64, C_PATH);
-      pixel(p, 8, tile == TILE_PATH_A ? 1 : 6, 1, C_PATH_DARK);
-      pixel(p, 8, tile == TILE_PATH_A ? 6 : 2, 5, C_PATH_DARK);
-      pixel(p, 8, 3, 7, C_PATH_DARK);
-      break;
-    case TILE_WALL:
-      pixels_clear(p, 64, C_WALL);
-      for (x = 0; x < 8; x++) {
-        p[3 * 8 + x] = C_WALL_DARK;
-        p[7 * 8 + x] = C_WALL_DARK;
-      }
-      for (y = 0; y < 3; y++) p[y * 8 + 3] = C_WALL_DARK;
-      for (y = 4; y < 7; y++) p[y * 8 + 6] = C_WALL_DARK;
-      break;
-    case TILE_WATER_A:
-    case TILE_WATER_B:
-      pixels_clear(p, 64, C_WATER);
-      y = tile == TILE_WATER_A ? 2 : 5;
-      for (x = 0; x < 3; x++) p[(u16)y * 8 + x] = C_WATER_DARK;
-      for (x = 5; x < 8; x++) p[(u16)(7 - y) * 8 + x] = C_WATER_DARK;
-      break;
-    case TILE_TREE:
-      pixels_clear(p, 64, C_GRASS);
-      pixels_rect(p, 8, 3, 4, 4, 7, C_PATH_DARK);
-      pixels_rect(p, 8, 1, 1, 6, 5, C_TREE_DARK);
-      pixels_rect(p, 8, 2, 0, 5, 4, C_TREE);
-      pixel(p, 8, 2, 2, C_GRASS);
-      pixel(p, 8, 5, 4, C_TREE_DARK);
-      break;
-    case TILE_FLOWER:
-      pixels_clear(p, 64, C_GRASS);
-      pixel(p, 8, 3, 2, C_BORDER);
-      pixel(p, 8, 2, 3, C_BORDER);
-      pixel(p, 8, 4, 3, C_BORDER);
-      pixel(p, 8, 3, 4, C_GOLD);
-      pixel(p, 8, 3, 5, C_TREE_DARK);
-      pixel(p, 8, 3, 6, C_TREE_DARK);
-      break;
-    case TILE_BOX_FILL:
-      pixels_clear(p, 64, C_BOX);
-      break;
-    case TILE_BOX_TOP:
-    case TILE_BOX_BOTTOM:
-      pixels_clear(p, 64, C_BOX);
-      y = tile == TILE_BOX_TOP ? 0 : 7;
-      for (x = 0; x < 8; x++) p[(u16)y * 8 + x] = C_BORDER;
-      break;
-    case TILE_BOX_LEFT:
-    case TILE_BOX_RIGHT:
-      pixels_clear(p, 64, C_BOX);
-      x = tile == TILE_BOX_LEFT ? 0 : 7;
-      for (y = 0; y < 8; y++) p[(u16)y * 8 + x] = C_BORDER;
-      break;
-    case TILE_BOX_TL:
-    case TILE_BOX_TR:
-    case TILE_BOX_BL:
-    case TILE_BOX_BR:
-      pixels_clear(p, 64, C_BOX);
-      if (tile == TILE_BOX_TL || tile == TILE_BOX_BL) x = 0;
-      else x = 7;
-      if (tile == TILE_BOX_TL || tile == TILE_BOX_TR) y = 0;
-      else y = 7;
-      pixels_rect(p, 8, x, 0, x, 7, C_BORDER);
-      pixels_rect(p, 8, 0, y, 7, y, C_BORDER);
-      break;
-    case TILE_BATTLE_SKY:
-      pixels_clear(p, 64, C_WATER_DARK);
-      pixel(p, 8, 1, 1, C_BORDER);
-      pixel(p, 8, 6, 4, C_WATER);
-      break;
-    case TILE_BATTLE_GROUND:
-      pixels_clear(p, 64, C_GRASS_DARK);
-      for (x = 0; x < 8; x += 2) p[6 * 8 + x] = C_TREE_DARK;
-      break;
-    case TILE_HP_EMPTY:
-      pixels_clear(p, 64, C_DARK);
-      pixels_rect(p, 8, 0, 2, 7, 5, C_WALL_DARK);
-      pixels_rect(p, 8, 1, 3, 6, 4, C_WALL);
-      break;
-    case TILE_HP_FULL:
-      pixels_clear(p, 64, C_DARK);
-      pixels_rect(p, 8, 0, 2, 7, 5, C_TREE_DARK);
-      pixels_rect(p, 8, 1, 3, 6, 4, C_GOLD);
-      break;
-    case TILE_HUD:
-      pixels_clear(p, 64, C_DARK);
-      for (x = 0; x < 8; x++) p[7 * 8 + x] = C_GOLD;
-      break;
-  }
-}
-
-static void make_hero(u8 facing, u8 *p) {
-  pixels_clear(p, 256, 0);
-  pixels_rect(p, 16, 5, 1, 10, 6, 1);
-  pixels_rect(p, 16, 6, 2, 9, 6, 2);
-  pixels_rect(p, 16, 4, 7, 11, 12, 3);
-  pixels_rect(p, 16, 3, 8, 4, 11, 2);
-  pixels_rect(p, 16, 11, 8, 12, 11, 2);
-  pixels_rect(p, 16, 5, 13, 7, 15, 1);
-  pixels_rect(p, 16, 9, 13, 11, 15, 1);
-  pixels_rect(p, 16, 5, 7, 10, 8, 4);
-  if (facing == 0) {
-    pixel(p, 16, 7, 4, 1);
-    pixel(p, 16, 9, 4, 1);
-  } else if (facing == 1) {
-    pixels_rect(p, 16, 5, 1, 10, 4, 1);
-    pixel(p, 16, 6, 5, 4);
-    pixel(p, 16, 9, 5, 4);
-  } else if (facing == 2) {
-    pixels_rect(p, 16, 5, 2, 6, 5, 1);
-    pixel(p, 16, 6, 4, 2);
-    pixel(p, 16, 5, 4, 1);
-  } else {
-    pixels_rect(p, 16, 9, 2, 10, 5, 1);
-    pixel(p, 16, 9, 4, 2);
-    pixel(p, 16, 10, 4, 1);
-  }
-}
-
-static void make_elder(u8 *p) {
-  pixels_clear(p, 256, 0);
-  pixels_rect(p, 16, 5, 1, 10, 6, 1);
-  pixels_rect(p, 16, 6, 2, 9, 5, 2);
-  pixel(p, 16, 7, 4, 1);
-  pixel(p, 16, 9, 4, 1);
-  pixels_rect(p, 16, 5, 6, 10, 9, 4);
-  pixels_rect(p, 16, 4, 8, 11, 14, 3);
-  pixels_rect(p, 16, 5, 15, 7, 15, 1);
-  pixels_rect(p, 16, 9, 15, 11, 15, 1);
-  pixels_rect(p, 16, 3, 9, 4, 12, 2);
-  pixels_rect(p, 16, 11, 9, 12, 12, 2);
-}
-
-static void make_slime(u8 *p) {
-  pixels_clear(p, 256, 0);
-  pixels_rect(p, 16, 4, 8, 11, 13, 1);
-  pixels_rect(p, 16, 5, 6, 10, 14, 2);
-  pixels_rect(p, 16, 3, 10, 12, 13, 2);
-  pixels_rect(p, 16, 4, 13, 11, 14, 3);
-  pixel(p, 16, 6, 9, 1);
-  pixel(p, 16, 9, 9, 1);
-  pixel(p, 16, 7, 11, 4);
-  pixel(p, 16, 8, 11, 4);
-}
 
 static void upload_transparent_font(void) {
   volatile u16 *dst = FONT_VRAM + 16; /* tile zero remains transparent */
@@ -322,6 +97,16 @@ static void show_object(u8 slot, s16 x, s16 y, u8 tile, u8 palette) {
   u16 at = (u16)slot * 4;
   rpg_oam_shadow[at] = (u16)(y & 0x00ff); /* square, regular OBJ */
   rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0x4000); /* 16x16 */
+  rpg_oam_shadow[at + 2] = (u16)(tile | RPG_OBJ_PRIORITY |
+                                    ((u16)palette << 12));
+  rpg_oam_shadow[at + 3] = 0;
+  rpg_oam_dirty = 1;
+}
+
+static void show_object_32(u8 slot, s16 x, s16 y, u8 tile, u8 palette) {
+  u16 at = (u16)slot * 4;
+  rpg_oam_shadow[at] = (u16)(y & 0x00ff); /* square, regular OBJ */
+  rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0x8000); /* 32x32 */
   rpg_oam_shadow[at + 2] = (u16)(tile | RPG_OBJ_PRIORITY |
                                     ((u16)palette << 12));
   rpg_oam_shadow[at + 3] = 0;
@@ -475,8 +260,8 @@ static void draw_battle(s32 hero_hp, s32 enemy_hp, s32 cursor) {
   for (x = 0; x < 10; x++)
     map_cell((u8)(2 + x), 13, x < full ? TILE_HP_FULL : TILE_HP_EMPTY);
   draw_box(2, 14, 27, 19);
-  show_object(0, 40, 72, 12, 0); /* hero faces right */
-  show_object(1, 184, 56, 20, 2);
+  show_object_32(0, 32, 56, VP_RPG_BATTLE_HERO_TILE, 0);
+  show_object_32(1, 176, 40, VP_RPG_BATTLE_SLIME_TILE, 2);
   line_text(1, 17, "WILD SLIME");
   line_hp(2, 18, enemy_hp, 18);
   line_text(10, 2, "HERO");
@@ -508,46 +293,16 @@ u8 vp_rpg_event_at(const vp_rpg_map *map, s32 x, s32 y) {
 }
 
 void vp_rpg_video_init(void) {
-  static const u16 bg_colors[16] = {
-    0x0000, 0x24a3, 0x21e4, 0x2f08,
-    0x1570, 0x2a78, 0x3149, 0x5693,
-    0x4923, 0x7247, 0x1544, 0x2285,
-    0x235f, 0x30c4, 0x4b7d, 0x295f
-  };
-  static const u16 hero_colors[16] = {
-    0x0000, 0x1063, 0x32bf, 0x7e08, 0x25ff,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-  };
-  static const u16 elder_colors[16] = {
-    0x0000, 0x1063, 0x32bf, 0x4a52, 0x7fff,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-  };
-  static const u16 slime_colors[16] = {
-    0x0000, 0x1063, 0x56a0, 0x2d60, 0x7fff,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-  };
-  u8 p8[64];
-  u8 p16[256];
-  u8 tile, facing, i;
+  u16 i;
   upload_transparent_font();
   for (i = 0; i < 16; i++) {
-    PAL_BG[RPG_BG_BANK * 16 + i] = bg_colors[i];
-    PAL_OBJ[i] = hero_colors[i];
-    PAL_OBJ[16 + i] = elder_colors[i];
-    PAL_OBJ[32 + i] = slime_colors[i];
+    PAL_BG[RPG_BG_BANK * 16 + i] = vp_rpg_bg_palette[i];
   }
-  for (tile = 0; tile < TILE_COUNT; tile++) {
-    make_bg_tile(tile, p8);
-    upload_bg_tile(tile, p8);
-  }
-  for (facing = 0; facing < 4; facing++) {
-    make_hero(facing, p16);
-    upload_obj((u8)(facing * 4), p16);
-  }
-  make_elder(p16);
-  upload_obj(16, p16);
-  make_slime(p16);
-  upload_obj(20, p16);
+  for (i = 0; i < 3 * 16; i++) PAL_OBJ[i] = vp_rpg_obj_palettes[i];
+  for (i = 0; i < VP_RPG_BG_TILE_COUNT * 16; i++)
+    RPG_BG_VRAM[i] = vp_rpg_bg_tiles[i];
+  for (i = 0; i < VP_RPG_OBJ_TILE_COUNT * 16; i++)
+    RPG_OBJ_VRAM[i] = vp_rpg_obj_tiles[i];
   map_fill(TILE_BLANK);
   hide_objects();
   REG_BG1CNT = (u16)(2 | (2 << 2) | (9 << 8));

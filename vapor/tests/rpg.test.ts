@@ -1,7 +1,7 @@
 // Pocket Vapor RPG POC: compiler contract + a complete native GBA play tape.
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { $ } from "bun";
 import { compileVaporApp, type CompiledApp, VaporCompileError } from "../compiler/compile.ts";
@@ -14,6 +14,7 @@ const ENTRY = join(HERE, "..", "examples", "rpg", "rpg.tsx");
 const OUT = join(HERE, "..", "..", "dist", "vapor");
 const ROM = join(OUT, "rpg.gba");
 const RUNNER = join(HERE, "harness", "mgba_runner");
+const ASSET_HEADER = join(HERE, "..", "runtime", "gba", "vapor_rpg_assets.generated.h");
 const DEBUG_STATE = 0x02000010;
 
 let source = "";
@@ -40,6 +41,17 @@ function readState(lines: string[], label: string, names: readonly string[]): vo
 
 function value(label: string, name: string): number {
   return runReads[`${label}_${name}`] as number;
+}
+
+function generatedWords(name: string): number[] {
+  const header = readFileSync(ASSET_HEADER, "utf8");
+  const match = header.match(new RegExp(`static const u16 ${name}\\[\\d+\\] = \\{([\\s\\S]*?)\\n\\};`));
+  if (!match) throw new Error(`missing generated asset array ${name}`);
+  return [...match[1].matchAll(/0x([0-9a-f]{4})/g)].map((word) => Number.parseInt(word[1], 16));
+}
+
+function littleEndianHex(words: number[]): string {
+  return words.map((word) => `${(word & 0xff).toString(16).padStart(2, "0")}${(word >> 8).toString(16).padStart(2, "0")}`).join("");
 }
 
 async function countPpmColors(path: string): Promise<number> {
@@ -82,6 +94,10 @@ beforeAll(async () => {
   lines.push(`S ${worldShot}`);
   lines.push("D world_bg1 0x06004800 2048");
   lines.push("D world_oam 0x07000000 24");
+  lines.push("D asset_bg_tiles 0x06008000 768");
+  lines.push("D asset_obj_tiles 0x06010000 1792");
+  lines.push("D asset_bg_palette 0x050001e0 32");
+  lines.push("D asset_obj_palettes 0x05000200 96");
 
   // Walk into the north wall, then restore the spawn row.
   lines.push(press(Button.Up), press(Button.Up));
@@ -211,10 +227,11 @@ describe("Pocket Vapor RPG host", () => {
     expect(app.c).toContain("vp_rpg_blocked(&RPG_RPG_MAP");
     expect(app.c).toContain("vp_rpg_event_at(&RPG_RPG_MAP");
     expect(app.c).toContain("vp_rpg_render(&RPG_RPG_MAP");
-    expect(app.c).toContain("SLIME BLOCKS THE EAST ROAD.");
+    expect(app.c).toContain("SLIME BLOCKS EAST ROAD.");
     expect(app.graph).toContain("mode (num)");
     expect(app.graph).toContain("questActive:");
     expect(app.plan).toContain("RPG host RAM: 3076 B");
+    expect(app.plan).toContain("RPG art: 24 BG tiles + 6 world and 2 battle OBJ frames, 4 palette banks; 2688 B ROM");
   });
 
   test("pixel RPG host is explicitly GBA-only", () => {
@@ -304,5 +321,12 @@ describe("native GBA RPG play tape", () => {
     for (const path of paths) expect(await countPpmColors(path)).toBeGreaterThanOrEqual(8);
     expect(runReads.world_bg1).not.toBe(runReads.battle_bg1);
     expect(runReads.world_oam).not.toBe(runReads.battle_oam);
+  });
+
+  test("generated 4bpp art and palettes arrive in the exact GBA VRAM banks", () => {
+    expect(runReads.asset_bg_tiles).toBe(littleEndianHex(generatedWords("vp_rpg_bg_tiles")));
+    expect(runReads.asset_obj_tiles).toBe(littleEndianHex(generatedWords("vp_rpg_obj_tiles")));
+    expect(runReads.asset_bg_palette).toBe(littleEndianHex(generatedWords("vp_rpg_bg_palette")));
+    expect(runReads.asset_obj_palettes).toBe(littleEndianHex(generatedWords("vp_rpg_obj_palettes")));
   });
 });
