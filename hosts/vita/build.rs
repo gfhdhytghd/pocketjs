@@ -129,6 +129,19 @@ fn main() {
         }
     };
 
+    // Build identity for debugStats: FNV-1a64 over the embedded js+pak (the
+    // PSP host's stale-embed tripwire, verbatim math).
+    let bundle_hash = {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in embed.js.as_bytes().iter().chain(embed.pak.iter()) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{h:016x}")
+    };
+    println!("cargo:rustc-env=POCKETJS_APP_NAME={app}");
+    println!("cargo:rustc-env=POCKETJS_BUNDLE_HASH={bundle_hash}");
+
     let registry = env::var("POCKETJS_LAUNCHER_REGISTRY").unwrap_or_default();
     let packages_dir = env::var_os("POCKETJS_LAUNCHER_PACKAGES")
         .map(PathBuf::from)
@@ -247,6 +260,7 @@ fn main() {
     fs::write(Path::new(&out_dir).join("app.pak"), &embed.pak).unwrap();
 
     let capture_input = env::var("POCKETJS_CAPTURE_INPUT").unwrap_or_default();
+    let capture_touch = env::var("POCKETJS_CAPTURE_TOUCH").unwrap_or_default();
     let capture_frames = env::var("POCKETJS_CAPTURE_FRAMES").unwrap_or_default();
     let capture_dir = env::var("POCKETJS_CAPTURE_DIR")
         .unwrap_or_else(|_| String::from("ux0:data/pocketjs-captures"));
@@ -254,6 +268,7 @@ fn main() {
     println!("cargo:rustc-env=POCKETJS_TARGET={target}");
     println!("cargo:rustc-env=POCKETJS_HOST_ABI={host_abi}");
     println!("cargo:rustc-env=POCKETJS_CAPTURE_INPUT={capture_input}");
+    println!("cargo:rustc-env=POCKETJS_CAPTURE_TOUCH={capture_touch}");
     println!("cargo:rustc-env=POCKETJS_CAPTURE_FRAMES={capture_frames}");
     println!("cargo:rustc-env=POCKETJS_CAPTURE_DIR={capture_dir}");
 

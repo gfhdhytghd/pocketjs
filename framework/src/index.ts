@@ -41,6 +41,8 @@ import {
 import { setOverlayRoot } from "./overlay.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setHitRoot, setInputRoot } from "./input.ts";
+import { __runGestures, resetGestures } from "./gesture.ts";
+import { installTouchActivation } from "./touch-activation.ts";
 import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
@@ -240,6 +242,10 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
     insetB: 0,
     insetL: 0,
     zIndex: 1000,
+    // Self-transparent to hit testing (spec prop hitPass): the empty layer
+    // must not swallow bounds hit facts aimed at app content beneath it —
+    // portal/OSK content INSIDE it still claims normally.
+    hitPass: 1,
   });
   insertNode(rootMirror, appRoot);
   insertNode(rootMirror, overlayRoot);
@@ -250,16 +256,21 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
   setInputRoot(appRoot);
   setHitRoot(rootMirror); // hit tests see the overlay layer too
   resetFrameHooks();
+  resetGestures();
+  // The default tap->press recognizer registers FIRST: every component
+  // gesture mounted after it wins priority (docs/TOUCH.md §0).
+  installTouchActivation();
   resetClock(); // latches the host's __simHz clock policy (docs/DETERMINISM.md)
   resetEffects();
   initDevtools(host.ops); // DevTools shim (docs/DEVTOOLS.md): flight recorder +
   // debug channel; one branch per frame when no transport is connected.
   installFrameHandler(
-    wrapFrameHandler((buttons: number, analog: number, touches?: readonly number[]) => {
+    wrapFrameHandler((buttons: number, analog: number, touches?: readonly number[], hits?: readonly number[]) => {
       __advanceClock(); // virtual frame++, fire due after() timers
       __setAnalog(analog); // latch the nub before any app code reads it
-      __setTouches(touches); // latch logical front-panel contacts for this frame
+      __setTouches(touches, hits); // latch contacts + their host-resolved hit facts
       __drainEffects(); // frame-boundary deliveries enter the world first
+      __runGestures(); // contact lifecycles resolve before app hooks read them
       runFrameHooks(buttons); // app lifecycle callbacks: onFrame/onButtonPress/etc.
       handleFrame(buttons); // edge-detect, focus nav, onPress (runs effects)
       runSweep(); // then destroy subtrees still detached [R]
@@ -271,6 +282,7 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
   return () => {
     removeResizeViewportHook();
     __resetTouches();
+    resetGestures();
     dispose(); // tears down reactivity only — universal keeps the nodes
     setInputRoot(null); // drops focus state (native focus dies with the nodes)
     setHitRoot(null);

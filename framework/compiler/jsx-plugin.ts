@@ -46,9 +46,11 @@ const CONFIG_PATH = new URL("../src/config.ts", import.meta.url).pathname;
 const CLOCK_PATH = new URL("../src/clock.ts", import.meta.url).pathname;
 const DEVTOOLS_PATH = new URL("../src/devtools.ts", import.meta.url).pathname;
 const EFFECTS_PATH = new URL("../src/effects.ts", import.meta.url).pathname;
+const GESTURE_PATH = new URL("../src/gesture.ts", import.meta.url).pathname;
 const HOST_PATH = new URL("../src/host.ts", import.meta.url).pathname;
 const HOT_PATH = new URL("../src/hot.ts", import.meta.url).pathname;
 const INPUT_API_PATH = new URL("../src/input-api.ts", import.meta.url).pathname;
+const KINETICS_PATH = new URL("../src/kinetics.ts", import.meta.url).pathname;
 const LAUNCHER_PATH = new URL("../src/launcher.ts", import.meta.url).pathname;
 const LIFECYCLE_PATH = new URL("../src/lifecycle.ts", import.meta.url).pathname;
 const LIFECYCLE_VUE_VAPOR_PATH = new URL("../src/lifecycle-vue-vapor.ts", import.meta.url).pathname;
@@ -70,6 +72,7 @@ const GENERATED_STYLES_PATH = new URL(
   "../src/styles.generated.ts",
   import.meta.url,
 ).pathname;
+const VIRTUAL_LIST_PATH = new URL("../src/virtual-list.ts", import.meta.url).pathname;
 const VITA_PACKAGE_PATH = new URL(
   "../../tools/vita-package.ts",
   import.meta.url,
@@ -153,7 +156,9 @@ export const FRAMEWORKS: Record<
       animation: ANIMATION_PATH,
       components: COMPONENTS_PATH,
       config: CONFIG_PATH,
+      gesture: GESTURE_PATH,
       input: INPUT_API_PATH,
+      kinetics: KINETICS_PATH,
       launcher: LAUNCHER_PATH,
       lifecycle: LIFECYCLE_PATH,
       // The system OSK carries class literals and key-cap glyphs, so pass 1
@@ -163,6 +168,7 @@ export const FRAMEWORKS: Record<
       platform: PLATFORM_PATH,
       prelude: PRELUDE_PATH,
       renderer: RENDERER_SOLID_PATH,
+      "virtual-list": VIRTUAL_LIST_PATH,
     },
   },
   "vue-vapor": {

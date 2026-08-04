@@ -20,7 +20,8 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { createWasmUi } from "../hosts/web/wasm-ops.js";
 import { SCREEN_H, SCREEN_W } from "../contracts/spec/spec.ts";
-import { GOLDEN_SPECS, type GoldenSpec } from "./golden-specs.ts";
+import { GOLDEN_SPECS, packedTouchFor, type GoldenSpec } from "./golden-specs.ts";
+import { createTouchHitFacts } from "../framework/src/touch.ts";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url))); // PocketJS/
 // Goldens never consume the shared dist/ directory: it may contain ignored,
@@ -94,7 +95,7 @@ const SPECS = GOLDEN_SPECS;
 ensureBuilt(WASM_PATH, [process.execPath, "tools/wasm.ts"]);
 rmSync(DIST, { recursive: true, force: true });
 mkdirSync(DIST, { recursive: true });
-for (const spec of SPECS) buildDemo(spec.name);
+for (const bundle of new Set(SPECS.map((spec) => spec.app ?? spec.name))) buildDemo(bundle);
 mkdirSync(GOLDEN_DIR, { recursive: true });
 
 const wasmBytes = await Bun.file(WASM_PATH).arrayBuffer();
@@ -103,22 +104,32 @@ async function runDemo(spec: GoldenSpec): Promise<Map<number, Uint8Array>> {
   // A fresh wasm instance per demo: fresh core, zero cross-demo state.
   const wasm = await createWasmUi(wasmBytes);
   const g = globalThis as Record<string, unknown>;
+  const bundle = spec.app ?? spec.name;
   g.ui = wasm.ops; // the host contract: HostOps BEFORE eval
-  g.__pak = existsSync(DIST + spec.name + ".pak")
-    ? await Bun.file(DIST + spec.name + ".pak").arrayBuffer()
+  g.__pak = existsSync(DIST + bundle + ".pak")
+    ? await Bun.file(DIST + bundle + ".pak").arrayBuffer()
     : undefined;
   g.frame = undefined;
   try {
-    const src = await Bun.file(DIST + spec.name + ".js").text();
+    const src = await Bun.file(DIST + bundle + ".js").text();
     (0, eval)(src); // IIFE mounts the app and installs globalThis.frame
-    const frame = g.frame as ((buttons: number) => void) | undefined;
+    const frame = g.frame as
+      | ((buttons: number, analog?: number, touches?: readonly number[], hits?: readonly number[]) => void)
+      | undefined;
     if (typeof frame !== "function") {
       throw new Error("bundle did not install globalThis.frame (does the entry call render()?)");
     }
+    // Touch hit facts: the oracle is a host too — resolve at the down edge,
+    // carry per contact, deliver as frame() arg 4 (docs/TOUCH.md).
+    const boundsQuery = (wasm.ops as { hitTestBounds?: (x: number, y: number) => number })
+      .hitTestBounds;
+    const hitFacts = boundsQuery ? createTouchHitFacts(boundsQuery) : undefined;
     const captures = new Map<number, Uint8Array>();
     const want = new Set(spec.capture);
     for (let f = 0; f < spec.frames; f++) {
-      frame(spec.input ? spec.input(f) : 0); // input + effects + sweep
+      // input + effects + sweep (touch rides args 3+4)
+      const packed = packedTouchFor(spec, f);
+      frame(spec.input ? spec.input(f) : 0, undefined, packed, hitFacts?.(packed));
       wasm.tick(); // anims + layout, exactly 1/60 s
       if (want.has(f)) captures.set(f, wasm.render().slice());
     }
