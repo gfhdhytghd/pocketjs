@@ -238,6 +238,30 @@ export const GOLDEN_SPECS: GoldenSpec[] = [
       return [];
     },
   },
+  {
+    // The motions pager swipe with a REAL THUMB's profile: the landing
+    // wobbles vertically before the horizontal sweep builds — the exact
+    // arc that exposed the single-shot axis verdict on hardware (a pure
+    // scripted line passed everywhere while devices never paged). f40 =
+    // page 1; f100 = page 2 reached through the deferred-dominance claim.
+    name: "motions-swipe",
+    app: "motions-main",
+    frames: 110,
+    capture: [40, 100],
+    input: () => 0,
+    touch: (f) => {
+      if (f >= 60 && f < 68) {
+        const i = f - 60;
+        // Frame 1 after the down moves 8px DOWN and only 2 across — the
+        // wrong axis crosses slop first, exactly like a landing thumb.
+        // The horizontal sweep takes over from frame 2.
+        const x = i <= 1 ? 360 - i * 2 : 358 - (i - 1) * 34;
+        const y = i <= 1 ? 140 + i * 8 : 148 + i;
+        return [{ id: 0, x, y }];
+      }
+      return [];
+    },
+  },
 ];
 
 export function encodeThresholdInput(spec: GoldenSpec): string {
