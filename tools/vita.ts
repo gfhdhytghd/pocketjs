@@ -308,11 +308,17 @@ if (!existsSync(eboot))
   throw new Error(`PocketJS vita: eboot not found at ${eboot}`);
 
 await $`${vitasdk}/bin/vita-mksfoex -d ATTRIBUTE2=12 -s TITLE_ID=${titleId} ${packageTitle} ${sfo}`;
+// A demo carrying apps/<name>/vita/ (tools/gen-demo-covers.ts) overlays its
+// own LiveArea art onto the framework defaults — the app itself becomes the
+// full-screen preview instead of the brand logo. The square icon0 bubble
+// stays the default unless the fragment overrides it too.
+const appAssets = `${pspUiDir}apps/${appArg}/vita`;
 await packageVitaVpk({
   tool: `${vitasdk}/bin/vita-pack-vpk`,
   sfo,
   eboot,
   output: vpk,
+  applicationAssets: appArg && existsSync(appAssets) ? appAssets : undefined,
 });
 
 const packagedDirectory = packageOutputDir ?? resolvePath(outputDir, "vita");

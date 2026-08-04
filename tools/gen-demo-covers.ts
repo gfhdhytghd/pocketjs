@@ -11,13 +11,28 @@
 //   bun tools/gen-demo-covers.ts            (all demos)
 //   bun tools/gen-demo-covers.ts hero music (a subset)
 
-import { createCanvas, GlobalFonts, type SKRSContext2D } from "@napi-rs/canvas";
+import { createCanvas, GlobalFonts, type Canvas, type SKRSContext2D } from "@napi-rs/canvas";
 import { mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runScenario } from "../hosts/sim/sim.ts";
 import { BTN } from "../contracts/spec/spec.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 GlobalFonts.registerFromPath(ROOT + "assets/fonts/Inter-Bold.ttf", "Inter");
+
+// Vita LiveArea art must be indexed PNG-8 (tools/vita-package.ts validates
+// color type 3, non-interlaced, <=420 KiB) — same ImageMagick dependency and
+// conversion the default sce_sys assets use (tools/generate-vita-livearea.ts).
+const magick = Bun.which("magick");
+let png8Seq = 0;
+async function writePng8(canvas: Canvas, out: string): Promise<void> {
+  if (!magick) throw new Error("gen-demo-covers: ImageMagick `magick` is required for Vita PNG8 art");
+  const tmp = join(tmpdir(), `pocketjs-cover-${process.pid}-${png8Seq++}.png`);
+  await Bun.write(tmp, canvas.toBuffer("image/png"));
+  const child = Bun.spawn([magick, tmp, "-strip", `PNG8:${out}`], { stderr: "inherit" });
+  if ((await child.exited) !== 0) throw new Error(`magick PNG8 conversion failed for ${out}`);
+}
 
 interface DemoCover {
   dir: string;
@@ -29,6 +44,9 @@ interface DemoCover {
   /** Seconds of sim time before the PIC1 screenshot. */
   seconds: number;
   script?: { at: number; press: number }[];
+  /** false = leave the demo's bespoke PSP art alone; emit Vita LiveArea only
+   *  (apps/im keeps its hand-made psp/gen-cover.ts output). */
+  pspArt?: boolean;
   mark: (g: SKRSContext2D) => void;
 }
 
@@ -311,6 +329,27 @@ const DEMOS: DemoCover[] = [
       g.stroke();
     },
   },
+  {
+    dir: "im",
+    bundle: "im-main",
+    title: "Pocket Talk",
+    word: ["POCKET", "TALK"],
+    accent: "#4ade80",
+    seconds: 1.5,
+    pspArt: false,
+    mark: (g) => {
+      roundRect(g, 14, 20, 40, 28, 9);
+      g.fillStyle = "#4ade80";
+      g.fill();
+      g.beginPath();
+      g.moveTo(24, 48);
+      g.lineTo(24, 58);
+      g.lineTo(34, 48);
+      g.closePath();
+      g.fillStyle = "#4ade80";
+      g.fill();
+    },
+  },
 ];
 
 const only = new Set(Bun.argv.slice(2));
@@ -318,53 +357,62 @@ const selected = only.size === 0 ? DEMOS : DEMOS.filter((d) => only.has(d.dir));
 if (selected.length === 0) throw new Error(`no demos match: ${[...only].join(", ")}`);
 
 for (const demo of selected) {
-  const out = `${ROOT}apps/${demo.dir}/psp/`;
-  mkdirSync(out, { recursive: true });
-
-  // ICON0 — 144×80 family tile: mark left, two-line wordmark right, accent rule.
+  // ONE deterministic sim frame per demo (the same pump the golden suites
+  // use) feeds every rendition: the PSP PIC1 and the Vita LiveArea pair.
+  const trace = await runScenario({
+    app: demo.bundle,
+    hz: 60,
+    seconds: demo.seconds,
+    script: demo.script,
+  });
+  const frame = createCanvas(480, 272);
   {
-    const c = createCanvas(144, 80);
-    const g = c.getContext("2d");
-    roundRect(g, 0.5, 0.5, 143, 79, 10);
-    g.fillStyle = "#0a1118";
-    g.fill();
-    g.strokeStyle = "#22333f";
-    g.lineWidth = 1;
-    g.stroke();
-    demo.mark(g);
-    g.fillStyle = "#e8f0f2";
-    g.font = "bold 15px Inter";
-    g.fillText(demo.word[0], 66, 36);
-    g.fillText(demo.word[1], 66, 55);
-    g.fillStyle = demo.accent;
-    g.fillRect(67, 61, 26, 2);
-    await Bun.write(out + "icon0.png", c.toBuffer("image/png"));
-  }
-
-  // PIC1 — a real frame of the demo via the sim pump the goldens use.
-  {
-    const trace = await runScenario({
-      app: demo.bundle,
-      hz: 60,
-      seconds: demo.seconds,
-      script: demo.script,
-    });
-    const c = createCanvas(480, 272);
-    const g = c.getContext("2d");
+    const g = frame.getContext("2d");
     const img = g.createImageData(480, 272);
     img.data.set(trace.finalFrame);
     g.putImageData(img, 0, 0);
-    g.fillStyle = "rgba(0,0,0,0.30)";
-    g.fillRect(0, 0, 480, 272);
-    const grad = g.createLinearGradient(0, 0, 480, 0);
-    grad.addColorStop(0, "rgba(0,0,0,0.45)");
-    grad.addColorStop(0.55, "rgba(0,0,0,0)");
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 480, 272);
-    await Bun.write(out + "pic1.png", c.toBuffer("image/png"));
   }
 
-  const toml = `# XMB metadata for the ${demo.title} EBOOT. tools/psp.ts copies this to
+  if (demo.pspArt !== false) {
+    const out = `${ROOT}apps/${demo.dir}/psp/`;
+    mkdirSync(out, { recursive: true });
+
+    // ICON0 — 144×80 family tile: mark left, two-line wordmark right, accent rule.
+    {
+      const c = createCanvas(144, 80);
+      const g = c.getContext("2d");
+      roundRect(g, 0.5, 0.5, 143, 79, 10);
+      g.fillStyle = "#0a1118";
+      g.fill();
+      g.strokeStyle = "#22333f";
+      g.lineWidth = 1;
+      g.stroke();
+      demo.mark(g);
+      g.fillStyle = "#e8f0f2";
+      g.font = "bold 15px Inter";
+      g.fillText(demo.word[0], 66, 36);
+      g.fillText(demo.word[1], 66, 55);
+      g.fillStyle = demo.accent;
+      g.fillRect(67, 61, 26, 2);
+      await Bun.write(out + "icon0.png", c.toBuffer("image/png"));
+    }
+
+    // PIC1 — the frame, dimmed left-heavy so the XMB column stays legible.
+    {
+      const c = createCanvas(480, 272);
+      const g = c.getContext("2d");
+      g.drawImage(frame, 0, 0);
+      g.fillStyle = "rgba(0,0,0,0.30)";
+      g.fillRect(0, 0, 480, 272);
+      const grad = g.createLinearGradient(0, 0, 480, 0);
+      grad.addColorStop(0, "rgba(0,0,0,0.45)");
+      grad.addColorStop(0.55, "rgba(0,0,0,0)");
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 480, 272);
+      await Bun.write(out + "pic1.png", c.toBuffer("image/png"));
+    }
+
+    const toml = `# XMB metadata for the ${demo.title} EBOOT. tools/psp.ts copies this to
 # hosts/psp/Psp.toml when building this demo (any framework); cargo-psp packs
 # it into PARAM.SFO / ICON0 / PIC1.
 # Regenerate the art with: bun tools/gen-demo-covers.ts ${demo.dir}
@@ -372,6 +420,41 @@ title = "${demo.title}"
 xmb_icon_png = "icon0.png"
 xmb_background_png = "pic1.png"
 `;
-  await Bun.write(out + "Psp.toml", toml);
-  console.log(`covers: apps/${demo.dir}/psp/ (icon0 144x80, pic1 480x272, "${demo.title}")`);
+    await Bun.write(out + "Psp.toml", toml);
+    console.log(`covers: apps/${demo.dir}/psp/ (icon0 144x80, pic1 480x272, "${demo.title}")`);
+  }
+
+  // Vita LiveArea — the app ITSELF is the preview, not a brand logo
+  // (tools/vita.ts overlays apps/<demo>/vita/ onto the default sce_sys; the
+  // square icon0 bubble stays the framework default).
+  {
+    const vitaOut = `${ROOT}apps/${demo.dir}/vita/sce_sys/livearea/contents/`;
+    mkdirSync(vitaOut, { recursive: true });
+
+    // bg.png 840×500: the frame at ×1.75 between two 12px family bands,
+    // gently dimmed so the LiveArea gate text stays legible.
+    {
+      const c = createCanvas(840, 500);
+      const g = c.getContext("2d");
+      g.fillStyle = "#0a1118";
+      g.fillRect(0, 0, 840, 500);
+      g.imageSmoothingEnabled = true;
+      g.drawImage(frame, 0, 12, 840, 476);
+      g.fillStyle = "rgba(0,0,0,0.18)";
+      g.fillRect(0, 12, 840, 476);
+      g.fillStyle = demo.accent;
+      g.fillRect(0, 494, 840, 6);
+      await writePng8(c, vitaOut + "bg.png");
+    }
+
+    // startup.png 280×158: the same frame, full-bleed.
+    {
+      const c = createCanvas(280, 158);
+      const g = c.getContext("2d");
+      g.imageSmoothingEnabled = true;
+      g.drawImage(frame, 0, 0, 280, 158);
+      await writePng8(c, vitaOut + "startup.png");
+    }
+    console.log(`covers: apps/${demo.dir}/vita/ (bg 840x500, startup 280x158)`);
+  }
 }
