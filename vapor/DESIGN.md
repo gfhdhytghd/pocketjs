@@ -224,40 +224,51 @@ it. Its responsibilities are split four ways:
    module provides real, deterministic JS lookup semantics; AOT recognizes
    the same calls and emits calls to fixed C helpers over the generated map.
    Out-of-bounds movement fails closed.
-3. **Reactive gameplay — ordinary Vue Vapor.** Mode, player position and
-   facing, quest state, current dialogue/choice, HP and battle selection are
-   ordinary `ref` slots; derived gates are `computed`; `onButton` keymaps and
-   setup functions implement movement, interaction, dialogue and battle.
+3. **Reactive gameplay — ordinary Vue Vapor.** Mode, integer player position,
+   facing, in-flight pixel progress, quest state, current dialogue/choice, HP
+   and battle selection are ordinary `ref` slots; gates are `computed` and
+   screen offsets are derived expressions. `onButton` keymaps, the standard
+   Vue Vapor `onFrame(buttons)` lifecycle, and setup functions implement movement,
+   interaction, dialogue and battle. A step advances by a deterministic 2px
+   per 60 Hz tick; the destination cell and its event commit only on arrival.
    They use the same dirty-bit graph and direct C lowering as Todo. There is
    no residual script bytecode, stack machine, hidden controller state, or
    second gameplay VM.
 4. **Fixed presentation — `<RpgScreen .../>`.** The component is stateless:
-   every dynamic input arrives as a prop and therefore participates in the
-   normal dependency mask. The GBA runtime renders the tile world on BG1 and
-   characters through OBJ, with its fixed dialogue/battle presentation; it
-   does not expose GBA registers or SDK concepts to application code.
+   every dynamic input, including the signed player pixel offsets and walk
+   frame, arrives as a prop and therefore participates in the normal
+   dependency mask. The GBA runtime derives a fractional camera from those
+   props, renders a 16×11 overscan tile window on BG1 and characters through
+   OBJ, then commits tile/OAM/scroll/window shadows during VBlank. It does not
+   own a hidden motion timeline or expose GBA registers or SDK concepts to
+   application code.
 
-The RPG movement contract consumes hardware-neutral `onButton` press edges
-for immediate steps and a separate `onButtonRepeat` registration for held
-D-pad movement. The GBA host waits 12 frames after the edge, then emits a
-repeat every 6 frames. The app routes repeats only to its world keymap, so
-dialogue and battle choices still advance once per physical press.
+The RPG movement contract consumes the standard hardware-neutral button mask
+through `@pocketjs/framework/vue-vapor/lifecycle`'s `onFrame`. The GBA adapter
+maps its physical held keys to the shared `BTN` ABI; app code never reads GBA
+key bits. Direction priority is deterministic, a current step finishes after
+release, and turning, collision and arrival events remain gameplay state that
+the compiler/debug tape can observe. Dialogue and battle still use
+`onButton` press edges, so choices advance once per physical press.
 The JS `RpgScreen` currently returns no pixels, so collision/event behavior
 can run in the JS/oracle path but pixel-frame acceptance is mGBA-only for
 this POC. A browser pixel renderer, saves, audio and CJK text are follow-ups,
 not implied capabilities.
 
-Input is not DOM events. The host module exposes three explicit capabilities:
+Input is not DOM events. Pocket Vapor exposes four explicit capabilities:
 
 - `onButton((b: Button) => void)` for frame-latched press edges;
 - `onButtonRepeat((b: Button) => void)` for normalized held-D-pad repeats
   (currently supplied by the GBA target);
+- `onFrame((buttons) => void)` from the public Vue Vapor lifecycle for the
+  shared held `BTN` mask (currently lowered by the GBA target);
 - `onAxisDelta(RelativeAxis.Primary, (delta) => void)` for signed,
   hardware-neutral incremental movement in canonical units.
 
 Under the oracle the module executes and the test tape feeds it; under the
-compiler registrations become `app_on_button()`, `app_on_button_repeat()`
-and `app_on_axis_delta(axis, delta)`. Physical hosts own normalization:
+compiler registrations become `app_on_button()`, `app_on_button_repeat()`,
+`app_on_frame(buttons)`, and `app_on_axis_delta(axis, delta)`. Physical hosts
+own normalization:
 rotary adapters preserve signed motion as millidegrees, while applications
 own detents, acceleration, and sensitivity. Playdate forwards crank motion
 to Primary; a future ESP32 board can adapt an encoder without exposing pins

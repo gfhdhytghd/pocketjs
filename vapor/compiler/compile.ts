@@ -17,6 +17,7 @@
 // arms), which can only cause redundant repaints, never a missed one.
 
 import ts from "typescript";
+import { BTN as FRAMEWORK_BTN } from "../../contracts/spec/spec.ts";
 import { FONT8 } from "./font.gen.ts";
 import { rgb555, rgb565, StyleTable, type StyleIssue } from "./styles.ts";
 import { BACKDROP } from "./styles.ts";
@@ -55,6 +56,18 @@ export const VAPOR_TARGETS: Record<VaporTargetName, VaporTarget> = {
 };
 
 const BUTTON_NAMES = ["A", "B", "Select", "Start", "Right", "Left", "Up", "Down", "R", "L"] as const;
+const FRAMEWORK_BUTTON_TO_VAPOR: Readonly<Record<string, number>> = {
+  CROSS: 0,
+  CIRCLE: 1,
+  SELECT: 2,
+  START: 3,
+  RIGHT: 4,
+  LEFT: 5,
+  UP: 6,
+  DOWN: 7,
+  RTRIGGER: 8,
+  LTRIGGER: 9,
+};
 const PLAYDATE_BUTTONS = new Set([0, 1, 4, 5, 6, 7]);
 const RELATIVE_AXIS_NAMES = ["Primary", "Secondary"] as const;
 const TARGET_RELATIVE_AXES: Record<VaporTargetName, readonly number[]> = {
@@ -267,6 +280,7 @@ class AppCompiler {
   private fns: FnBinding[] = [];
   private handler: ts.ArrowFunction | null = null;
   private repeatHandler: ts.ArrowFunction | null = null;
+  private frameHandler: ts.ArrowFunction | null = null;
   private axisHandlers = new Map<number, ts.ArrowFunction>();
   private template: ts.JsxFragment | null = null;
 
@@ -276,6 +290,8 @@ class AppCompiler {
   private hostOnButtonRepeat = "";
   private hostButton = "";
   private hostOnAxisDelta = "";
+  private frameworkOnFrame = "";
+  private frameworkButton = "";
   private hostDefineRpgMap = "";
   private hostRpgBlocked = "";
   private hostRpgEventAt = "";
@@ -382,6 +398,14 @@ class AppCompiler {
         else if (imported === "rpgEventAt") this.hostRpgEventAt = local;
         else if (imported === "RpgScreen") this.hostRpgScreen = local;
         else this.err(spec, `unsupported RPG host import: ${imported}`);
+      } else if (from === "@pocketjs/framework/vue-vapor/lifecycle") {
+        if (imported === "onFrame") this.frameworkOnFrame = local;
+        else this.err(spec, `unsupported framework lifecycle import: ${imported}`);
+      } else if (from === "@pocketjs/framework/vue-vapor/input") {
+        if (imported === "BTN") {
+          this.frameworkButton = local;
+          this.scope.set(local, { kind: "const", name: local, value: FRAMEWORK_BTN });
+        } else this.err(spec, `unsupported framework input import: ${imported}`);
       } else this.err(stmt, `unsupported import source: ${from}`);
     }
   }
@@ -632,6 +656,19 @@ class AppCompiler {
           const arg = call.arguments[0];
           if (!arg || !ts.isArrowFunction(arg)) this.err(call, "onButtonRepeat takes an arrow");
           this.repeatHandler = arg;
+        } else if (
+          ts.isCallExpression(call) &&
+          ts.isIdentifier(call.expression) &&
+          call.expression.text === this.frameworkOnFrame
+        ) {
+          if (this.target.name !== "gba")
+            this.err(call, "onFrame is currently supported only on the gba target");
+          if (this.frameHandler) this.err(call, "only one onFrame handler is supported");
+          const arg = call.arguments[0];
+          if (!arg || !ts.isArrowFunction(arg)) this.err(call, "onFrame takes an arrow");
+          if (arg.parameters.length > 1 || (arg.parameters[0] && !ts.isIdentifier(arg.parameters[0].name)))
+            this.err(arg, "onFrame arrow takes zero args or one simple buttons parameter");
+          this.frameHandler = arg;
         } else if (
           ts.isCallExpression(call) &&
           ts.isIdentifier(call.expression) &&
@@ -1086,6 +1123,10 @@ class AppCompiler {
     const sub = this.substProp(e);
     if (sub) return this.constNum(sub);
     if (ts.isNumericLiteral(e)) return Number(e.text);
+    if (ts.isPrefixUnaryExpression(e) && e.operator === ts.SyntaxKind.MinusToken) {
+      const operand = this.constNum(e.operand);
+      return operand === null ? null : -operand;
+    }
     if (ts.isIdentifier(e)) {
       const b = this.scope.get(e.text);
       if (b?.kind === "const" && typeof b.value === "number") return b.value;
@@ -1098,7 +1139,15 @@ class AppCompiler {
         if (b?.kind === "const" && Array.isArray(b.value) && e.name.text === "length") return b.value.length;
         if (b?.kind === "const" && typeof b.value === "object" && !Array.isArray(b.value)) {
           const record = b.value as Record<string, number>;
-          if (e.name.text in record) return record[e.name.text];
+          if (e.name.text in record) {
+            if (e.expression.text === this.frameworkButton) {
+              const button = FRAMEWORK_BUTTON_TO_VAPOR[e.name.text];
+              if (button === undefined)
+                this.err(e, `BTN.${e.name.text} has no Pocket Vapor button mapping`);
+              this.buttonsUsed.add(button);
+            }
+            return record[e.name.text];
+          }
         }
         if (e.expression.text === this.hostButton) {
           const buttons: Record<string, number> = {
@@ -1470,6 +1519,8 @@ class AppCompiler {
       [K.AsteriskToken]: "*",
       [K.SlashToken]: "/",
       [K.PercentToken]: "%",
+      [K.AmpersandToken]: "&",
+      [K.BarToken]: "|",
       [K.LessThanToken]: "<",
       [K.GreaterThanToken]: ">",
       [K.LessThanEqualsToken]: "<=",
@@ -1815,6 +1866,8 @@ class AppCompiler {
       decls: string[];
       body: string[];
       isStatic: boolean;
+      /** The native host owns this unit's backing rows and redraw policy. */
+      skipRowClear?: boolean;
     }
     const units: Unit[] = [];
 
@@ -1851,6 +1904,10 @@ class AppCompiler {
       }
     }
 
+    if (this.rpgScreenCount > 0 && units.length !== 1) {
+      this.err(this.template!, "RpgScreen owns the full native display and must be the only root render unit");
+    }
+
     // static rows paint once; overlap with a dynamic span demotes to dynamic
     const dynamic = units.filter((u) => !u.isStatic);
     const overlap = (a: [number, number], b: [number, number]) => a[0] < b[1] && b[0] < a[1];
@@ -1864,6 +1921,7 @@ class AppCompiler {
       const hit = merged.find((m) => overlap(m.span, u.span));
       if (hit) {
         hit.span = [Math.min(hit.span[0], u.span[0]), Math.max(hit.span[1], u.span[1])];
+        hit.skipRowClear = !!hit.skipRowClear && !!u.skipRowClear;
         for (const d of u.deps) hit.deps.add(d);
         hit.decls.push(...u.decls);
         hit.body.push(...u.body);
@@ -1888,6 +1946,7 @@ class AppCompiler {
               Math.min(merged[i].span[0], merged[j].span[0]),
               Math.max(merged[i].span[1], merged[j].span[1]),
             ];
+            merged[i].skipRowClear = !!merged[i].skipRowClear && !!merged[j].skipRowClear;
             for (const d of merged[j].deps) merged[i].deps.add(d);
             merged[i].decls.push(...merged[j].decls);
             merged[i].body.push(...merged[j].body);
@@ -1904,7 +1963,11 @@ class AppCompiler {
     const effects: { name: string; mask: number; span: [number, number] }[] = [];
     merged.forEach((u, i) => {
       const name = `eff_${i}`;
-      const body = [...u.decls, `  vp_row_clear(${u.span[0]}, ${u.span[1]});`, ...u.body];
+      const body = [
+        ...u.decls,
+        ...(u.skipRowClear ? [] : [`  vp_row_clear(${u.span[0]}, ${u.span[1]});`]),
+        ...u.body,
+      ];
       this.bodies.push(`static void ${name}(void) {\n${body.join("\n")}\n}\n`);
       effects.push({ name, mask: this.maskOf(u.deps), span: u.span });
     });
@@ -2103,6 +2166,7 @@ class AppCompiler {
     decls: string[];
     body: string[];
     isStatic: boolean;
+    skipRowClear: boolean;
   } {
     if (this.target.name !== "gba") this.err(el, "RpgScreen is currently supported only on the gba target");
     if (!ts.isJsxSelfClosingElement(el)) this.err(el, "RpgScreen must be a self-closing element");
@@ -2114,7 +2178,10 @@ class AppCompiler {
       "mode",
       "playerX",
       "playerY",
+      "playerOffsetX",
+      "playerOffsetY",
       "facing",
+      "playerFrame",
       "quest",
       "dialog",
       "choice",
@@ -2149,7 +2216,10 @@ class AppCompiler {
       const mode = readNumber("mode");
       const playerX = readNumber("playerX");
       const playerY = readNumber("playerY");
+      const playerOffsetX = readNumber("playerOffsetX");
+      const playerOffsetY = readNumber("playerOffsetY");
       const facing = readNumber("facing");
+      const playerFrame = readNumber("playerFrame");
       const quest = readNumber("quest");
       const dialog = readNumber("dialog");
       const choice = readNumber("choice");
@@ -2158,12 +2228,21 @@ class AppCompiler {
       const battleCursor = readNumber("battleCursor");
       out.push(
         `  vp_rpg_render(&RPG_${map.name}, (u8)(${mode.c}), ${playerX.c}, ${playerY.c}, ` +
-          `(u8)(${facing.c}), ${quest.c}, ${dialog.c}, ${choice.c}, ${heroHp.c}, ${enemyHp.c}, ` +
-          `${battleCursor.c});`,
+          `${playerOffsetX.c}, ${playerOffsetY.c}, (u8)(${facing.c}), (u8)(${playerFrame.c}), ` +
+          `${quest.c}, ${dialog.c}, ${choice.c}, ${heroHp.c}, ${enemyHp.c}, ${battleCursor.c});`,
       );
     });
     this.curDeps = prev;
-    return { span: [0, this.target.height], deps, decls, body, isStatic: false };
+    /* The RPG host maintains BG0 UI incrementally. Clearing the full character
+     * grid before every movement effect would erase the cached fixed HUD. */
+    return {
+      span: [0, this.target.height],
+      deps,
+      decls,
+      body,
+      isStatic: false,
+      skipRowClear: true,
+    };
   }
 
   private compileMapUnit(call: ts.CallExpression): {
@@ -2322,6 +2401,31 @@ class AppCompiler {
         }
       });
       repeatHandlerOut = [...decls, ...body];
+      this.scope = saved;
+    }
+
+    let frameHandlerOut: string[] = [];
+    if (this.frameHandler) {
+      const saved = new Map(this.scope);
+      const parameter = this.frameHandler.parameters[0];
+      if (parameter) {
+        if (!ts.isIdentifier(parameter.name))
+          this.err(this.frameHandler, "onFrame arrow needs a simple buttons parameter");
+        this.scope.set(parameter.name.text, {
+          kind: "local",
+          cName: "buttons_arg",
+          ty: NUM,
+        });
+      }
+      const frameHandlerArrow = this.frameHandler;
+      const { decls, body } = this.withHoist((out) => {
+        if (ts.isBlock(frameHandlerArrow.body)) {
+          for (const stmt of frameHandlerArrow.body.statements) this.compileStmt(stmt, out, "  ");
+        } else {
+          this.compileExprStmt(frameHandlerArrow.body, out, "  ");
+        }
+      });
+      frameHandlerOut = [...decls, ...body];
       this.scope = saved;
     }
 
@@ -2488,6 +2592,13 @@ class AppCompiler {
 
     // handler
     c.push(`void app_on_button(u8 b) {\n  s32 b_arg = (s32)b;\n${handlerOut.join("\n")}\n}\n`);
+    if (this.frameHandler) {
+      c.push(
+        `void app_on_frame(u32 buttons) {\n  s32 buttons_arg = (s32)buttons;\n${frameHandlerOut.join("\n")}\n}\n`,
+      );
+    } else {
+      c.push("void app_on_frame(u32 buttons) {\n  (void)buttons;\n}\n");
+    }
     if (this.target.name === "gba") {
       if (this.repeatHandler) {
         c.push(
@@ -2588,6 +2699,7 @@ class AppCompiler {
           .join(", ") || "none"
       }`,
     );
+    graphLines.push(`  frame hook: ${this.frameHandler ? "fixed (gba)" : "none"}`);
     graphLines.push(`  button repeats: ${this.repeatHandler ? "directional (gba)" : "none"}`);
     graphLines.push(
       `  relative axes: ${
@@ -2632,8 +2744,8 @@ class AppCompiler {
       planLines.push(
         `RPG assets: ${this.rpgMaps.length} map(s), ${tileCount} tiles + collision bytes, ${eventCount} events, ${dialogCount} dialogs; ${this.rpgScreenCount} full-screen effect(s)`,
       );
-      planLines.push("RPG art: 54 BG tiles + 6 32x32 world and 2 64x64 battle OBJ frames, 4 palette banks; 9024 B ROM copied to VRAM");
-      planLines.push("RPG host RAM: 3076 B fixed BG1 tilemap + OAM shadow buffers");
+      planLines.push("RPG art: 54 BG tiles + 6 static and 16 walking 32x32 world frames + 2 64x64 battle OBJ frames, 4 palette banks; 17216 B ROM copied to VRAM");
+      planLines.push("RPG host RAM: 3136 B fixed BG1 tilemap + OAM/UI/cache/register shadow state");
     }
 
     return {

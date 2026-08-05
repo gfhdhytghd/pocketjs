@@ -26,6 +26,8 @@ const WORLD_TILE_SIZE = 16;
 const WORLD_TILE_COLUMNS = 10;
 const WORLD_ACTOR_SIZE = 32;
 const BATTLE_ACTOR_SIZE = 64;
+const WALK_DIRECTIONS = ["south", "north", "west", "east"] as const;
+const WALK_FRAME_COUNT = 4;
 
 type Rgb = readonly [number, number, number];
 type Palette = readonly Rgb[];
@@ -69,6 +71,9 @@ const UI_TILE_NAMES = [
   "box-br", "battle-sky", "battle-ground", "hp-empty", "hp-full", "hud",
 ] as const;
 const ACTOR_NAMES = ["hero-south", "hero-north", "hero-west", "hero-east", "elder", "slime"] as const;
+const WALK_SOURCE_FILES = WALK_DIRECTIONS.flatMap((direction) =>
+  Array.from({ length: WALK_FRAME_COUNT }, (_, frame) => `hero-walk-${direction}-${frame}.png`)
+);
 
 const STYLE = [
   "Original cheerful early-2000s handheld cartridge RPG pixel art.",
@@ -98,7 +103,7 @@ const EXCLUSIONS = [
 ].join(", ");
 
 const GENERATION = {
-  version: 2,
+  version: 3,
   provider: "PixelLab",
   apiBase: API,
   artDirection: "Vapor Quest close-up: 16px world cells, 32px actors, deep-navy information layer",
@@ -153,6 +158,15 @@ const GENERATION = {
       endpoint: "/create-character-v3",
       seed: 23054,
       prompt: "The same expressive blue-tunic adventurer with short brown hair, orange-red scarf, gloves and boots, rotated consistently for a high top-down RPG; preserve face, head height, shoulder width, clothing blocks, palette, outline and foot anchor in every direction.",
+    },
+    heroWalk: {
+      endpoint: "/characters/animations",
+      seed: 23071,
+      templateAnimationId: "walking-4-frames",
+      animationName: "Vapor Quest Walk",
+      directions: WALK_DIRECTIONS,
+      frameCount: WALK_FRAME_COUNT,
+      prompt: "A compact, cyclic four-frame walk with alternating arms and legs, steady high top-down camera, stable body proportions, fixed ground plane and no translation inside the source canvas.",
     },
     elder: {
       endpoint: "/create-image-pixen",
@@ -354,18 +368,112 @@ async function generateHeroRotations(reference: Buffer): Promise<{
   };
 }
 
-async function waitForJob(jobId: string, label: string): Promise<void> {
+async function waitForJob(jobId: string, label: string): Promise<Record<string, unknown>> {
   for (;;) {
     await Bun.sleep(5000);
     const response = await fetch(`${API}/background-jobs/${jobId}`, {
       headers: { Authorization: `Bearer ${process.env.PIXELLAB_API_KEY}` },
     });
     if (!response.ok) throw new Error(`PixelLab ${label} job poll failed (${response.status})`);
-    const job = await response.json() as { status: string; last_response?: unknown };
+    const job = await response.json() as { status: string; last_response?: Record<string, unknown> };
     console.log(`PixelLab: ${label} ${job.status}`);
     if (job.status === "failed") throw new Error(`PixelLab ${label} failed: ${JSON.stringify(job.last_response)}`);
-    if (job.status === "completed") return;
+    if (job.status === "completed") return job.last_response ?? {};
   }
+}
+
+type CharacterAnimationGroup = {
+  animation_type: string;
+  display_name?: string | null;
+  animation_group_id?: string | null;
+  directions: Array<{ direction: string; frame_count: number; frames: string[] }>;
+};
+
+async function generateHeroWalk(characterId: string): Promise<{
+  characterId: string;
+  animationGroupId: string;
+  backgroundJobIds: Record<string, string>;
+  hashes: Record<string, string>;
+}> {
+  const spec = GENERATION.assets.heroWalk;
+  console.log("PixelLab: generating consistent four-direction hero walk");
+  const created = await pixelLab<{
+    background_job_ids: string[];
+    directions: string[];
+  }>(spec.endpoint, {
+    character_id: characterId,
+    mode: "template",
+    template_animation_id: spec.templateAnimationId,
+    animation_name: spec.animationName,
+    action_description: spec.prompt,
+    directions: spec.directions,
+    outline: "selective outline",
+    shading: "basic shading",
+    detail: "medium detail",
+    color_image: base64Image(palettePng(HERO)),
+    force_colors: true,
+    seed: spec.seed,
+  });
+  if (created.background_job_ids.length !== WALK_DIRECTIONS.length ||
+      created.directions.length !== WALK_DIRECTIONS.length) {
+    throw new Error("PixelLab hero walk did not queue exactly four directions");
+  }
+  const backgroundJobIds: Record<string, string> = {};
+  const groupIds = new Set<string>();
+  for (let index = 0; index < created.background_job_ids.length; index++) {
+    const direction = created.directions[index];
+    const jobId = created.background_job_ids[index];
+    if (!WALK_DIRECTIONS.includes(direction as typeof WALK_DIRECTIONS[number])) {
+      throw new Error(`PixelLab hero walk returned unexpected direction ${direction}`);
+    }
+    backgroundJobIds[direction] = jobId;
+    const result = await waitForJob(jobId, `hero walk ${direction}`);
+    const groupId = result.animation_group_id;
+    if (typeof groupId === "string") groupIds.add(groupId);
+  }
+  if (Object.keys(backgroundJobIds).length !== WALK_DIRECTIONS.length) {
+    throw new Error("PixelLab hero walk returned duplicate directions");
+  }
+
+  let group: CharacterAnimationGroup | undefined;
+  for (let attempt = 0; attempt < 12 && !group; attempt++) {
+    const detailResponse = await fetch(`${API}/characters/${characterId}`, {
+      headers: { Authorization: `Bearer ${process.env.PIXELLAB_API_KEY}` },
+    });
+    if (!detailResponse.ok) throw new Error(`PixelLab hero walk character fetch failed (${detailResponse.status})`);
+    const detail = await detailResponse.json() as { animations?: CharacterAnimationGroup[] };
+    const animations = detail.animations ?? [];
+    group = animations.find((candidate) =>
+      !!candidate.animation_group_id && groupIds.has(candidate.animation_group_id)
+    ) ?? [...animations].reverse().find((candidate) =>
+      candidate.display_name === spec.animationName && candidate.animation_type === spec.templateAnimationId
+    ) ?? [...animations].reverse().find((candidate) => candidate.animation_type === spec.templateAnimationId);
+    if (!group) await Bun.sleep(5000);
+  }
+  if (!group) throw new Error("PixelLab hero walk animation group did not become available");
+  if (!group.animation_group_id) throw new Error("PixelLab hero walk animation has no group ID");
+
+  const hashes: Record<string, string> = {};
+  for (const direction of WALK_DIRECTIONS) {
+    const sequence = group.directions.find((candidate) => candidate.direction === direction);
+    if (!sequence || sequence.frame_count !== WALK_FRAME_COUNT || sequence.frames.length !== WALK_FRAME_COUNT) {
+      throw new Error(`PixelLab hero walk ${direction} must contain exactly ${WALK_FRAME_COUNT} frames`);
+    }
+    for (let frame = 0; frame < WALK_FRAME_COUNT; frame++) {
+      const response = await fetch(sequence.frames[frame]);
+      if (!response.ok) throw new Error(`PixelLab hero walk ${direction} frame ${frame} download failed (${response.status})`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const file = `hero-walk-${direction}-${frame}.png`;
+      writeFileSync(join(SOURCE, file), bytes);
+      hashes[file] = sha256(bytes);
+    }
+  }
+  return {
+    characterId,
+    animationGroupId: group.animation_group_id,
+    backgroundJobIds,
+    hashes,
+  };
 }
 
 async function generateTileset(spec: typeof GENERATION.assets.terrainSets[number]): Promise<Record<string, string>> {
@@ -480,8 +588,8 @@ async function generate(force: boolean): Promise<void> {
   ensureDirs();
   const onlyArg = process.argv.find((arg) => arg.startsWith("--only="));
   const only = onlyArg?.slice("--only=".length) ?? "missing";
-  if (!["missing", "all", "style", "world", "tree", "flower", "characters", "hero", "elder", "slime"].includes(only)) {
-    throw new Error("--only must be one of missing, all, style, world, tree, flower, characters, hero, elder, slime");
+  if (!["missing", "all", "style", "world", "tree", "flower", "characters", "hero", "walk", "elder", "slime"].includes(only)) {
+    throw new Error("--only must be one of missing, all, style, world, tree, flower, characters, hero, walk, elder, slime");
   }
   const previous = existsSync(MANIFEST)
     ? JSON.parse(readFileSync(MANIFEST, "utf8")) as { records?: Record<string, unknown> }
@@ -528,6 +636,7 @@ async function generate(force: boolean): Promise<void> {
   const charactersMissing = characterFiles.some((file) => !existsSync(join(SOURCE, file)));
   const charactersSelected = only === "all" || only === "characters" || only === "hero"
     || only === "elder" || only === "slime" || charactersMissing;
+  let heroRegenerated = false;
   if (charactersSelected) {
     const forceHero = force && (only === "all" || only === "characters" || only === "hero");
     if (forceHero || !existsSync(join(SOURCE, "hero-south-reference.png"))) {
@@ -537,6 +646,7 @@ async function generate(force: boolean): Promise<void> {
       .some((file) => !existsSync(join(SOURCE, file)));
     if (forceHero || rotationsMissing) {
       records.heroRotations = await generateHeroRotations(readFileSync(join(SOURCE, "hero-south-reference.png")));
+      heroRegenerated = true;
     }
     const forceElder = force && (only === "all" || only === "characters" || only === "elder");
     if (forceElder || !existsSync(join(SOURCE, "elder.png"))) {
@@ -547,9 +657,22 @@ async function generate(force: boolean): Promise<void> {
       records.slime = await generateMapSprite("slime.png", GENERATION.assets.slime, SLIME);
     }
   }
+  const walkRecord = records.heroWalk as { characterId?: unknown } | undefined;
+  const walkMissing = WALK_SOURCE_FILES.some((file) => !existsSync(join(SOURCE, file)))
+    || typeof walkRecord?.characterId !== "string";
+  const walkSelected = only === "all" || only === "characters" || only === "hero" || only === "walk" || walkMissing;
+  const forceWalk = heroRegenerated || (force && ["all", "characters", "hero", "walk"].includes(only));
+  if (walkSelected && (forceWalk || walkMissing)) {
+    const rotations = records.heroRotations as { characterId?: unknown } | undefined;
+    if (typeof rotations?.characterId !== "string") {
+      throw new Error("hero walk needs a generated PixelLab character; run --only=hero first");
+    }
+    records.heroWalk = await generateHeroWalk(rotations.characterId);
+  }
   delete records.backgroundAtlas;
   const sourceHashes = Object.fromEntries(
-    ["style-anchor.png", ...worldFiles, ...characterFiles].map((file) => [file, sha256(readFileSync(join(SOURCE, file)))]),
+    ["style-anchor.png", ...worldFiles, ...characterFiles, ...WALK_SOURCE_FILES]
+      .map((file) => [file, sha256(readFileSync(join(SOURCE, file)))]),
   );
   writeFileSync(MANIFEST, `${JSON.stringify({ ...GENERATION, records, sourceHashes }, null, 2)}\n`);
   await build(false);
@@ -901,6 +1024,70 @@ async function normalizeSprite(
   return indicesFromContext(ctx, size, size, palette, true);
 }
 
+async function normalizeWalkDirection(direction: typeof WALK_DIRECTIONS[number]): Promise<Uint8Array[]> {
+  const sources: Array<{
+    image: Awaited<ReturnType<typeof loadImage>>;
+    width: number;
+    height: number;
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }> = [];
+  for (let frame = 0; frame < WALK_FRAME_COUNT; frame++) {
+    const path = join(SOURCE, `hero-walk-${direction}-${frame}.png`);
+    if (!existsSync(path)) throw new Error(`missing source asset: ${path}; run vapor:rpg:assets:generate --only=walk`);
+    const image = await loadImage(path);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    const raw = ctx.getImageData(0, 0, image.width, image.height) as ImageDataLike;
+    let minX = image.width;
+    let minY = image.height;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+      if (raw.data[(y * image.width + x) * 4 + 3] < 128) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    if (maxX < minX || maxY < minY) throw new Error(`${path} has no opaque actor pixels`);
+    if (minX === 0 || minY === 0 || maxX === image.width - 1 || maxY === image.height - 1) {
+      throw new Error(`${path} actor touches the source canvas edge; reject scene/background leakage`);
+    }
+    sources.push({ image, width: image.width, height: image.height, minX, minY, maxX, maxY });
+  }
+  const sourceWidth = sources[0].width;
+  const sourceHeight = sources[0].height;
+  if (sources.some((source) => source.width !== sourceWidth || source.height !== sourceHeight)) {
+    throw new Error(`hero walk ${direction} source canvases must have identical dimensions`);
+  }
+
+  // One horizontal crop and one scale per direction keep the torso anchored
+  // while limbs alternate. Each frame's lowest contacting foot is then placed
+  // on y=31, so generated canvas drift never becomes world-space vibration.
+  const minX = Math.min(...sources.map((source) => source.minX));
+  const maxX = Math.max(...sources.map((source) => source.maxX));
+  const cropWidth = maxX - minX + 1;
+  const maxHeight = Math.max(...sources.map((source) => source.maxY - source.minY + 1));
+  const scale = Math.min(28 / cropWidth, 30 / maxHeight);
+  const width = Math.max(1, Math.round(cropWidth * scale));
+  const x = Math.floor((WORLD_ACTOR_SIZE - width) / 2);
+  return sources.map((source) => {
+    const cropHeight = source.maxY - source.minY + 1;
+    const height = Math.max(1, Math.round(cropHeight * scale));
+    const y = WORLD_ACTOR_SIZE - height;
+    const target = createCanvas(WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE);
+    const ctx = target.getContext("2d");
+    ctx.clearRect(0, 0, WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(source.image, minX, source.minY, cropWidth, cropHeight, x, y, width, height);
+    return indicesFromContext(ctx, WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE, HERO, true);
+  });
+}
+
 function polishSlime(slime: Uint8Array, size: number): void {
   const dark = 2;
   const mid = 3;
@@ -956,6 +1143,8 @@ function polishSlime(slime: Uint8Array, size: number): void {
 async function buildActors(): Promise<{
   png: Buffer;
   pixels: Uint8Array[];
+  walkPng: Buffer;
+  walkPixels: Uint8Array[];
   battlePng: Buffer;
   battlePixels: Uint8Array[];
 }> {
@@ -987,6 +1176,27 @@ async function buildActors(): Promise<{
     const palette = i < 4 ? HERO : i === 4 ? ELDER : SLIME;
     drawIndices(ctx, pixels[i], WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE, palette, i * WORLD_ACTOR_SIZE, 0, true);
   }
+  const walkPixels: Uint8Array[] = [];
+  for (const direction of WALK_DIRECTIONS) {
+    walkPixels.push(...await normalizeWalkDirection(direction));
+  }
+  const walkCanvas = createCanvas(WALK_FRAME_COUNT * WORLD_ACTOR_SIZE, WALK_DIRECTIONS.length * WORLD_ACTOR_SIZE);
+  const walkCtx = walkCanvas.getContext("2d");
+  walkCtx.clearRect(0, 0, walkCanvas.width, walkCanvas.height);
+  for (let direction = 0; direction < WALK_DIRECTIONS.length; direction++) {
+    for (let frame = 0; frame < WALK_FRAME_COUNT; frame++) {
+      drawIndices(
+        walkCtx,
+        walkPixels[direction * WALK_FRAME_COUNT + frame],
+        WORLD_ACTOR_SIZE,
+        WORLD_ACTOR_SIZE,
+        HERO,
+        frame * WORLD_ACTOR_SIZE,
+        direction * WORLD_ACTOR_SIZE,
+        true,
+      );
+    }
+  }
   const battlePixels = [
     await normalizeSprite(join(SOURCE, "hero-east.png"), HERO, BATTLE_ACTOR_SIZE, 48, 60),
     await normalizeSprite(join(SOURCE, "slime.png"), SLIME, BATTLE_ACTOR_SIZE, 54, 44),
@@ -1000,6 +1210,8 @@ async function buildActors(): Promise<{
   return {
     png: canvas.toBuffer("image/png"),
     pixels,
+    walkPng: walkCanvas.toBuffer("image/png"),
+    walkPixels,
     battlePng: battleCanvas.toBuffer("image/png"),
     battlePixels,
   };
@@ -1040,9 +1252,9 @@ function wordsForBackground(pixels: Uint8Array): number[] {
   return words;
 }
 
-function wordsForActors(actors: Uint8Array[], battleActors: Uint8Array[]): number[] {
+function wordsForActors(actors: Uint8Array[], walkActors: Uint8Array[], battleActors: Uint8Array[]): number[] {
   const words: number[] = [];
-  for (const pixels of actors) {
+  for (const pixels of [...actors, ...walkActors]) {
     for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx < 4; tx++) words.push(...packTile(pixels, WORLD_ACTOR_SIZE, tx * 8, ty * 8));
   }
   for (const pixels of battleActors) {
@@ -1059,7 +1271,12 @@ function formatWords(name: string, words: readonly number[], columns = 8): strin
   return `static const u16 ${name}[${words.length}] = {\n${lines.join("\n")}\n};`;
 }
 
-function generatedHeader(bgPixels: Uint8Array, actorPixels: Uint8Array[], battlePixels: Uint8Array[]): string {
+function generatedHeader(
+  bgPixels: Uint8Array,
+  actorPixels: Uint8Array[],
+  walkPixels: Uint8Array[],
+  battlePixels: Uint8Array[],
+): string {
   const paddedPalette = (palette: Palette): number[] => [
     ...palette.map(bgr555),
     ...Array(Math.max(0, 16 - palette.length)).fill(0),
@@ -1075,8 +1292,12 @@ function generatedHeader(bgPixels: Uint8Array, actorPixels: Uint8Array[], battle
     `#define VP_RPG_UI_TILE_COUNT ${UI_TILE_NAMES.length}`,
     "#define VP_RPG_UI_TILE_BASE (VP_RPG_WORLD_TILE_FRAME_COUNT * VP_RPG_WORLD_TILE_FRAME_TILES)",
     "#define VP_RPG_BG_TILE_COUNT (VP_RPG_UI_TILE_BASE + VP_RPG_UI_TILE_COUNT)",
-    `#define VP_RPG_WORLD_ACTOR_FRAME_COUNT ${ACTOR_NAMES.length}`,
     "#define VP_RPG_WORLD_ACTOR_FRAME_TILES 16",
+    `#define VP_RPG_WORLD_STATIC_ACTOR_FRAME_COUNT ${ACTOR_NAMES.length}`,
+    `#define VP_RPG_WORLD_WALK_DIRECTION_COUNT ${WALK_DIRECTIONS.length}`,
+    `#define VP_RPG_WORLD_WALK_FRAMES ${WALK_FRAME_COUNT}`,
+    "#define VP_RPG_WORLD_WALK_TILE_BASE (VP_RPG_WORLD_STATIC_ACTOR_FRAME_COUNT * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
+    "#define VP_RPG_WORLD_ACTOR_FRAME_COUNT (VP_RPG_WORLD_STATIC_ACTOR_FRAME_COUNT + VP_RPG_WORLD_WALK_DIRECTION_COUNT * VP_RPG_WORLD_WALK_FRAMES)",
     "#define VP_RPG_WORLD_ELDER_TILE (4 * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
     "#define VP_RPG_WORLD_SLIME_TILE (5 * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
     "#define VP_RPG_BATTLE_HERO_TILE (VP_RPG_WORLD_ACTOR_FRAME_COUNT * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
@@ -1089,14 +1310,19 @@ function generatedHeader(bgPixels: Uint8Array, actorPixels: Uint8Array[], battle
     "",
     formatWords("vp_rpg_bg_tiles", wordsForBackground(bgPixels)),
     "",
-    formatWords("vp_rpg_obj_tiles", wordsForActors(actorPixels, battlePixels)),
+    formatWords("vp_rpg_obj_tiles", wordsForActors(actorPixels, walkPixels, battlePixels)),
     "",
     "#endif",
     "",
   ].join("\n");
 }
 
-function assertAssetSemantics(bg: Uint8Array, actors: Uint8Array[], battleActors: Uint8Array[]): void {
+function assertAssetSemantics(
+  bg: Uint8Array,
+  actors: Uint8Array[],
+  walkActors: Uint8Array[],
+  battleActors: Uint8Array[],
+): void {
   const bounds = (frame: Uint8Array, size: number): { width: number; height: number } => {
     let minX = size;
     let minY = size;
@@ -1171,6 +1397,55 @@ function assertAssetSemantics(bg: Uint8Array, actors: Uint8Array[], battleActors
   const slimeTeals = new Set(actors[5].filter((pixel) => pixel >= 2 && pixel <= 5));
   if (slimeTeals.size < 3) throw new Error("slime must retain at least three teal shades");
   if (actors[5].filter((pixel) => pixel === 6).length !== 2) throw new Error("slime must have exactly two white eye pixels");
+  if (walkActors.length !== WALK_DIRECTIONS.length * WALK_FRAME_COUNT ||
+      walkActors.some((frame) => frame.length !== WORLD_ACTOR_SIZE ** 2)) {
+    throw new Error("hero walk sheet must contain four frames for each of four directions");
+  }
+  for (let direction = 0; direction < WALK_DIRECTIONS.length; direction++) {
+    const sequence = walkActors.slice(direction * WALK_FRAME_COUNT, (direction + 1) * WALK_FRAME_COUNT);
+    const hashes = new Set<string>();
+    const heights: number[] = [];
+    const centers: number[] = [];
+    for (const [frameIndex, frame] of sequence.entries()) {
+      const visible = frame.filter((pixel) => pixel !== 0).length;
+      if (visible < 260) throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frame ${frameIndex} is too sparse (${visible} pixels)`);
+      if (!frame.slice(31 * WORLD_ACTOR_SIZE).some((pixel) => pixel !== 0)) {
+        throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frame ${frameIndex} does not touch y=31`);
+      }
+      const box = bounds(frame, WORLD_ACTOR_SIZE);
+      if (box.width < 16 || box.height < 26) {
+        throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frame ${frameIndex} bbox is too small (${box.width}x${box.height})`);
+      }
+      if (frame.some((pixel) => pixel >= HERO.length)) {
+        throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frame ${frameIndex} exceeds the hero OBJ palette`);
+      }
+      if (connectedComponents(frame, WORLD_ACTOR_SIZE) !== 1) {
+        throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frame ${frameIndex} must be one connected silhouette`);
+      }
+      let weightedX = 0;
+      for (let at = 0; at < frame.length; at++) if (frame[at] !== 0) weightedX += at % WORLD_ACTOR_SIZE;
+      centers.push(weightedX / visible);
+      heights.push(box.height);
+      hashes.add(sha256(frame));
+    }
+    if (hashes.size !== WALK_FRAME_COUNT) throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} frames must be distinct`);
+    if (Math.max(...heights) - Math.min(...heights) > 3) {
+      throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} height drifts by more than three pixels`);
+    }
+    if (Math.max(...centers) - Math.min(...centers) > 3) {
+      throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} horizontal center drifts by more than three pixels`);
+    }
+    for (let frame = 0; frame < WALK_FRAME_COUNT; frame++) {
+      const next = (frame + 1) % WALK_FRAME_COUNT;
+      let changed = 0;
+      for (let at = 0; at < sequence[frame].length; at++) {
+        if (sequence[frame][at] !== sequence[next][at]) changed++;
+      }
+      if (changed < 40 || changed > 520) {
+        throw new Error(`hero walk ${WALK_DIRECTIONS[direction]} transition ${frame}->${next} changes ${changed} pixels`);
+      }
+    }
+  }
   if (battleActors.length !== 2 || battleActors.some((frame) => frame.length !== BATTLE_ACTOR_SIZE ** 2)) {
     throw new Error("battle actor sheet must contain two 64x64 frames");
   }
@@ -1192,11 +1467,12 @@ async function build(check: boolean): Promise<void> {
   ensureDirs();
   const background = await buildBackground();
   const actors = await buildActors();
-  assertAssetSemantics(background.pixels, actors.pixels, actors.battlePixels);
-  const header = generatedHeader(background.pixels, actors.pixels, actors.battlePixels);
+  assertAssetSemantics(background.pixels, actors.pixels, actors.walkPixels, actors.battlePixels);
+  const header = generatedHeader(background.pixels, actors.pixels, actors.walkPixels, actors.battlePixels);
   const targets: Array<[string, Buffer | string]> = [
     [join(FINAL, "background.png"), background.png],
     [join(FINAL, "actors.png"), actors.png],
+    [join(FINAL, "hero-walk.png"), actors.walkPng],
     [join(FINAL, "battle-actors.png"), actors.battlePng],
     [join(FINAL, "palette-guide.png"), paletteGuidePng()],
     [HEADER, header],
@@ -1208,12 +1484,13 @@ async function build(check: boolean): Promise<void> {
       const bytes = typeof expected === "string" ? Buffer.from(expected) : expected;
       if (!actual.equals(bytes)) throw new Error(`generated asset is stale: ${path}`);
     }
-    console.log(`RPG assets OK: 54 BG tiles, ${ACTOR_NAMES.length} 32x32 world actors + 2 64x64 battle actors, four fixed 4bpp palettes`);
+    console.log(`RPG assets OK: 54 BG tiles, ${ACTOR_NAMES.length} static + ${actors.walkPixels.length} walking 32x32 world actors + 2 64x64 battle actors, four fixed 4bpp palettes`);
     return;
   }
   for (const [path, contents] of targets) writeFileSync(path, contents);
   console.log(`Built ${join(FINAL, "background.png")}`);
   console.log(`Built ${join(FINAL, "actors.png")}`);
+  console.log(`Built ${join(FINAL, "hero-walk.png")}`);
   console.log(`Built ${join(FINAL, "battle-actors.png")}`);
   console.log(`Built ${HEADER}`);
 }

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "provider": "PixelLab",
   "apiBase": "https://api.pixellab.ai/v2",
   "artDirection": "Vapor Quest close-up: 16px world cells, 32px actors, deep-navy information layer",
@@ -60,6 +60,20 @@
       "endpoint": "/create-character-v3",
       "seed": 23054,
       "prompt": "The same expressive blue-tunic adventurer with short brown hair, orange-red scarf, gloves and boots, rotated consistently for a high top-down RPG; preserve face, head height, shoulder width, clothing blocks, palette, outline and foot anchor in every direction."
+    },
+    "heroWalk": {
+      "endpoint": "/characters/animations",
+      "seed": 23071,
+      "templateAnimationId": "walking-4-frames",
+      "animationName": "Vapor Quest Walk",
+      "directions": [
+        "south",
+        "north",
+        "west",
+        "east"
+      ],
+      "frameCount": 4,
+      "prompt": "A compact, cyclic four-frame walk with alternating arms and legs, steady high top-down camera, stable body proportions, fixed ground plane and no translation inside the source canvas."
     },
     "elder": {
       "endpoint": "/create-image-pixen",
@@ -128,6 +142,34 @@
         "objectId": "890ba93b-3aa5-4839-81a0-ac9af36d6afc",
         "hash": "ec65da8eaa922bb68e60ceda4de7273b82c14074248fab6a54c681103c29c72e"
       }
+    },
+    "heroWalk": {
+      "characterId": "d42cc855-5d6a-4f8f-b679-76ca6b616c2a",
+      "animationGroupId": "dcefbb34-fe52-42ea-b11e-6bdc2ab4683a",
+      "backgroundJobIds": {
+        "south": "9c7e2ca6-d213-44e9-8f6c-27f619f56a94",
+        "north": "cfe3e201-8adf-471a-ac1d-8cd23c01cc7c",
+        "west": "41786af5-95cc-4f7c-9446-38e402ed29fe",
+        "east": "06f53421-63ce-4152-9022-863e7cbab3aa"
+      },
+      "hashes": {
+        "hero-walk-south-0.png": "cd21a5fe4d1348fd29474022f996401149017f8235fce628424eb9bcb1f86a3c",
+        "hero-walk-south-1.png": "b2b46717d35df16c7a79bf61273f90e446dcf0b1d620ff373c6358772c00ce20",
+        "hero-walk-south-2.png": "8a15001d86f7f513fc34decebb7d4abd0fa3b34852177b7ec9544154f6db0b15",
+        "hero-walk-south-3.png": "a7e05f9f52fa8b029a6a21c38678539a458d0c03f5e75ae9fa1e931f3473404e",
+        "hero-walk-north-0.png": "def20ac9c33217dcb9e73db4fff8c327aab7f12ec925dbe3bcc08edd66b91a35",
+        "hero-walk-north-1.png": "7379150c6a377c49311d5f38ce5fb3c7577ca29591e85e4e062a8eeed843531d",
+        "hero-walk-north-2.png": "a86afe6206d7be71d3a00e98455ec581ab3356c8e4d9e0bef8b215b6ca6f3be2",
+        "hero-walk-north-3.png": "4d73d662899e3ab0ca53b8063cbf03d3e6aef972cf7186010126120efd49a12a",
+        "hero-walk-west-0.png": "038d6b9f4641933854cf0eaf537bee97829d12a24ed3dfc9c6ed6988658361e0",
+        "hero-walk-west-1.png": "c99444f24d98b5759fa15b5ab0e38233f25151e0592b450c320f460d41702c88",
+        "hero-walk-west-2.png": "beb60344869e289119a8dbc5a643570006946b84fccab21ced5fed3bd0d767a9",
+        "hero-walk-west-3.png": "011376191c63b349e1c42a5f83bbfe0aedf62e4ad38f75b40e5ae4a0d0d63cbf",
+        "hero-walk-east-0.png": "3ebccd965e038911d3a78a11c4563098f32f5e61c86fc29bdb4734fe8a234d11",
+        "hero-walk-east-1.png": "c7722de28772640aaaee7e0208a8c325d81958bdb3d245cf198d6623cadcdfa0",
+        "hero-walk-east-2.png": "82071cdebe27c6f071f90abe5a4a20fa8ea5db13cc19baed16a801c6d542d5b4",
+        "hero-walk-east-3.png": "6d4072e46cf50513432866b3fc95be76daffe607c5a5adcd24419548235205df"
+      }
     }
   },
   "sourceHashes": {
@@ -144,6 +186,22 @@
     "hero-west.png": "1fe6ba8ac67b1365d22fa3a3e6c29ac9df9b40e2334a51ca7dcb12f333a25a95",
     "hero-east.png": "e0d2c1a0507fab758d8ffb7efafc7beaa01454d82e1cf72c2b77274db7649d16",
     "elder.png": "e0c3e265aec11add024c0ca30ea478a4dcfccd18cf4adebcbeb627f8744e3387",
-    "slime.png": "3947c9588011dfacb1e1e5c9876bc990655745abef08400c1afdbe35f981a27e"
+    "slime.png": "3947c9588011dfacb1e1e5c9876bc990655745abef08400c1afdbe35f981a27e",
+    "hero-walk-south-0.png": "cd21a5fe4d1348fd29474022f996401149017f8235fce628424eb9bcb1f86a3c",
+    "hero-walk-south-1.png": "b2b46717d35df16c7a79bf61273f90e446dcf0b1d620ff373c6358772c00ce20",
+    "hero-walk-south-2.png": "8a15001d86f7f513fc34decebb7d4abd0fa3b34852177b7ec9544154f6db0b15",
+    "hero-walk-south-3.png": "a7e05f9f52fa8b029a6a21c38678539a458d0c03f5e75ae9fa1e931f3473404e",
+    "hero-walk-north-0.png": "def20ac9c33217dcb9e73db4fff8c327aab7f12ec925dbe3bcc08edd66b91a35",
+    "hero-walk-north-1.png": "7379150c6a377c49311d5f38ce5fb3c7577ca29591e85e4e062a8eeed843531d",
+    "hero-walk-north-2.png": "a86afe6206d7be71d3a00e98455ec581ab3356c8e4d9e0bef8b215b6ca6f3be2",
+    "hero-walk-north-3.png": "4d73d662899e3ab0ca53b8063cbf03d3e6aef972cf7186010126120efd49a12a",
+    "hero-walk-west-0.png": "038d6b9f4641933854cf0eaf537bee97829d12a24ed3dfc9c6ed6988658361e0",
+    "hero-walk-west-1.png": "c99444f24d98b5759fa15b5ab0e38233f25151e0592b450c320f460d41702c88",
+    "hero-walk-west-2.png": "beb60344869e289119a8dbc5a643570006946b84fccab21ced5fed3bd0d767a9",
+    "hero-walk-west-3.png": "011376191c63b349e1c42a5f83bbfe0aedf62e4ad38f75b40e5ae4a0d0d63cbf",
+    "hero-walk-east-0.png": "3ebccd965e038911d3a78a11c4563098f32f5e61c86fc29bdb4734fe8a234d11",
+    "hero-walk-east-1.png": "c7722de28772640aaaee7e0208a8c325d81958bdb3d245cf198d6623cadcdfa0",
+    "hero-walk-east-2.png": "82071cdebe27c6f071f90abe5a4a20fa8ea5db13cc19baed16a801c6d542d5b4",
+    "hero-walk-east-3.png": "6d4072e46cf50513432866b3fc95be76daffe607c5a5adcd24419548235205df"
   }
 }

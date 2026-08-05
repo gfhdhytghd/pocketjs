@@ -57,6 +57,7 @@ describe("pocket vapor compiler", () => {
     expect(a.c).toBe(b.c);
     expect(a.rpgEnabled).toBe(false);
     expect(a.c).toContain("vp_mark");
+    expect(a.c).toContain("vp_row_clear");
     expect(a.graph).toContain("visible: view(maxLen 12)");
     expect(a.plan).toContain("pools");
   });
@@ -191,6 +192,37 @@ export default () => {
     expect(() => compileVaporApp("repeat.tsx", source, "REPEAT", "gb")).toThrow(
       /onButtonRepeat is currently supported only on the gba target/,
     );
+  });
+
+  test("official Vue Vapor onFrame and BTN imports lower to the fixed GBA frame hook", () => {
+    const source = `${HEADER}
+import { onFrame } from "@pocketjs/framework/vue-vapor/lifecycle";
+import { BTN } from "@pocketjs/framework/vue-vapor/input";
+export default () => {
+  const count = ref(0);
+  onFrame((buttons) => {
+    if (buttons & (BTN.RIGHT | BTN.CROSS)) count.value = count.value + 2;
+  });
+  onButton((b) => {
+    if (b === Button.A) count.value = count.value + 1;
+  });
+  return (<><row y={0}>{count.value}</row></>);
+};
+`;
+    const app = compileVaporApp("frame.tsx", source, "FRAME", "gba");
+    expect(app.c).toContain("void app_on_frame(u32 buttons)");
+    expect(app.c).toMatch(/app_on_frame[\s\S]*buttons_arg & \(32 \| 16384\)/);
+    expect(app.buttonsUsed).toEqual([0, 4]);
+    expect(app.graph).toContain("frame hook: fixed (gba)");
+    expect(() => compileVaporApp("frame.tsx", source, "FRAME", "gb")).toThrow(
+      /onFrame is currently supported only on the gba target/,
+    );
+  });
+
+  test("negative numeric ref seeds survive native initialization", () => {
+    const source = minimal("const idle = ref<number>(-1);");
+    const app = compileVaporApp("negative-seed.tsx", source, "NEGATIVE", "gba");
+    expect(app.c).toContain("g_idle = -1;");
   });
 
   test("oracle repeat dispatch stays separate from physical press edges", () => {

@@ -29,6 +29,15 @@ const ELDER = [
   "156,165,173", "198,214,222", "255,255,255", "66,132,255",
 ];
 const SLIME = ["24,41,74", "0,90,90", "0,173,173", "57,214,198", "148,247,222", "255,255,255"];
+const WALK_FILES = ["south", "north", "west", "east"]
+  .flatMap((direction) => Array.from({ length: 4 }, (_, frame) => `hero-walk-${direction}-${frame}.png`));
+const SOURCE_FILES = [
+  "style-anchor.png",
+  "grass.png", "path.png", "wall.png", "water.png", "tree.png", "flower.png",
+  "hero-south-reference.png", "hero-south.png", "hero-north.png", "hero-west.png", "hero-east.png",
+  "elder.png", "slime.png",
+  ...WALK_FILES,
+].sort();
 
 async function rgba(path: string): Promise<{ width: number; height: number; data: Uint8ClampedArray }> {
   const image = await loadImage(path);
@@ -52,7 +61,11 @@ describe("Vapor Quest GBA art pipeline", () => {
     expect(generatedWordCount("vp_rpg_bg_palette")).toBe(16);
     expect(generatedWordCount("vp_rpg_obj_palettes")).toBe(48);
     expect(generatedWordCount("vp_rpg_bg_tiles")).toBe(54 * 16);
-    expect(generatedWordCount("vp_rpg_obj_tiles")).toBe(224 * 16);
+    expect(generatedWordCount("vp_rpg_obj_tiles")).toBe(480 * 16);
+    const header = readFileSync(HEADER, "utf8");
+    expect(header).toContain("#define VP_RPG_WORLD_WALK_DIRECTION_COUNT 4");
+    expect(header).toContain("#define VP_RPG_WORLD_WALK_FRAMES 4");
+    expect(header).toContain("#define VP_RPG_WORLD_WALK_TILE_BASE (VP_RPG_WORLD_STATIC_ACTOR_FRAME_COUNT * VP_RPG_WORLD_ACTOR_FRAME_TILES)");
   });
 
   test("generation provenance is complete and contains no credential", () => {
@@ -61,16 +74,54 @@ describe("Vapor Quest GBA art pipeline", () => {
     const manifest = JSON.parse(text) as {
       provider: string;
       apiBase: string;
-      records: { world: Record<string, unknown>; heroRotations: { characterId: string } };
+      assets: {
+        heroWalk: {
+          endpoint: string;
+          templateAnimationId: string;
+          animationName: string;
+          directions: string[];
+          frameCount: number;
+          prompt: string;
+          seed: number;
+        };
+      };
+      records: {
+        world: Record<string, unknown>;
+        heroRotations: { characterId: string };
+        heroWalk: {
+          characterId: string;
+          animationGroupId: string;
+          backgroundJobIds: Record<string, string>;
+          hashes: Record<string, string>;
+        };
+      };
       sourceHashes: Record<string, string>;
     };
     expect(manifest.provider).toBe("PixelLab");
     expect(manifest.apiBase).toBe("https://api.pixellab.ai/v2");
     expect(Object.keys(manifest.records.world).sort()).toEqual(["barriers", "field", "flower", "tree"]);
     expect(manifest.records.heroRotations.characterId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(manifest.assets.heroWalk).toEqual({
+      endpoint: "/characters/animations",
+      templateAnimationId: "walking-4-frames",
+      directions: ["south", "north", "west", "east"],
+      frameCount: 4,
+      animationName: "Vapor Quest Walk",
+      prompt: expect.any(String),
+      seed: 23071,
+    });
+    expect(manifest.records.heroWalk.characterId).toBe(manifest.records.heroRotations.characterId);
+    expect(manifest.records.heroWalk.animationGroupId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Object.keys(manifest.records.heroWalk.backgroundJobIds)).toEqual(["south", "north", "west", "east"]);
+    expect(Object.keys(manifest.sourceHashes).sort()).toEqual(SOURCE_FILES);
+    expect(Object.keys(manifest.records.heroWalk.hashes)).toEqual(WALK_FILES);
+    for (const id of Object.values(manifest.records.heroWalk.backgroundJobIds)) expect(id).toMatch(/^[0-9a-f-]{36}$/);
     for (const [file, expected] of Object.entries(manifest.sourceHashes)) {
       const actual = createHash("sha256").update(readFileSync(join(SOURCE, file))).digest("hex");
       expect(actual, file).toBe(expected);
+    }
+    for (const file of WALK_FILES) {
+      expect(manifest.records.heroWalk.hashes[file], file).toBe(manifest.sourceHashes[file]);
     }
   });
 
@@ -170,7 +221,70 @@ describe("Vapor Quest GBA art pipeline", () => {
     expect(frameColors[5].has("255,255,255")).toBe(true);
   });
 
+  test("four directional walk cycles stay anchored, distinct and inside the hero palette", async () => {
+    const image = await rgba(join(FINAL, "hero-walk.png"));
+    expect([image.width, image.height]).toEqual([128, 128]);
+    const allowed = new Set(HERO);
+    for (let direction = 0; direction < 4; direction++) {
+      const frames: string[][] = [];
+      const hashes = new Set<string>();
+      const centers: number[] = [];
+      for (let frame = 0; frame < 4; frame++) {
+        const source = await rgba(join(SOURCE, `hero-walk-${["south", "north", "west", "east"][direction]}-${frame}.png`));
+        expect([source.width, source.height]).toEqual([88, 88]);
+        expect(source.data[3]).toBe(0);
+        expect(source.data[source.data.length - 1]).toBe(0);
+
+        const pixels: string[] = [];
+        const colors = new Set<string>();
+        const bytes: number[] = [];
+        let visible = 0;
+        let weightedX = 0;
+        let minX = 32;
+        let minY = 32;
+        let maxX = -1;
+        let maxY = -1;
+        for (let y = 0; y < 32; y++) {
+          for (let x = 0; x < 32; x++) {
+            const at = ((direction * 32 + y) * image.width + frame * 32 + x) * 4;
+            const alpha = image.data[at + 3];
+            expect(alpha === 0 || alpha === 255).toBe(true);
+            const color = alpha === 0 ? "" : `${image.data[at]},${image.data[at + 1]},${image.data[at + 2]}`;
+            pixels.push(color);
+            bytes.push(image.data[at], image.data[at + 1], image.data[at + 2], alpha);
+            if (alpha === 0) continue;
+            expect(allowed.has(color)).toBe(true);
+            colors.add(color);
+            visible++;
+            weightedX += x;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+          }
+        }
+        expect(visible).toBeGreaterThanOrEqual(260);
+        expect(maxY).toBe(31);
+        expect(maxX - minX + 1).toBeGreaterThanOrEqual(16);
+        expect(maxY - minY + 1).toBeGreaterThanOrEqual(28);
+        expect(colors.size).toBeGreaterThanOrEqual(8);
+        centers.push(weightedX / visible);
+        frames.push(pixels);
+        hashes.add(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+      }
+      expect(hashes.size).toBe(4);
+      expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(1);
+      for (let frame = 0; frame < 4; frame++) {
+        const changed = frames[frame].filter((pixel, at) => pixel !== frames[(frame + 1) % 4][at]).length;
+        expect(changed).toBeGreaterThanOrEqual(90);
+        expect(changed).toBeLessThanOrEqual(400);
+      }
+    }
+  });
+
   test("battle reuses the same actors and palettes at a readable 64x64 scale", async () => {
+    expect(createHash("sha256").update(readFileSync(join(FINAL, "battle-actors.png"))).digest("hex"))
+      .toBe("854493423c1c2c070bc7ca70c27fc4049e8ed9630e9c20a0508b3c6b9f14a521");
     const image = await rgba(join(FINAL, "battle-actors.png"));
     expect([image.width, image.height]).toEqual([128, 64]);
     for (let frame = 0; frame < 2; frame++) {

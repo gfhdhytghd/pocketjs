@@ -183,21 +183,25 @@ a second gameplay language or VM:
   and emits fixed ROM tables.
 - `rpgBlocked(...)` and `rpgEventAt(...)` are pure map queries with real JS
   implementations for behavior/oracle use and equivalent native C helpers.
-- The player, mode, facing, quest, dialogue choice, HP, and battle cursor are
-  ordinary `ref` state; the quest gate is an ordinary `computed`. Button
-  handlers and setup functions contain the actual gameplay and compile
-  directly to C.
+- The player, mode, facing, quest, dialogue choice, HP, battle cursor, and
+  in-flight walking progress are ordinary `ref` state; the quest gate is an
+  ordinary `computed` and presentation offsets are derived expressions.
+  Button/frame handlers and setup functions contain the actual gameplay and
+  compile directly to C.
 - One stateless `<RpgScreen .../>` receives that complete reactive state. On
   GBA the compiler lowers it to the fixed tile/sprite RPG renderer rather
   than shipping Vue or JavaScript in the ROM.
-- The world uses 16×16 logical metatiles with a clamped 15×10 following
-  camera, detailed 32×32 world actors, and 64×64 battle portraits. HUD,
-  dialogue, font, and command UI remain on the native 8×8 screen grid.
+- The world uses 16×16 logical metatiles with a pixel-scrolled, clamped 15×10
+  camera, detailed 32×32 world actors, four-frame directional walk cycles,
+  and 64×64 battle portraits. A 16×11 overscan buffer keeps fractional camera
+  movement covered while HUD, dialogue, font, and command UI remain fixed on
+  the native 8×8 screen grid.
 
-The demo's ten reactive refs occupy 40 bytes. The fixed GBA host adds 3,076
-bytes of BG1 tilemap and OAM shadow buffers so all VRAM commits stay inside
-vblank; map, collision, event, dialogue, tile and sprite assets remain in ROM.
-The fixed four-bank art payload is 9,024 bytes.
+The demo's eleven reactive refs occupy 44 bytes. The fixed GBA host adds 3,136
+bytes of BG1 tilemap, OAM, UI/camera-cache, and register-shadow state so VRAM,
+OAM, scroll, and window commits stay inside VBlank; map, collision, event,
+dialogue, tile and sprite assets remain in ROM. The fixed four-bank art payload
+is 17,216 bytes, including sixteen generated directional walk frames.
 
 The demo is one complete loop: start at `(2,2)`, walk next to the solid
 Elder, face them and press A, choose whether to accept the quest, walk onto
@@ -206,9 +210,11 @@ three attacks, then return to the Elder to complete the quest.
 
 Controls:
 
-- World: D-pad moves one cell immediately; holding it waits 12 frames, then
-  continues every 6 frames. A talks to the event cell directly in front of
-  the player.
+- World: D-pad starts a cardinal step and advances it by 2 pixels per fixed
+  60 Hz frame. Holding continues seamlessly; releasing finishes the accepted
+  step without stopping between cells. The integer map coordinate and any
+  destination event commit only after all 16 pixels arrive. A talks to the
+  event cell directly in front of an idle player.
 - Dialogue: Up/Down selects YES or NO; A confirms or advances.
 - Battle: Up/Down selects ATTACK or HEAL; A performs the action.
 

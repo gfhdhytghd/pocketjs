@@ -14,6 +14,9 @@ anchors and GBA palettes before emitting the reviewed sheets in `final/` and
   camera-followed 15x10 slice of the map. UI pieces remain screen-space 8x8.
 - World OBJ frames are 32x32 with a shared y=31 foot line. Battle derives
   readable 64x64 close-up frames from the same reviewed PixelLab sources.
+- The hero has four reviewed walking frames in each cardinal direction. Each
+  direction shares one scale and horizontal anchor, while every contacting
+  foot is normalized to y=31 so movement stays grounded without sprite jitter.
 - The SLIME gameplay role uses a compact teal tentacled puddle-ooze silhouette;
   its short pseudopods, two white eyes and broad ground contact are intentional.
 - Generated terrain luminance clusters remain the base texture; deterministic
@@ -45,10 +48,11 @@ bun run vapor:rpg:assets:check
 ```
 
 Do not hand-edit the generated header. Review `background.png`, `actors.png`,
-`battle-actors.png`, the palette guide, and the world/dialog/battle mGBA
-captures after changing any source image.
+the 4x4 `hero-walk.png` cycle sheet, `battle-actors.png`, the palette guide,
+and the world/dialog/battle mGBA captures after changing any source image.
 
 Use `--only=style`, `--only=world`, `--only=tree`, `--only=flower`,
-`--only=characters`, `--only=hero`, `--only=elder` or `--only=slime` with
-`--force` for a targeted iteration. Without `--force`, generation only fills
-missing sources.
+`--only=characters`, `--only=hero`, `--only=walk`, `--only=elder` or
+`--only=slime` with `--force` for a targeted iteration. The walk generator
+reuses the persistent PixelLab hero and its `walking-4-frames` skeleton
+template. Without `--force`, generation only fills missing sources.

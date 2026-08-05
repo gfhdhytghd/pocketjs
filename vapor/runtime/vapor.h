@@ -88,9 +88,10 @@ u8 vp_rpg_blocked(const vp_rpg_map *map, s32 x, s32 y);
 u8 vp_rpg_event_at(const vp_rpg_map *map, s32 x, s32 y);
 void vp_rpg_video_init(void);
 void vp_rpg_render(const vp_rpg_map *map, u8 mode, s32 player_x,
-                   s32 player_y, u8 facing, s32 quest, s32 dialog,
-                   s32 choice, s32 hero_hp, s32 enemy_hp,
-                   s32 battle_cursor);
+                   s32 player_y, s32 player_offset_x,
+                   s32 player_offset_y, u8 facing, u8 player_frame,
+                   s32 quest, s32 dialog, s32 choice, s32 hero_hp,
+                   s32 enemy_hp, s32 battle_cursor);
 void vp_rpg_video_commit(void);
 
 /* ---- grid (runtime-owned) -------------------------------------------------- */
@@ -136,6 +137,8 @@ extern const u32 vp_bit32[32]; /* vp_bit32[n] == 1UL << n */
 #define VP_RELATIVE_AXIS_SECONDARY 1
 void app_init(void);      /* seed state + first paint (all effects) */
 void app_on_button(u8 b); /* one press edge, GBA key bit index */
+/* One fixed semantic tick with the hardware-neutral framework BTN mask. */
+void app_on_frame(u32 buttons);
 void app_on_button_repeat(u8 b); /* normalized held-D-pad repeat */
 /* Signed physical motion on a hardware-neutral relative axis. Axis 0 is
  * RelativeAxis.Primary. Rotary hosts use millidegrees and preserve the

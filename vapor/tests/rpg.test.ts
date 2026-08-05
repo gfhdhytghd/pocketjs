@@ -22,10 +22,14 @@ let app: CompiledApp;
 let runReads: Record<string, string | number>;
 let holdReads: Record<string, string | number>;
 let cameraReads: Record<string, string | number>;
-let repeatBoundaryX: number[];
+let motionReads: Record<string, string | number>;
+let motionReplayReads: Record<string, string | number>;
+let cameraMotionReads: Record<string, string | number>;
 
 function press(button: number): string {
-  return `P ${(1 << button).toString(16)} 2 4`;
+  // A cardinal step needs one acceptance tick plus eight 2px motion ticks.
+  // The release tail also absorbs libmGBA's one-frame key-sampling boundary.
+  return `P ${(1 << button).toString(16)} 2 10`;
 }
 
 function stateAddress(name: string): number {
@@ -60,6 +64,49 @@ function littleEndianU16(hex: string, byteOffset: number): number {
   return Number.parseInt(`${hex.slice(at + 2, at + 4)}${hex.slice(at, at + 2)}`, 16);
 }
 
+function signed32(value: number): number {
+  return value > 0x7fffffff ? value - 0x1_0000_0000 : value;
+}
+
+function hexAscii(hex: string): string {
+  let out = "";
+  for (let at = 0; at < hex.length; at += 2) {
+    out += String.fromCharCode(Number.parseInt(hex.slice(at, at + 2), 16));
+  }
+  return out;
+}
+
+interface MotionSample {
+  frame: number;
+  x: number;
+  walk: number;
+  oam: string;
+  scroll?: number;
+  video?: number;
+}
+
+function semanticMotion(reads: Record<string, string | number>): MotionSample[] {
+  const samples: MotionSample[] = [];
+  let lastFrame = -1;
+  for (let tick = 0; tick < 20; tick++) {
+    const frame = reads[`t${tick}_frame`] as number;
+    if (frame === lastFrame) continue;
+    lastFrame = frame;
+    const sample: MotionSample = {
+      frame,
+      x: reads[`t${tick}_x`] as number,
+      walk: signed32(reads[`t${tick}_walk`] as number),
+      oam: reads[`t${tick}_oam`] as string,
+    };
+    const scroll = reads[`t${tick}_scroll`];
+    if (typeof scroll === "number") sample.scroll = scroll;
+    const video = reads[`t${tick}_video`];
+    if (typeof video === "number") sample.video = video;
+    samples.push(sample);
+  }
+  return samples;
+}
+
 async function countPpmColors(path: string): Promise<number> {
   const bytes = new Uint8Array(await Bun.file(path).arrayBuffer());
   const head = new TextDecoder().decode(bytes.slice(0, 64));
@@ -90,6 +137,7 @@ beforeAll(async () => {
     "heroHp",
     "enemyHp",
     "battleCursor",
+    "walkPx",
   ] as const;
   const worldShot = join(OUT, "rpg-world.ppm");
   const dialogShot = join(OUT, "rpg-dialog.ppm");
@@ -100,8 +148,9 @@ beforeAll(async () => {
   lines.push(`S ${worldShot}`);
   lines.push("D world_bg1 0x06004800 2048");
   lines.push("D world_oam 0x07000000 24");
+  lines.push("R world_dispcnt 0x04000000 2");
   lines.push("D asset_bg_tiles 0x06008000 1728");
-  lines.push("D asset_obj_tiles 0x06010000 7168");
+  lines.push("D asset_obj_tiles 0x06010000 15360");
   lines.push("D asset_bg_palette 0x050001e0 32");
   lines.push("D asset_obj_palettes 0x05000200 96");
 
@@ -127,9 +176,15 @@ beforeAll(async () => {
   readState(lines, "accepted", ["mode", "quest", "dialog", "choice"]);
   lines.push(press(Button.A));
 
-  // Return to y=2 and walk east onto S at (8,2).
+  // Return to y=2 and approach S at (8,2). The final step is sampled in
+  // flight: integer occupancy and its battle event must stay at x=7/world
+  // until the full 16px transition arrives.
   lines.push(press(Button.Up));
-  for (let i = 0; i < 5; i++) lines.push(press(Button.Right));
+  for (let i = 0; i < 4; i++) lines.push(press(Button.Right));
+  readState(lines, "slimeBefore", ["mode", "playerX", "playerY", "walkPx"]);
+  lines.push(`P ${(1 << Button.Right).toString(16)} 5 0`);
+  readState(lines, "slimeMid", ["mode", "playerX", "playerY", "walkPx"]);
+  lines.push("A 10");
   readState(lines, "battle", ["mode", "playerX", "playerY", "quest", "heroHp", "enemyHp", "battleCursor"]);
   lines.push(`S ${battleShot}`);
   lines.push("D battle_bg1 0x06004800 2048");
@@ -159,19 +214,22 @@ beforeAll(async () => {
   expect(parsed.ok).toBe(true);
   runReads = parsed.reads;
 
-  // A single held direction must move immediately, wait for the normalized
-  // delay, then continue at the fixed repeat cadence. Releasing must stop it.
+  // Held movement is sampled every semantic frame. Release in mid-step must
+  // finish that accepted cell and then settle at idle rather than freezing
+  // on a sub-cell offset.
   const holdScenario = join(OUT, "rpg-hold-tape.txt");
   await Bun.write(
     holdScenario,
     [
       "A 8",
-      `P ${(1 << Button.Right).toString(16)} 25 4`,
+      `P ${(1 << Button.Right).toString(16)} 22 0`,
       `R held_x 0x${stateAddress("playerX").toString(16)} 4`,
       `R held_y 0x${stateAddress("playerY").toString(16)} 4`,
       `R held_facing 0x${stateAddress("facing").toString(16)} 4`,
-      "A 30",
+      `R held_walk 0x${stateAddress("walkPx").toString(16)} 4`,
+      "A 16",
       `R released_x 0x${stateAddress("playerX").toString(16)} 4`,
+      `R released_walk 0x${stateAddress("walkPx").toString(16)} 4`,
       "R hold_trips 0x0200000c 1",
       "",
     ].join("\n"),
@@ -206,30 +264,67 @@ beforeAll(async () => {
   expect(cameraParsed.ok).toBe(true);
   cameraReads = cameraParsed.reads;
 
-  // Host video scheduling means setKeys() and the runtime input loop do not
-  // share a frame boundary. Adjacent holds pin the first two observed repeats.
-  repeatBoundaryX = [];
-  for (const hold of [14, 15, 22, 23]) {
-    const boundaryScenario = join(OUT, `rpg-hold-${hold}-tape.txt`);
-    await Bun.write(
-      boundaryScenario,
-      [
-        "A 8",
-        `P ${(1 << Button.Right).toString(16)} ${hold} 4`,
-        `R x 0x${stateAddress("playerX").toString(16)} 4`,
-        "R trips 0x0200000c 1",
-        "",
-      ].join("\n"),
+  // Sample one continuous hold after every libmGBA video frame. DBG_FRAME
+  // lets assertions discard only the initial host key-sampling duplicate;
+  // every semantic tick then has matching reactive state and committed OAM.
+  const motionScenario = join(OUT, "rpg-motion-tape.txt");
+  const motionShot = join(OUT, "rpg-motion.ppm");
+  const motionLines = ["A 8"];
+  for (let tick = 0; tick < 20; tick++) {
+    motionLines.push(
+      `P ${(1 << Button.Right).toString(16)} 1 0`,
+      `R t${tick}_frame 0x02000004 4`,
+      `R t${tick}_x 0x${stateAddress("playerX").toString(16)} 4`,
+      `R t${tick}_walk 0x${stateAddress("walkPx").toString(16)} 4`,
+      `D t${tick}_oam 0x07000000 16`,
+      `H t${tick}_video`,
     );
-    const boundaryOutput = await $`${RUNNER} ${ROM} ${boundaryScenario}`.text();
-    const boundaryParsed = JSON.parse(boundaryOutput) as {
-      ok: boolean;
-      reads: Record<string, string | number>;
-    };
-    expect(boundaryParsed.ok).toBe(true);
-    expect(boundaryParsed.reads.trips).toBe(0);
-    repeatBoundaryX.push(boundaryParsed.reads.x as number);
+    if (tick === 6) motionLines.push(`D t${tick}_hud 0x02000100 30`);
+    if (tick === 6) motionLines.push(`S ${motionShot}`);
   }
+  motionLines.push("R motion_trips 0x0200000c 1", "");
+  await Bun.write(motionScenario, motionLines.join("\n"));
+  const motionOutput = await $`${RUNNER} ${ROM} ${motionScenario}`.text();
+  const motionParsed = JSON.parse(motionOutput) as {
+    ok: boolean;
+    reads: Record<string, string | number>;
+  };
+  expect(motionParsed.ok).toBe(true);
+  motionReads = motionParsed.reads;
+  const motionReplayOutput = await $`${RUNNER} ${ROM} ${motionScenario}`.text();
+  const motionReplayParsed = JSON.parse(motionReplayOutput) as {
+    ok: boolean;
+    reads: Record<string, string | number>;
+  };
+  expect(motionReplayParsed.ok).toBe(true);
+  motionReplayReads = motionReplayParsed.reads;
+
+  // Put the hero on the camera focus at (8,4), then sample a full step. The
+  // camera scroll should advance by the same 2px timeline while hero OAM stays
+  // pinned at the focus pixel.
+  const cameraMotionScenario = join(OUT, "rpg-camera-motion-tape.txt");
+  const cameraMotionLines = ["A 8", press(Button.Down), press(Button.Down)];
+  for (let i = 0; i < 6; i++) cameraMotionLines.push(press(Button.Right));
+  for (let tick = 0; tick < 20; tick++) {
+    cameraMotionLines.push(
+      `P ${(1 << Button.Right).toString(16)} 1 0`,
+      `R t${tick}_frame 0x02000004 4`,
+      `R t${tick}_x 0x${stateAddress("playerX").toString(16)} 4`,
+      `R t${tick}_walk 0x${stateAddress("walkPx").toString(16)} 4`,
+      `R t${tick}_scroll 0x020005c0 2`,
+      `D t${tick}_oam 0x07000000 16`,
+      `H t${tick}_video`,
+    );
+  }
+  cameraMotionLines.push("R camera_motion_trips 0x0200000c 1", "");
+  await Bun.write(cameraMotionScenario, cameraMotionLines.join("\n"));
+  const cameraMotionOutput = await $`${RUNNER} ${ROM} ${cameraMotionScenario}`.text();
+  const cameraMotionParsed = JSON.parse(cameraMotionOutput) as {
+    ok: boolean;
+    reads: Record<string, string | number>;
+  };
+  expect(cameraMotionParsed.ok).toBe(true);
+  cameraMotionReads = cameraMotionParsed.reads;
 }, 120000);
 
 describe("Pocket Vapor RPG host", () => {
@@ -257,11 +352,19 @@ describe("Pocket Vapor RPG host", () => {
     expect(app.c).toContain("vp_rpg_blocked(&RPG_RPG_MAP");
     expect(app.c).toContain("vp_rpg_event_at(&RPG_RPG_MAP");
     expect(app.c).toContain("vp_rpg_render(&RPG_RPG_MAP");
+    const rpgEffect = [...app.c.matchAll(/static void eff_\d+\(void\) \{([\s\S]*?)\n\}/g)]
+      .find((match) => match[1].includes("vp_rpg_render"));
+    expect(rpgEffect).toBeDefined();
+    expect(rpgEffect![1]).not.toContain("vp_row_clear");
     expect(app.c).toContain("SLIME BLOCKS EAST ROAD.");
     expect(app.graph).toContain("mode (num)");
     expect(app.graph).toContain("questActive:");
-    expect(app.plan).toContain("RPG host RAM: 3076 B");
-    expect(app.plan).toContain("RPG art: 54 BG tiles + 6 32x32 world and 2 64x64 battle OBJ frames, 4 palette banks; 9024 B ROM");
+    expect(app.graph).toContain("walkPx (num)");
+    expect(app.graph).toContain("frame hook: fixed (gba)");
+    expect(app.c).toContain("void app_on_frame(u32 buttons)");
+    expect(app.plan).toContain("RPG host RAM: 3136 B");
+    expect(app.plan).toContain("6 static and 16 walking 32x32 world frames");
+    expect(app.plan).toContain("17216 B ROM");
   });
 
   test("pixel RPG host is explicitly GBA-only", () => {
@@ -285,18 +388,55 @@ describe("Pocket Vapor RPG host", () => {
     expect(() => compileVaporApp(ENTRY, missingProp, "VAPOR QUEST", "gba")).toThrow(
       /missing required prop "battleCursor"/,
     );
+
+    const siblingRow = source.replace(
+      "      <RpgScreen",
+      '      <row y={19}>{"not native UI"}</row>\n      <RpgScreen',
+    );
+    expect(() => compileVaporApp(ENTRY, siblingRow, "VAPOR QUEST", "gba")).toThrow(
+      /must be the only root render unit/,
+    );
   });
 });
 
 describe("native GBA RPG play tape", () => {
-  test("holding a direction repeats world movement and release stops it", () => {
-    expect([holdReads.held_x, holdReads.held_y, holdReads.held_facing]).toEqual([5, 2, 3]);
+  test("reactive walking advances 2px per semantic frame and cycles native walk tiles", async () => {
+    const step = semanticMotion(motionReads).filter((sample) => sample.walk >= 0).slice(0, 9);
+    expect(step.map((sample) => sample.walk)).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 0]);
+    expect(step.map((sample) => sample.x)).toEqual([2, 2, 2, 2, 2, 2, 2, 2, 3]);
+    expect(step.map((sample) => littleEndianU16(sample.oam, 10) & 0x01ff)).toEqual([
+      24, 26, 28, 30, 32, 34, 36, 38, 40,
+    ]);
+    expect(step.map((sample) => littleEndianU16(sample.oam, 12) & 0x03ff)).toEqual([
+      288, 288, 304, 304, 320, 320, 336, 336, 288,
+    ]);
+    expect(motionReads.motion_trips).toBe(0);
+    expect(motionReplayReads).toEqual(motionReads);
+    expect(hexAscii(motionReads.t6_hud as string).trim()).toBe("QUEST: TALK TO THE ELDER");
+    expect(await countPpmColors(join(OUT, "rpg-motion.ppm"))).toBeGreaterThanOrEqual(8);
+  });
+
+  test("holding chains steps and release completes only the accepted step", () => {
+    expect([holdReads.held_x, holdReads.held_y, holdReads.held_facing]).toEqual([4, 2, 3]);
+    expect(signed32(holdReads.held_walk as number)).toBeGreaterThanOrEqual(0);
+    expect(signed32(holdReads.held_walk as number)).toBeLessThan(16);
     expect(holdReads.released_x).toBe(5);
+    expect(signed32(holdReads.released_walk as number)).toBe(-1);
     expect(holdReads.hold_trips).toBe(0);
   });
 
-  test("libmGBA pacing crosses the first two held-movement repeat boundaries", () => {
-    expect(repeatBoundaryX).toEqual([3, 4, 4, 5]);
+  test("the fractional camera follows the same timeline without moving hero focus", () => {
+    const step = semanticMotion(cameraMotionReads).filter((sample) => sample.walk >= 0).slice(0, 9);
+    expect(step.map((sample) => sample.walk)).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 0]);
+    expect(step.map((sample) => sample.scroll)).toEqual([0, 2, 4, 6, 8, 10, 12, 14, 0]);
+    expect(step.map((sample) => littleEndianU16(sample.oam, 2) & 0x01ff)).toEqual(
+      Array(9).fill(104),
+    );
+    const physicalFrames = semanticMotion(cameraMotionReads).filter((sample) => sample.walk >= 0);
+    for (let at = 1; at < physicalFrames.length; at++) {
+      expect(physicalFrames[at].video).not.toBe(physicalFrames[at - 1].video);
+    }
+    expect(cameraMotionReads.camera_motion_trips).toBe(0);
   });
 
   test("the 15x10 camera follows the player and culls off-window NPCs", () => {
@@ -319,6 +459,25 @@ describe("native GBA RPG play tape", () => {
       value("offer", "quest"),
       value("offer", "dialog"),
     ]).toEqual([1, 3, 3, 3, 0, 1]);
+  });
+
+  test("destination occupancy and the Slime event commit only on arrival", () => {
+    expect([
+      value("slimeBefore", "mode"),
+      value("slimeBefore", "playerX"),
+      value("slimeBefore", "playerY"),
+      signed32(value("slimeBefore", "walkPx")),
+    ]).toEqual([0, 7, 2, -1]);
+    expect([
+      value("slimeMid", "mode"),
+      value("slimeMid", "playerX"),
+      value("slimeMid", "playerY"),
+    ]).toEqual([0, 7, 2]);
+    expect(signed32(value("slimeMid", "walkPx"))).toBeGreaterThanOrEqual(0);
+    expect(signed32(value("slimeMid", "walkPx"))).toBeLessThan(16);
+    expect([value("battle", "mode"), value("battle", "playerX"), value("battle", "playerY")]).toEqual([
+      2, 8, 2,
+    ]);
   });
 
   test("choice, quest gate, heal, battle, and report form one complete loop", () => {
@@ -374,7 +533,8 @@ describe("native GBA RPG play tape", () => {
     expect([(worldAttr1[0] & 0x01ff), (worldAttr1[1] & 0x01ff)]).toEqual([56, 24]);
   });
 
-  test("the dialog hardware window clips enlarged actors behind screen-space UI", () => {
+  test("hardware windows keep the scrolling world behind fixed HUD and dialog UI", () => {
+    expect(runReads.world_dispcnt).toBe(0x3340);
     expect(runReads.dialog_dispcnt).toBe(0x3340);
     expect(runReads.battle_dispcnt).toBe(0x1340);
   });

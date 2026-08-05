@@ -17,6 +17,16 @@
 #define VP_DPAD_MASK 0x00f0
 #define VP_REPEAT_DELAY_FRAMES 12
 #define VP_REPEAT_INTERVAL_FRAMES 6
+#define VP_BTN_SELECT 0x0001u
+#define VP_BTN_START 0x0008u
+#define VP_BTN_UP 0x0010u
+#define VP_BTN_RIGHT 0x0020u
+#define VP_BTN_DOWN 0x0040u
+#define VP_BTN_LEFT 0x0080u
+#define VP_BTN_LTRIGGER 0x0100u
+#define VP_BTN_RTRIGGER 0x0200u
+#define VP_BTN_CIRCLE 0x2000u
+#define VP_BTN_CROSS 0x4000u
 #define PAL_BG ((volatile u16 *)0x05000000)
 #define VRAM ((volatile u16 *)0x06000000)
 #define SB_MAP 8
@@ -91,6 +101,24 @@ static void vsync(void) {
   while (REG_VCOUNT < 160) {}
 }
 
+/* Translate GBA KEYINPUT positions to the public PocketJS BTN contract used
+ * by PocketJS framework lifecycle callbacks. Unsupported PSP face buttons
+ * remain clear; GBA A/B are the primary CROSS/CIRCLE actions. */
+static u32 framework_buttons(u16 held) {
+  u32 buttons = 0;
+  if (held & (1 << 0)) buttons |= VP_BTN_CROSS;
+  if (held & (1 << 1)) buttons |= VP_BTN_CIRCLE;
+  if (held & (1 << 2)) buttons |= VP_BTN_SELECT;
+  if (held & (1 << 3)) buttons |= VP_BTN_START;
+  if (held & (1 << 4)) buttons |= VP_BTN_RIGHT;
+  if (held & (1 << 5)) buttons |= VP_BTN_LEFT;
+  if (held & (1 << 6)) buttons |= VP_BTN_UP;
+  if (held & (1 << 7)) buttons |= VP_BTN_DOWN;
+  if (held & (1 << 8)) buttons |= VP_BTN_RTRIGGER;
+  if (held & (1 << 9)) buttons |= VP_BTN_LTRIGGER;
+  return buttons;
+}
+
 int main(void) {
   u16 i;
   u16 prev_keys = 0x03ff;
@@ -149,6 +177,7 @@ int main(void) {
         repeat_frames[b] = 0;
       }
     }
+    app_on_frame(framework_buttons(held));
     if (app_flush()) flushes++;
   }
 }

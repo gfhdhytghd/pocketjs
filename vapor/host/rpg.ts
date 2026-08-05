@@ -31,7 +31,13 @@ export interface RpgScreenProps {
   mode: number;
   playerX: number;
   playerY: number;
+  /** Signed sub-cell presentation offset in world pixels. */
+  playerOffsetX: number;
+  /** Signed sub-cell presentation offset in world pixels. */
+  playerOffsetY: number;
   facing: number;
+  /** Zero selects the facing idle frame; 1..4 select walking frames. */
+  playerFrame: number;
   quest: number;
   dialog: number;
   choice: number;

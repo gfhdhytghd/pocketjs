@@ -12,7 +12,9 @@
 // Right, A to complete the quest.
 
 import { computed, ref } from "vue";
-import { Button, onButton, onButtonRepeat } from "../../host/input.ts";
+import { onFrame } from "@pocketjs/framework/vue-vapor/lifecycle";
+import { BTN } from "@pocketjs/framework/vue-vapor/input";
+import { Button, onButton } from "../../host/input.ts";
 import {
   defineRpgMap,
   RpgScreen,
@@ -117,7 +119,7 @@ const RPG_MAP = defineRpgMap({
 });
 
 export default () => {
-  // Ten refs: comfortably inside Pocket Vapor's current 16-ref budget.
+  // Eleven refs: comfortably inside Pocket Vapor's current 16-ref budget.
   const mode = ref<number>(0);
   const playerX = ref<number>(2);
   const playerY = ref<number>(2);
@@ -128,6 +130,9 @@ export default () => {
   const heroHp = ref<number>(30);
   const enemyHp = ref<number>(18);
   const battleCursor = ref<number>(0);
+  // -1 is idle; a live cardinal step advances 0, 2, ... 14 pixels before
+  // committing its destination cell on the following fixed semantic frame.
+  const walkPx = ref<number>(-1);
 
   const questActive = computed(() => quest.value === Quest.Accepted);
 
@@ -167,16 +172,41 @@ export default () => {
     }
   }
 
-  function movePlayer(dx: number, dy: number, nextFacing: number) {
+  function beginMove(dx: number, dy: number, nextFacing: number) {
+    if (walkPx.value >= 0) return;
     facing.value = nextFacing;
     const nextX = playerX.value + dx;
     const nextY = playerY.value + dy;
     if (!rpgBlocked(RPG_MAP, nextX, nextY)) {
-      playerX.value = nextX;
-      playerY.value = nextY;
-      const event = rpgEventAt(RPG_MAP, nextX, nextY);
-      if (event !== Event.None) handleEvent(event);
+      walkPx.value = 0;
     }
+  }
+
+  function advanceMove() {
+    if (walkPx.value < 0) return;
+    if (walkPx.value < 14) {
+      walkPx.value += 2;
+      return;
+    }
+
+    if (facing.value === Facing.Up) playerY.value -= 1;
+    else if (facing.value === Facing.Down) playerY.value += 1;
+    else if (facing.value === Facing.Left) playerX.value -= 1;
+    else playerX.value += 1;
+    walkPx.value = -1;
+
+    const event = rpgEventAt(RPG_MAP, playerX.value, playerY.value);
+    if (event !== Event.None) handleEvent(event);
+  }
+
+  function tickWorld(buttons: number) {
+    advanceMove();
+    if (mode.value !== Mode.World || walkPx.value >= 0) return;
+
+    if (buttons & BTN.UP) beginMove(0, -1, Facing.Up);
+    else if (buttons & BTN.DOWN) beginMove(0, 1, Facing.Down);
+    else if (buttons & BTN.LEFT) beginMove(-1, 0, Facing.Left);
+    else if (buttons & BTN.RIGHT) beginMove(1, 0, Facing.Right);
   }
 
   function moveChoice(delta: number) {
@@ -186,6 +216,7 @@ export default () => {
   }
 
   function interact() {
+    if (walkPx.value >= 0) return;
     if (facing.value === Facing.Up) {
       handleEvent(rpgEventAt(RPG_MAP, playerX.value, playerY.value - 1));
     } else if (facing.value === Facing.Down) {
@@ -236,10 +267,6 @@ export default () => {
   }
 
   const worldKeys: Keymap = {
-    [Button.Up]: () => movePlayer(0, -1, Facing.Up),
-    [Button.Down]: () => movePlayer(0, 1, Facing.Down),
-    [Button.Left]: () => movePlayer(-1, 0, Facing.Left),
-    [Button.Right]: () => movePlayer(1, 0, Facing.Right),
     [Button.A]: interact,
   };
 
@@ -271,12 +298,9 @@ export default () => {
           : worldKeys)[button]?.(),
   );
 
-  // The GBA host normalizes held D-pad input into delayed repeat events.
-  // Only the world consumes them: dialogue and battle remain one choice per
-  // physical press while map movement continues at a predictable cadence.
-  onButtonRepeat((button) => {
-    if (mode.value === Mode.World) worldKeys[button]?.();
-  });
+  // Movement advances on fixed semantic frames using the framework's shared
+  // held-button mask. Menus still consume only physical press edges above.
+  onFrame((buttons) => tickWorld(buttons));
 
   return (
     <>
@@ -285,7 +309,26 @@ export default () => {
         mode={mode.value}
         playerX={playerX.value}
         playerY={playerY.value}
+        playerOffsetX={
+          walkPx.value < 0
+            ? 0
+            : facing.value === Facing.Left
+              ? -walkPx.value
+              : facing.value === Facing.Right
+                ? walkPx.value
+                : 0
+        }
+        playerOffsetY={
+          walkPx.value < 0
+            ? 0
+            : facing.value === Facing.Up
+              ? -walkPx.value
+              : facing.value === Facing.Down
+                ? walkPx.value
+                : 0
+        }
         facing={facing.value}
+        playerFrame={walkPx.value < 0 ? 0 : 1 + Math.trunc(walkPx.value / 4)}
         quest={quest.value}
         dialog={dialog.value}
         choice={choice.value}
