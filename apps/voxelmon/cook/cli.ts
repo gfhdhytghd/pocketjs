@@ -10,6 +10,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { ATLAS_KIND } from "../../../contracts/spec/voxel-spec.ts";
+
 import {
   buildEmotePage,
   buildPicPage,
@@ -17,13 +19,23 @@ import {
   buildTerrainPage,
   buildPalettes,
   buildUiPage,
+  paletteBase,
   type PageDef,
 } from "./atlas.ts";
 import type { BuildingStats } from "./buildings.ts";
-import { GameMap, GEN_DIR, genMissingReason, loadGen, loadProfile, ROOT } from "./data.ts";
+import {
+  GameMap,
+  GEN_DIR,
+  genMissingReason,
+  loadGen,
+  loadProfile,
+  loadRedpp,
+  ROOT,
+} from "./data.ts";
 import { buildCharmap, buildGamedata, type AtlasIndex } from "./gamedata.ts";
 import { packMap, runGeometry, type UvTransform } from "./mesh.ts";
 import { writePak } from "./pak.ts";
+import { planColour, Redpp, type ColourPlan, type PageOwner } from "./redpp.ts";
 import { analyseMap } from "./structures.ts";
 
 export const DEFAULT_MAPS = [
@@ -42,11 +54,16 @@ export interface CookResult {
   buildingStats: BuildingStats;
   pakBytes: number;
   sections: { tag: string; bytes: number }[];
+  /** RED++ color stats, or null when the pack was absent (cook is legacy). */
+  colour: ColourPlan["stats"] | null;
+  palettes: number;
 }
 
 export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): CookResult {
   const gen = loadGen(genDir);
   const profile = loadProfile();
+  const pack = loadRedpp(genDir);
+  const redpp = pack ? new Redpp(pack) : null;
 
   const maps = mapNames.map((name) => {
     const def = gen.maps[name];
@@ -56,13 +73,30 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     return new GameMap(def, tileset);
   });
 
+  // v1 bakes ONE terrain page shared by every map, so the reference's three
+  // per-map tile-id exceptions (Celadon Mart) cannot apply — none of those
+  // maps is reachable from v1's set, and cooking one silently mis-colored is
+  // worse than refusing (docs/VOXEL.md §6, "what does not match RED++").
+  if (redpp) {
+    const needExceptions = Redpp.mapExceptions(mapNames);
+    if (needExceptions.length > 0) {
+      throw new Error(
+        `RED++ color: ${needExceptions.join(", ")} need per-map tile-id ` +
+          `exceptions, which one shared terrain page cannot carry`,
+      );
+    }
+  }
+
   // --- atlases -------------------------------------------------------------
   // Page order: terrain (page 0 — the core binds the first TERRAIN page for
   // every chunk), ui, sprite sheets, emotes, pics.
-  const terrain = buildTerrainPage(gen, maps.map((m) => m.tileset));
+  const terrainPage = 0;
+  const terrain = buildTerrainPage(gen, maps.map((m) => m.tileset), redpp);
   const pages: PageDef[] = [terrain.page];
+  const pageOwners: PageOwner[] = [{ kind: terrain.page.kind }];
   const uiPage = pages.length;
   pages.push(buildUiPage(gen));
+  pageOwners.push({ kind: ATLAS_KIND.ui });
 
   const spriteIndex: Record<string, number> = {};
   const spriteKeys = Object.keys(gen.gfx)
@@ -71,6 +105,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   for (const key of spriteKeys) {
     spriteIndex[key.slice("sprites/".length)] = pages.length;
     pages.push(buildSpritePage(gen, key));
+    pageOwners.push({ kind: ATLAS_KIND.sprites, spriteKey: key });
   }
 
   let emotePage: number | null = null;
@@ -78,6 +113,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   if (emotes) {
     emotePage = pages.length;
     pages.push(emotes);
+    pageOwners.push({ kind: ATLAS_KIND.sprites });
   }
 
   const frontIndex: Record<string, number> = {};
@@ -90,6 +126,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   for (const key of frontKeys) {
     frontPageByKey.set(key, pages.length);
     pages.push(buildPicPage(gen, key));
+    pageOwners.push({ kind: ATLAS_KIND.pics });
   }
   // Back pics mirror the front path: one page per sheet, species-keyed —
   // the battle staging reads atlas.picBack[species] for the player's card.
@@ -100,6 +137,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   for (const key of backKeys) {
     backPageByKey.set(key, pages.length);
     pages.push(buildPicPage(gen, key));
+    pageOwners.push({ kind: ATLAS_KIND.pics });
   }
   const pageForPath = (byKey: Map<string, number>, path: string | undefined) => {
     if (!path) return undefined;
@@ -108,14 +146,23 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   };
   for (const [id, def] of Object.entries(gen.pokemon)) {
     const front = pageForPath(frontPageByKey, def.spriteFront as string | undefined);
-    if (front !== undefined) frontIndex[id] = front;
+    if (front !== undefined) {
+      frontIndex[id] = front;
+      pageOwners[front].species = id;
+    }
     const back = pageForPath(backPageByKey, def.spriteBack as string | undefined);
-    if (back !== undefined) backIndex[id] = back;
+    if (back !== undefined) {
+      backIndex[id] = back;
+      pageOwners[back].species = id;
+    }
   }
   // The trainer back pic lives at battle/redb (no back/ prefix upstream).
+  // It carries no species, so it takes no RED++ pic palette and keeps
+  // today's binding (the SGB selection, else the kind ramp).
   if (gen.gfx["battle/redb"]) {
     backIndex.redb = pages.length;
     pages.push(buildPicPage(gen, "battle/redb"));
+    pageOwners.push({ kind: ATLAS_KIND.pics });
   }
 
   // --- mesh ---------------------------------------------------------------
@@ -145,7 +192,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     picBack: backIndex,
     emotePage,
     uiPage,
-    terrainPage: 0,
+    terrainPage,
   };
   const gameJson = buildGamedata(gen, atlas);
   const glyphs = buildCharmap(gen);
@@ -156,8 +203,28 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   const audioJsonPath = join(genDir, "audio.json");
   const audioProgramPath = join(genDir, "programs.bin");
   const hasAudio = existsSync(audioJsonPath) && existsSync(audioProgramPath);
+  // The RED++ bindings (cook/redpp.ts): the VPAL tail plus the VCOL records
+  // naming, per map and per page, which entry of it that draw resolves
+  // through. Absent pack -> no tail, no bake, and writePak fills VCOL with
+  // COLOR_PAL_NONE, which renders exactly as a pre-color pak did.
+  const colour = redpp
+    ? planColour(gen, redpp, {
+        base: paletteBase(gen),
+        maps: maps.map((m) => ({
+          id: m.id,
+          mapId: m.def.index,
+          tileset: m.def.tileset,
+          index: m.def.index,
+          sheetKey: sheetKey(m),
+        })),
+        bakedSheets: terrain.bakedSheets,
+        terrainPage,
+        pages: pageOwners,
+      })
+    : null;
+  const palettes = buildPalettes(gen, colour?.palettes ?? []);
   const { bytes, stats } = writePak({
-    palettes: buildPalettes(gen),
+    palettes,
     pages,
     maps: packedMaps,
     glyphs,
@@ -165,6 +232,9 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     audioJson: hasAudio ? new Uint8Array(readFileSync(audioJsonPath)) : undefined,
     audioPrograms: hasAudio ? new Uint8Array(readFileSync(audioProgramPath)) : undefined,
     emotePage,
+    colour: colour
+      ? { maps: colour.maps, pagePal: colour.pagePal, flags: colour.flags }
+      : undefined,
   });
 
   mkdirSync(dirname(outPath), { recursive: true });
@@ -181,6 +251,8 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     buildingStats,
     pakBytes: stats.bytes,
     sections: stats.sections,
+    colour: colour?.stats ?? null,
+    palettes: palettes.length,
   };
 }
 
@@ -225,6 +297,14 @@ function main(): number {
   console.log(
     `  buildings: ${b.placements} placements, built [${b.built.join(", ")}], ` +
       `claim-only [${b.claimOnly.join(", ")}], skipped desk-sets [${b.skipped.join(", ")}]`,
+  );
+  console.log(
+    result.colour
+      ? `  color: RED++ per-tile — ${result.palettes} palettes ` +
+          `(${result.colour.world} world, ${result.colour.obj} OBJ over ` +
+          `${result.colour.sprites} sprite pages, ${result.colour.pic} pic over ` +
+          `${result.colour.pics} pic pages)`
+      : `  color: SGB per-map only (no RED++ pack), ${result.palettes} palettes`,
   );
   return 0;
 }

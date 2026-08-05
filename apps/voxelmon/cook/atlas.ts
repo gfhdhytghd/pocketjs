@@ -15,6 +15,7 @@
 import { ATLAS_KIND } from "../../../contracts/spec/voxel-spec.ts";
 import { ANIM_STEPS, FLOWER_FRAMES, WATER_OFFSETS, defaultAnimatedTiles } from "./classify.ts";
 import { type Art, artOf, type GenData, PX_CLEAR, sheetKeyOf, type TilesetDef } from "./data.ts";
+import { type Redpp, SHADES } from "./redpp.ts";
 
 // ---------------------------------------------------------------------------
 // swizzle (builder.rs:27 — the exact transform the reader inverts)
@@ -76,16 +77,27 @@ export function sgbPalette(rgb: [number, number, number][]): Uint32Array {
  * The VPAL list (voxel-spec.ts §VXPK_TAG.palette): one GB grayscale default
  * per ATLAS_KIND, then every SGB SuperPalette in the ROM's own order — the
  * `palette` op's index i selects VPAL[4 + i], and gamedata's `mapPalette`
- * values index the same order.
+ * values index the same order. That PREFIX is a compatibility guarantee:
+ * `draw::SGB_PAL_BASE` is 4 and the `mapPalette` contract stays valid
+ * whatever the tail carries.
+ *
+ * `extra` appends the RED++ color CLUTs (world, OBJ, pic — cook/redpp.ts),
+ * whose absolute VPAL indices the VCOL section names; the base length is
+ * what turns a tail position into that index.
  */
-export function buildPalettes(gen: GenData): Uint32Array[] {
+export function buildPalettes(gen: GenData, extra: Uint32Array[] = []): Uint32Array[] {
   const defaults = Object.keys(ATLAS_KIND).map(() => gbPalette());
   const sgb = gen.palettes.order.map((name) => {
     const rgb = gen.palettes.palettes[name];
     if (!rgb) throw new Error(`palettes.json order names a missing palette: ${name}`);
     return sgbPalette(rgb);
   });
-  return [...defaults, ...sgb];
+  return [...defaults, ...sgb, ...extra];
+}
+
+/** The VPAL index the RED++ tail starts at (= 4 kind defaults + the SGB set). */
+export function paletteBase(gen: GenData): number {
+  return Object.keys(ATLAS_KIND).length + gen.palettes.order.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +118,13 @@ export interface TerrainLayout {
   page: PageDef;
   /** sheet gfx key -> y offset of that sheet inside the combined page. */
   baseY: Map<string, number>;
+  /**
+   * Sheet gfx keys whose texels carry RED++ group indices (`group*4+shade`)
+   * instead of raw GB shades. A map drawn from one of these MUST bind a
+   * world palette (cook/redpp.ts); a sheet the pack has no data for stays
+   * byte-identical to a cook without the pack.
+   */
+  bakedSheets: Set<string>;
 }
 
 function blitArt(dst: Uint8Array, dstW: number, art: Art, dx: number, dy: number): void {
@@ -116,8 +135,20 @@ function blitArt(dst: Uint8Array, dstW: number, art: Art, dx: number, dy: number
   }
 }
 
-/** The combined terrain page over the tilesets the cooked maps use. */
-export function buildTerrainPage(gen: GenData, tilesets: TilesetDef[]): TerrainLayout {
+/**
+ * The combined terrain page over the tilesets the cooked maps use.
+ *
+ * With a RED++ pack, every tile's texels are rewritten to `group*4+shade`
+ * AFTER the water-rotate / flower-frame substitutions, so an animated tile
+ * picks up its DESTINATION tile's group — matching the reference, whose
+ * `buildAnim` recolors through the same `gbc` context
+ * (gen1recomp TileRenderer.lua:343-353).
+ */
+export function buildTerrainPage(
+  gen: GenData,
+  tilesets: TilesetDef[],
+  redpp?: Redpp | null,
+): TerrainLayout {
   // distinct sheets, sorted by key for determinism
   const sheets = [...new Set(tilesets.map(sheetKeyOf))].sort();
   const baseY = new Map<string, number>();
@@ -175,10 +206,96 @@ export function buildTerrainPage(gen: GenData, tilesets: TilesetDef[]): TerrainL
     frames.push(linear);
   }
 
+  const bakedSheets = bakeGroups(gen, tilesets, redpp, frames, w, baseY);
+
   return {
     page: { w, h, kind: ATLAS_KIND.terrain, frames, name: "terrain" },
     baseY,
+    bakedSheets,
   };
+}
+
+/**
+ * Rewrite every tile region's texels from a GB shade to `group*4+shade`.
+ * `PX_CLEAR` survives untouched (it is the alpha-test cutout, not a shade).
+ *
+ * v1 keeps ONE terrain page, so two tilesets sharing a sheet must agree
+ * tile-for-tile: measured 0 of the 4 v1 sheets disagree (2 of 19 whole-game
+ * — `gate.png`, `pokecenter.png`). A disagreement is a hard cook error, not
+ * a silent mis-bake; the VCOL record reserves a `terrain_page` field so the
+ * page splitter can land later without a format change.
+ */
+function bakeGroups(
+  gen: GenData,
+  tilesets: TilesetDef[],
+  redpp: Redpp | null | undefined,
+  frames: Uint8Array[],
+  w: number,
+  baseY: Map<string, number>,
+): Set<string> {
+  const baked = new Set<string>();
+  if (!redpp) return baked;
+
+  const bySheet = new Map<string, TilesetDef[]>();
+  for (const ts of tilesets) {
+    const key = sheetKeyOf(ts);
+    const list = bySheet.get(key);
+    if (list) {
+      if (!list.some((t) => t.id === ts.id)) list.push(ts);
+    } else {
+      bySheet.set(key, [ts]);
+    }
+  }
+
+  for (const [key, list] of bySheet) {
+    const known = list.filter((ts) => redpp.hasTileset(ts.id));
+    if (known.length === 0) continue; // a tileset the pack has no data for
+    if (known.length !== list.length) {
+      const missing = list.filter((ts) => !redpp.hasTileset(ts.id)).map((t) => t.id);
+      throw new Error(
+        `RED++ color: sheet ${key} mixes tilesets with and without pack data ` +
+          `(missing: ${missing.join(", ")}) — split the page or extend the pack`,
+      );
+    }
+    const vectors = new Set(known.map((ts) => redpp.groupVectorKey(ts.id)));
+    if (vectors.size > 1) {
+      throw new Error(
+        `RED++ color: tilesets ${known.map((t) => t.id).join(", ")} share sheet ` +
+          `${key} but resolve DIFFERENT tile groups — v1 bakes one terrain page, ` +
+          `so this sheet needs a per-tileset page copy (see cook/redpp.ts)`,
+      );
+    }
+
+    const ts = known[0];
+    const e = gen.gfx[key];
+    if (!e) throw new Error(`missing tileset sheet: ${key}`);
+    const y0 = baseY.get(key)!;
+    const perRow = ts.tilesPerRow || 16;
+    const cols = Math.floor(e.w / 8);
+    const rows = Math.floor(e.h / 8);
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const tileId = row * perRow + col;
+        // The page is shared across maps, so the per-MAP exception table
+        // cannot apply here — cli.ts refuses to cook a map that needs one.
+        const group = redpp.groupOf(ts.id, null, tileId);
+        if (group === null) continue;
+        const shift = group * SHADES;
+        for (const frame of frames) {
+          for (let y = 0; y < 8; y++) {
+            const dst = (y0 + row * 8 + y) * w + col * 8;
+            for (let x = 0; x < 8; x++) {
+              const px = frame[dst + x];
+              if (px === PX_CLEAR) continue;
+              frame[dst + x] = shift + (px & 3);
+            }
+          }
+        }
+      }
+    }
+    baked.add(key);
+  }
+  return baked;
 }
 
 /**

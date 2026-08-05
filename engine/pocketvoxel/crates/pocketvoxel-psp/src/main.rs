@@ -202,7 +202,10 @@ unsafe fn run() {
     // 'static it carries is honest.
     voxel::init(pak.game);
     // The chip synth's banks (pak AUDI section) reach the guest through the
-    // `audiodata` op; a pak without one leaves the director silent.
+    // `audiodata` op. The op always answers; the guest decides whether to
+    // decode it, and psp-main.ts does not (audio is off on device — the
+    // interpreted synth cannot reach realtime here). Mounting the data is a
+    // host capability, not a host policy.
     voxel::set_audio(pak.audio);
 
     // ---- QuickJS ----
@@ -265,15 +268,25 @@ unsafe fn run() {
         host::drain_jobs(rt);
 
         // Arena-pressure GC (hosts/psp main.rs): collect when a frame
-        // leaves the bump >256 KiB past the last collection.
-        {
+        // leaves the bump >256 KiB past the last collection. Timed on its
+        // own: the boot parse leaves the bump far past LAST_GC_BUMP = 0, so
+        // the first in-loop frame necessarily collects over the whole
+        // freshly-parsed gamedata graph, and a mean-of-300 cannot tell that
+        // apart from "every early frame is slow".
+        let gc_us = {
             const GC_BUMP_STEP: usize = 256 * 1024;
             let bump = arena::stats().bump_bytes;
             if bump > LAST_GC_BUMP.saturating_add(GC_BUMP_STEP) {
+                let t_gc = sys::sceKernelGetSystemTimeLow();
                 JS_RunGC(rt);
                 LAST_GC_BUMP = arena::stats().bump_bytes;
+                sys::sceKernelGetSystemTimeLow().wrapping_sub(t_gc)
+            } else {
+                0
             }
-        }
+        };
+        #[cfg(feature = "capture")]
+        let _ = gc_us; // a capture build keeps no telemetry
 
         // Core frame: the ops applied during frame() already sit in the
         // scene; advance the tick clock once.
@@ -302,10 +315,12 @@ unsafe fn run() {
             sys::sceKernelDcacheWritebackAll();
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
             let t_kicked = sys::sceKernelGetSystemTimeLow();
+            #[cfg(feature = "telemetry")]
             perf_sample(
                 frame,
                 t_work_done.wrapping_sub(t_frame_start),
                 t_kicked.wrapping_sub(t_frame_start),
+                gc_us,
             );
         }
 
@@ -344,45 +359,107 @@ unsafe fn run() {
     }
 }
 
-/// Map the console's pad onto VOX_BTN. CIRCLE = A (confirm), CROSS = B —
-/// see the module docs. The analog stick walks too, one axis at a time
-/// (the world is a grid; a diagonal push picks a lane).
+/// Frame-time telemetry, appended to host0:/voxperf.txt (PSPLINK serves it;
+/// an absent host0: fails silently). Two records, because a mean answers a
+/// different question than a frame does:
+///
+///   `b<frame> work <n>us frame <n>us gc <n>us` — ONE LINE PER FRAME for the
+///   first BOOT_FRAMES frames, buffered in bss and flushed in a single write
+///   (writing per frame would cost more than the frame being measured). This
+///   is what separates "one gigantic first frame collecting over the
+///   freshly-parsed 1.15 MB gamedata graph" from "every early frame is slow"
+///   — the 300-frame mean cannot, and that ambiguity is exactly what the
+///   110 ms boot figure left open.
+///
+///   `f<frame> work <n>us frame <n>us max <n>us` — the rolling 300-frame
+///   MEAN, plus the window's worst work sample so one spike can no longer
+///   hide inside an average.
+///
+/// work = JS + tick + list build (pre-sync CPU), frame = work + GE sync +
+/// vblank + record, gc = the arena-pressure JS_RunGC inside that work.
+///
+/// Runbook: launch the release EBOOT under PSPLINK, play through the opening,
+/// then read host0:/voxperf.txt.
 #[cfg_attr(feature = "capture", allow(dead_code))]
-/// Rolling frame-time telemetry: every 300 frames one line appends to
-/// host0:/voxperf.txt (PSPLINK serves it; absent host0: fails silently) —
-/// `frames avg_work_us avg_frame_us` where work = JS + tick + list build
-/// (pre-sync CPU) and frame = work + GE sync + vblank + record.
+const BOOT_FRAMES: usize = 120;
+#[cfg_attr(feature = "capture", allow(dead_code))]
 static mut PERF_WORK: u64 = 0;
+#[cfg_attr(feature = "capture", allow(dead_code))]
 static mut PERF_FRAME: u64 = 0;
-unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32) {
-    PERF_WORK += work_us as u64;
-    PERF_FRAME += frame_us as u64;
-    if frame == 0 || frame % 300 != 0 {
-        return;
-    }
-    let mut line = alloc::string::String::new();
-    let _ = core::fmt::write(
-        &mut line,
-        format_args!(
-            "f{} work {}us frame {}us\n",
-            frame,
-            PERF_WORK / 300,
-            PERF_FRAME / 300
-        ),
-    );
-    PERF_WORK = 0;
-    PERF_FRAME = 0;
+#[cfg_attr(feature = "capture", allow(dead_code))]
+static mut PERF_MAX_WORK: u32 = 0;
+#[cfg_attr(feature = "capture", allow(dead_code))]
+static mut BOOT_WORK: [u32; BOOT_FRAMES] = [0; BOOT_FRAMES];
+#[cfg_attr(feature = "capture", allow(dead_code))]
+static mut BOOT_FRAME: [u32; BOOT_FRAMES] = [0; BOOT_FRAMES];
+#[cfg_attr(feature = "capture", allow(dead_code))]
+static mut BOOT_GC: [u32; BOOT_FRAMES] = [0; BOOT_FRAMES];
+
+#[cfg_attr(feature = "capture", allow(dead_code))]
+unsafe fn perf_write(text: &str) {
     let fd = sys::sceIoOpen(
         b"host0:/voxperf.txt\0".as_ptr(),
         IoOpenFlags::WR_ONLY | IoOpenFlags::CREAT | IoOpenFlags::APPEND,
         0o644,
     );
     if fd.0 >= 0 {
-        sys::sceIoWrite(fd, line.as_ptr() as *const c_void, line.len());
+        sys::sceIoWrite(fd, text.as_ptr() as *const c_void, text.len());
         sys::sceIoClose(fd);
     }
 }
 
+#[cfg_attr(feature = "capture", allow(dead_code))]
+#[cfg(feature = "telemetry")]
+unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32, gc_us: u32) {
+    PERF_WORK += work_us as u64;
+    PERF_FRAME += frame_us as u64;
+    if work_us > PERF_MAX_WORK {
+        PERF_MAX_WORK = work_us;
+    }
+
+    // ---- the boot window: record every frame, flush once at the end
+    let i = frame as usize;
+    if i < BOOT_FRAMES {
+        BOOT_WORK[i] = work_us;
+        BOOT_FRAME[i] = frame_us;
+        BOOT_GC[i] = gc_us;
+        if i + 1 == BOOT_FRAMES {
+            // One write for the whole window, and it lands AFTER this frame's
+            // samples were taken, so the flush cannot appear in its own data.
+            let mut text = alloc::string::String::new();
+            for f in 0..BOOT_FRAMES {
+                let (w, fr, gc) = (BOOT_WORK[f], BOOT_FRAME[f], BOOT_GC[f]);
+                let _ = core::fmt::write(
+                    &mut text,
+                    format_args!("b{} work {}us frame {}us gc {}us\n", f, w, fr, gc),
+                );
+            }
+            perf_write(&text);
+        }
+    }
+
+    if frame == 0 || frame % 300 != 0 {
+        return;
+    }
+    let (work_mean, frame_mean, worst) = (PERF_WORK / 300, PERF_FRAME / 300, PERF_MAX_WORK);
+    let mut line = alloc::string::String::new();
+    let _ = core::fmt::write(
+        &mut line,
+        format_args!(
+            "f{} work {}us frame {}us max {}us\n",
+            frame, work_mean, frame_mean, worst,
+        ),
+    );
+    PERF_WORK = 0;
+    PERF_FRAME = 0;
+    PERF_MAX_WORK = 0;
+    perf_write(&line);
+}
+
+/// Map the console's pad onto VOX_BTN. CIRCLE = A (confirm), CROSS = B —
+/// see the module docs. The analog stick walks too, one axis at a time
+/// (the world is a grid; a diagonal push picks a lane).
+#[cfg_attr(feature = "capture", allow(dead_code))]
 fn map_buttons(pad: &SceCtrlData) -> u32 {
     let b = pad.buttons;
     let mut mask = 0;

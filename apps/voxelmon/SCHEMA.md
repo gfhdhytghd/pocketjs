@@ -14,8 +14,9 @@ Inputs are resolved by `tools/voxel.ts`:
   `ea9bcae617fdf159b045185467ae58b2e4a48b9a`). No default is committed;
   the local developer default lives in `tools/voxel.ts`.
 - `VOXELMON_G1R` — a gen1recomp checkout (default `~/code/gen1recomp`);
-  supplies `tools/rom_manifest.json` and the parity reference
-  (`data/generated/` built by its `tools/build_rom_data.py`).
+  supplies `tools/rom_manifest.json`, the parity reference (`data/generated/`
+  built by its `tools/build_rom_data.py`), and `data/palettes_gbc.lua` — the
+  RED++ colour pack (pokered-gbc-derived, MIT, **not ROM-derived**).
 - `VOXELMON_VOXELMOD` — a DramaticShapeVoxelMod checkout (default
   `~/code/DramaticShapeVoxelMod`); supplies `data/voxel_heights.lua` and
   `data/battle_arenas.lua` for the cooker.
@@ -77,6 +78,18 @@ manifest's audio block plus what the importer resolves from the ROM:
 `MON_GHOST`, which have cries but no dex entry. MISSINGNO/UNUSED rows are
 read (the index must advance) and dropped.
 
+`gen/palettes_gbc.json` is the one file here the importer does NOT produce:
+the cooker dumps `$VOXELMON_G1R/data/palettes_gbc.lua` through the same
+LuaJIT one-shot the profile uses, re-dumping whenever the source is newer.
+Absent checkout or absent `luajit` → the cooker prints a reason and cooks
+without colour. **Index bases after the dump** (`cook/redpp.ts` pins this in
+a test — getting it wrong recolours the world by one group and never
+throws): `groupColors[TILESET]` is a dense 1..8 Lua table, so it becomes an
+8-element JSON **array indexed directly by group 0..7** (Lua's
+`base[ROOF + 1]` is our `base[ROOF]`), while `tileGroups[TILESET]`,
+`spritePalettes`, `spriteAssignment` and `roofByMapIndex` are 0-keyed and
+become **objects with string keys**, unshifted.
+
 ## Parity
 
 `tools/voxel.ts parity` deep-compares the 16 datasets that have a reference
@@ -99,6 +112,33 @@ program banks at the next 16-byte boundary. The guest calls
 program half by `bankOrder`; the core never looks inside either. In Bun the
 same two files load straight from `gen/` — one loader, two transports, like
 `gamedata`.
+
+## `VCOL` — the per-tile colour bindings
+
+The cooker bakes the RED++ palette group into the terrain page's texel index
+(`texel = group * 4 + shade`, `0xff` still transparent) and writes one
+section saying which VPAL entry each draw resolves that index through
+(`contracts/spec/voxel-spec.ts` §VXPK_TAG.color):
+
+```
+ 0  u16 version = 1
+ 2  u16 map_count        == the CHNK map count
+ 4  u16 page_count       == the ATLS page count
+ 6  u16 flags            bit0 = the terrain page is group-baked
+ 8  u32 pad = 0 | 12 u32 pad = 0
+16  map_count  * 8 : u32 map_id | u16 world_pal | u16 terrain_page
+..  page_count * 2 : u16 page_pal
+```
+
+`0xffff` (`COLOR_PAL_NONE`) anywhere means "no binding, use the legacy
+path". Map records carry `map_id` explicitly, so the section is
+order-independent of the CHNK directory, and the core range-validates every
+index against the palette and page counts. The VPAL list grows a tail after
+the 4 kind defaults and the 37 SGB SuperPalettes — world CLUTs, then OBJ,
+then pic — but that **prefix never moves**, so `draw::SGB_PAL_BASE = 4` and
+`mapPalette` stay valid. Cooking without the colour pack still writes the
+section, with every index `COLOR_PAL_NONE`; the pak then renders exactly as
+a pre-colour pak did.
 
 ## `gamedata` — what the guest parses at boot
 

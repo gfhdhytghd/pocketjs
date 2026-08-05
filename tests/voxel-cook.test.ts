@@ -6,15 +6,33 @@
 // real Rust reader (`pocketvoxel-sim --validate`), two cooks are
 // byte-identical, every cooked map has chunks and vertices, the CMAP covers
 // A-Z a-z 0-9, and the UI page carries the font at its charmap codes.
+//
+// The RED++ color tests need the gen1recomp checkout too ($VOXELMON_G1R),
+// and the ORACLE test needs `luajit` — it runs the reference's own
+// `PaletteFX.worldGroupAt`/`worldGroupColors` and compares colour for
+// colour. Each skips with its own printed reason.
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { buildPalettes, buildUiPage } from "../apps/voxelmon/cook/atlas.ts";
+import {
+  buildPalettes,
+  buildTerrainPage,
+  buildUiPage,
+  paletteBase,
+} from "../apps/voxelmon/cook/atlas.ts";
 import { cook, DEFAULT_MAPS } from "../apps/voxelmon/cook/cli.ts";
-import { GEN_DIR, genMissingReason, loadGen } from "../apps/voxelmon/cook/data.ts";
+import {
+  gen1recompDir,
+  GEN_DIR,
+  genMissingReason,
+  loadGen,
+  loadRedpp,
+  PX_CLEAR,
+} from "../apps/voxelmon/cook/data.ts";
 import { buildCharmap, buildMapPalette } from "../apps/voxelmon/cook/gamedata.ts";
+import { Redpp, ROOF_GROUP } from "../apps/voxelmon/cook/redpp.ts";
 
 const root = join(import.meta.dir, "..");
 const scratch = join(root, "dist/voxelmon");
@@ -22,6 +40,15 @@ const scratch = join(root, "dist/voxelmon");
 const reason = genMissingReason();
 if (reason) {
   console.error(`voxel-cook tests skipped — ${reason}`);
+}
+
+const packReason = existsSync(join(gen1recompDir(), "data/palettes_gbc.lua"))
+  ? null
+  : `RED++ color pack not found under ${gen1recompDir()} (set VOXELMON_G1R)`;
+if (!reason && packReason) console.error(`voxel-cook color tests skipped — ${packReason}`);
+const oracleReason = packReason ?? (Bun.which("luajit") ? null : "luajit is not installed");
+if (!reason && !packReason && oracleReason) {
+  console.error(`voxel-cook oracle test skipped — ${oracleReason}`);
 }
 
 describe.skipIf(reason !== null)("voxel cook", () => {
@@ -60,11 +87,20 @@ describe.skipIf(reason !== null)("voxel cook", () => {
     }
   });
 
-  test("VPAL: 4 kind defaults + the 37 SGB SuperPalettes", () => {
+  test("VPAL: 4 kind defaults + the 37 SGB SuperPalettes, then the RED++ tail", () => {
     const gen = loadGen(GEN_DIR);
     expect(gen.palettes.order.length).toBe(37);
     const pals = buildPalettes(gen);
+    // The PREFIX is the compatibility guarantee: draw::SGB_PAL_BASE is 4 and
+    // gamedata's `mapPalette` indexes the SGB set, whatever the tail holds.
     expect(pals.length).toBe(4 + 37);
+    expect(paletteBase(gen)).toBe(4 + 37);
+    // The tail simply appends; nothing in front of it moves.
+    const tail = [new Uint32Array(256).fill(0xff112233)];
+    const grown = buildPalettes(gen, tail);
+    expect(grown.length).toBe(4 + 37 + 1);
+    for (let i = 0; i < pals.length; i++) expect(grown[i]).toEqual(pals[i]);
+    expect(grown[4 + 37][0]).toBe(0xff112233);
     // An SGB palette maps its 4 colors (lightest first) onto shades 0..3
     // as ABGR, keeps PX_CLEAR transparent, and blacks out the rest.
     const pallet = pals[4 + gen.palettes.order.indexOf("PALLET")];
@@ -145,4 +181,214 @@ describe.skipIf(reason !== null)("voxel cook", () => {
     expect(tileHasInk(0x80)).toBe(true);
     expect([0x60, 0x61, 0x62, 0x63, 0x79].some(tileHasInk)).toBe(true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// RED++ / pokered-gbc per-tile color (cook/redpp.ts)
+// ---------------------------------------------------------------------------
+
+const abgr = (r: number, g: number, b: number): number =>
+  ((0xff000000 | (b << 16) | (g << 8) | r) >>> 0);
+
+describe.skipIf(reason !== null || packReason !== null)("voxel cook: RED++ color", () => {
+  test("the dumped pack keeps its index bases (arrays shift, 0-keyed do not)", () => {
+    // THE #1 silent-miscolor risk: lua-dump turns dense 1..n tables into
+    // JSON arrays (every index shifts down by one) but 0-keyed tables into
+    // objects with string keys. Getting this wrong recolors the whole world
+    // by one group and never throws — so it is pinned here, not assumed.
+    const pack = loadRedpp(GEN_DIR)!;
+    expect(pack).not.toBeNull();
+    const w = pack.world;
+    // groupColors: dense 1..8 in Lua -> an ARRAY indexed directly by group.
+    expect(Array.isArray(w.groupColors.OVERWORLD)).toBe(true);
+    expect(w.groupColors.OVERWORLD.length).toBe(8);
+    expect(w.groupColors.OVERWORLD[0].length).toBe(4);
+    // tileGroups / spritePalettes / spriteAssignment / roofByMapIndex are
+    // 0-keyed -> OBJECTS with string keys, no shift.
+    expect(Array.isArray(w.tileGroups.OVERWORLD)).toBe(false);
+    expect(Object.keys(w.tileGroups.OVERWORLD).length).toBe(96);
+    expect(w.tileGroups.OVERWORLD["0"]).toBe(0);
+    expect(Object.keys(w.spritePalettes).length).toBe(8);
+    expect(Object.keys(w.spriteAssignment).length).toBe(72);
+    expect(w.spriteAssignment["3"]).toBe("random");
+    // Pallet Town is map index 0 and its roof is the white pair.
+    expect(w.roofByMapIndex["0"]).toEqual([
+      [255, 255, 255],
+      [197, 197, 197],
+    ]);
+    expect(w.roofGroup.OVERWORLD).toBe(ROOF_GROUP);
+    // The pack is pokered-gbc-derived, NOT ROM-derived: Red ships no CGB
+    // code, so there is no CGBBasePalettes for it at all.
+    expect(pack.source).toContain("pokered-gbc");
+  });
+
+  test("the terrain page bakes group*4+shade and leaves 0xff transparent", () => {
+    const gen = loadGen(GEN_DIR);
+    const redpp = new Redpp(loadRedpp(GEN_DIR)!);
+    const tilesets = DEFAULT_MAPS.map((name) => gen.tilesets[gen.maps[name].tileset]);
+    const plain = buildTerrainPage(gen, tilesets);
+    const baked = buildTerrainPage(gen, tilesets, redpp);
+
+    // Same shape: the bake changes texel VALUES, never dimensions, frame
+    // count or texel count — that is what makes it free on the GE.
+    expect(baked.page.w).toBe(plain.page.w);
+    expect(baked.page.h).toBe(plain.page.h);
+    expect(baked.page.frames.length).toBe(plain.page.frames.length);
+    expect(baked.bakedSheets.size).toBeGreaterThan(0);
+
+    const w = baked.page.w;
+    for (const [name, tileset] of [
+      ["PALLET_TOWN", "OVERWORLD"],
+      ["REDS_HOUSE_1F", "REDS_HOUSE_1"],
+      ["BLUES_HOUSE", "HOUSE"],
+    ] as const) {
+      const key = gen.tilesets[tileset].image
+        .replace(/^assets\/generated\//, "")
+        .replace(/\.png$/, "");
+      expect(baked.bakedSheets.has(key)).toBe(true);
+      const y0 = baked.baseY.get(key)!;
+      const sheet = gen.gfx[key];
+      const perRow = gen.tilesets[tileset].tilesPerRow || 16;
+      const tiles = Math.floor(sheet.w / 8) * Math.floor(sheet.h / 8);
+      let checked = 0;
+      for (let tile = 0; tile < tiles; tile += 7) {
+        const group = redpp.groupOf(tileset, null, tile)!;
+        const tx = (tile % perRow) * 8;
+        const ty = y0 + Math.floor(tile / perRow) * 8;
+        for (let f = 0; f < baked.page.frames.length; f++) {
+          for (let y = 0; y < 8; y++) {
+            for (let x = 0; x < 8; x++) {
+              const at = (ty + y) * w + tx + x;
+              const before = plain.page.frames[f][at];
+              const after = baked.page.frames[f][at];
+              if (before === PX_CLEAR) {
+                expect(after).toBe(PX_CLEAR); // the alpha-test cutout survives
+              } else {
+                expect(after).toBe(group * 4 + (before & 3));
+                expect(after).toBeLessThan(32); // 8 groups x 4 shades
+              }
+              checked++;
+            }
+          }
+        }
+      }
+      expect(checked).toBeGreaterThan(0);
+      expect(name).toBeTruthy();
+    }
+  });
+
+  test("the roof swap touches slots 1 and 2 of the ROOF group and nothing else", () => {
+    // LoadTownPalette overwrites only W2_BgPaletteData + $32 — colors 1 and
+    // 2 of the ROOF slot. Color 0 (sky through the gaps) and color 3
+    // (outline black) keep the tileset's own OUTDOOR_ROOF base.
+    const redpp = new Redpp(loadRedpp(GEN_DIR)!);
+    const pallet = redpp.worldPalette("OVERWORLD", 0)!; // PALLET_TOWN, white
+    const viridian = redpp.worldPalette("OVERWORLD", 1)!; // VIRIDIAN_CITY, green
+    const route1 = redpp.worldPalette("OVERWORLD", 12)!; // ROUTE_1, white again
+
+    const differing: number[] = [];
+    for (let i = 0; i < 256; i++) if (pallet[i] !== viridian[i]) differing.push(i);
+    expect(differing).toEqual([ROOF_GROUP * 4 + 1, ROOF_GROUP * 4 + 2]);
+    expect(pallet[ROOF_GROUP * 4 + 1]).toBe(abgr(255, 255, 255));
+    expect(pallet[ROOF_GROUP * 4 + 2]).toBe(abgr(197, 197, 197));
+    expect(viridian[ROOF_GROUP * 4 + 1]).toBe(abgr(0, 239, 58));
+    expect(viridian[ROOF_GROUP * 4 + 2]).toBe(abgr(0, 197, 58));
+    // Route 1 wears Pallet's roof, so the two dedup into one CLUT.
+    expect(Array.from(route1)).toEqual(Array.from(pallet));
+    // The CLUT shape: PX_CLEAR transparent, everything past group 7 black.
+    expect(pallet[PX_CLEAR]).toBe(0);
+    expect(pallet[32]).toBe(0xff000000);
+    // An indoor tileset has no roof entry, so its palette never varies.
+    expect(Array.from(redpp.worldPalette("HOUSE", 39)!)).toEqual(
+      Array.from(redpp.worldPalette("HOUSE", 0)!),
+    );
+  });
+
+  test("OBJ palettes make GBC color 0 transparent (ColorOverworldSprite)", () => {
+    const pack = loadRedpp(GEN_DIR)!;
+    const redpp = new Redpp(pack);
+    const pal = redpp.objPalette(0)!;
+    expect(pal[0]).toBe(0); // shade 0 is alpha 0 unconditionally
+    for (let s = 1; s < 4; s++) {
+      const [r, g, b] = pack.world.spritePalettes["0"][s];
+      expect(pal[s]).toBe(abgr(r, g, b));
+    }
+    expect(pal[PX_CLEAR]).toBe(0);
+    // The ROM crosswalk: the player's sheet takes assignment[0]; the bike
+    // loads outside SpriteSheetPointerTable and wears the same one.
+    const player = pack.world.spriteAssignment["0"];
+    expect(player).toBe(0); // the reference's SPR_PAL_RED
+    expect(redpp.objGroupOf("ROM:SpriteSheetPointerTable[0]", "sprites/red")).toBe(player as number);
+    expect(redpp.objGroupOf("ROM:RedBikeSprite", "sprites/red_bike")).toBe(player as number);
+    // "random" resolves deterministically, and only ever to 0..3.
+    const rnd = redpp.objGroupOf("ROM:SpriteSheetPointerTable[3]", "sprites/guard")!;
+    expect(rnd).toBe(redpp.objGroupOf("ROM:SpriteSheetPointerTable[3]", "sprites/guard")!);
+    expect(rnd).toBeGreaterThanOrEqual(0);
+    expect(rnd).toBeLessThan(4);
+  });
+
+  test("VCOL: every map binds a world palette, sprite pages bind OBJ CLUTs", () => {
+    const gen = loadGen(GEN_DIR);
+    const result = cook(DEFAULT_MAPS, join(scratch, "voxelmon.test-color.vxpak"));
+    expect(result.colour).not.toBeNull();
+    // v1's 5 tilesets over 4 sheets collapse to 3 world CLUTs: OVERWORLD
+    // white-roof (Pallet + Route 1), OVERWORLD green-roof (Viridian), and
+    // the one indoor table REDS_HOUSE_1/2, HOUSE and DOJO all share.
+    expect(result.colour!.world).toBe(3);
+    expect(result.colour!.obj).toBeGreaterThan(0);
+    expect(result.colour!.pic).toBeGreaterThan(0);
+    expect(result.palettes).toBe(
+      paletteBase(gen) + result.colour!.world + result.colour!.obj + result.colour!.pic,
+    );
+    expect(result.sections.some((s) => s.tag === "VCOL")).toBe(true);
+  }, 240000);
+
+  test.skipIf(oracleReason !== null)(
+    "ORACLE: every tile's 4 colors match gen1recomp's own PaletteFX",
+    () => {
+      // The strong check: the reference's `worldGroupAt` + `worldGroupColors`
+      // run for real under LuaJIT, and every tile of every cooked map is
+      // compared colour for colour. This covers the group assignment, the
+      // exception tables and the roof swap in one pass — a transcription
+      // error cannot survive it.
+      const gen = loadGen(GEN_DIR);
+      const redpp = new Redpp(loadRedpp(GEN_DIR)!);
+      const specs = DEFAULT_MAPS.map((name) => {
+        const def = gen.maps[name];
+        return `${name}:${def.tileset}:${def.index}`;
+      });
+      const proc = Bun.spawnSync([
+        "luajit",
+        join(root, "apps/voxelmon/import/redpp-oracle.lua"),
+        gen1recompDir(),
+        ...specs,
+      ]);
+      expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+      const oracle = JSON.parse(proc.stdout.toString()) as Record<
+        string,
+        { tileset: string; index: number; tiles: [number, number, number][][] }
+      >;
+
+      let compared = 0;
+      for (const name of DEFAULT_MAPS) {
+        const entry = oracle[name];
+        expect(entry).toBeDefined();
+        const pal = redpp.worldPalette(entry.tileset, entry.index)!;
+        expect(pal).not.toBeNull();
+        for (let tile = 0; tile < entry.tiles.length; tile++) {
+          const group = redpp.groupOf(entry.tileset, name, tile)!;
+          for (let shade = 0; shade < 4; shade++) {
+            const [r, g, b] = entry.tiles[tile][shade];
+            expect(
+              pal[group * 4 + shade],
+              `${name} tile ${tile} shade ${shade}`,
+            ).toBe(abgr(r, g, b));
+            compared++;
+          }
+        }
+      }
+      expect(compared).toBe(DEFAULT_MAPS.length * 96 * 4);
+    },
+    120000,
+  );
 });

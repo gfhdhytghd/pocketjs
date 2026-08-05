@@ -11,10 +11,10 @@
 //! two passes with its inverted 16-bit depth range; the *visible result* is
 //! the contract, not the depth encoding.
 
-use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, SGB_PAL_BASE, modulate_rgb};
+use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, modulate_rgb, resolve_pal};
 use pocketvoxel_core::math::{Mat4, Vec3, vec3};
 use pocketvoxel_core::pak::{AtlasPage, Pak, unswizzle};
-use pocketvoxel_core::spec::{TILE_PX, VIEW_H, VIEW_W, atlas_kind};
+use pocketvoxel_core::spec::{COLOR_PAL_NONE, TILE_PX, VIEW_H, VIEW_W};
 
 pub const W: usize = VIEW_W as usize;
 pub const H: usize = VIEW_H as usize;
@@ -401,18 +401,13 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
     let vp = &list.cam.vp;
     let eye = list.cam.eye;
 
-    // The `palette` op: non-ui kinds sample the selected SGB palette
-    // (VPAL[SGB_PAL_BASE + i]) in place of their kind ramp; the day tint is
-    // already folded in above. Out-of-range selections fall back to the
-    // kind ramp (defensive — the op stream is untrusted).
-    let pal_index = |kind: u16| -> usize {
-        if kind != atlas_kind::UI && list.palette >= 0 {
-            let idx = SGB_PAL_BASE + list.palette as usize;
-            if idx < tinted.len() {
-                return idx;
-            }
-        }
-        kind as usize
+    // Which VPAL entry a draw samples: the core's own precedence ladder
+    // (draw::resolve_pal — the VCOL binding, then page_pal, then the
+    // `palette` op's SGB selection, then the kind ramp), shared verbatim
+    // with the GE backend so both bind the same CLUT. The day tint is
+    // already folded into every entry above.
+    let pal_index = |page: u16, kind: u16, pal: u16| -> usize {
+        resolve_pal(pak, page, kind, pal, list.palette)
     };
     let mesh_tex = |m: &MeshDraw| -> Option<TexCtx<'_>> {
         let page = cache.pages.get(m.page as usize)?;
@@ -421,7 +416,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
             texels,
             w: page.w,
             h: page.h,
-            pal: tinted.get(pal_index(page.kind))?,
+            pal: tinted.get(pal_index(m.page, page.kind, m.pal))?,
         })
     };
 
@@ -519,7 +514,10 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                     texels: &cp.frames[0],
                     w: cp.w,
                     h: cp.h,
-                    pal: &tinted[pal_index(cp.kind)],
+                    // Cards carry no per-item palette: a sprite sheet's OBJ
+                    // CLUT and a battle pic's species CLUT are properties of
+                    // the PAGE, so resolve_pal reads them from VCOL itself.
+                    pal: &tinted[pal_index(*page, cp.kind, COLOR_PAL_NONE)],
                 };
                 let (u0, u1) = if *mirror {
                     (uv[2], uv[0])

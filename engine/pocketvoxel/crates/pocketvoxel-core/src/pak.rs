@@ -15,7 +15,7 @@
 //! layouts are pinned HERE and mirrored byte-for-byte by [`builder`] (the TS
 //! cooker is written against the same shapes). All sections are required and
 //! appear in ascending numeric tag order: META, GAME, AUDI, CHNK, VPAL,
-//! CMAP, STMP, ATLS.
+//! VCOL, CMAP, STMP, ATLS.
 //!
 //! ```text
 //! META  (table count = 1), 32 bytes:
@@ -102,13 +102,27 @@
 //!   then runs silent. The core never parses either half — it hands the
 //!   whole payload to the guest through the `audiodata` op, the same
 //!   one-cold-read discipline GAME has.
+//!
+//! VCOL  (table count = 1), the RED++ / pokered-gbc per-tile color bindings:
+//!   0  u16 version = spec::VXPK_COLOR_VERSION
+//!   2  u16 map_count      == CHNK map_count
+//!   4  u16 page_count     == ATLS page count
+//!   6  u16 flags          bit 0 (VXPK_COLOR_FLAG_WORLD) = the terrain page
+//!                         carries `group * 4 + shade` texel indices, so a
+//!                         world palette is MANDATORY for every map drawn
+//!                         from a baked sheet
+//!   8  u32 pad = 0 | 12 u32 pad = 0
+//!   16 map_count * 8:  u32 map_id | u16 world_pal | u16 terrain_page
+//!   .. page_count * 2: u16 page_pal
+//!   Every index is COLOR_PAL_NONE or in range (palette_count / atlas
+//!   count), checked here. Map ids are unique and must each name a CHNK map.
 //! ```
 
 use alloc::vec::Vec;
 
 use crate::spec::{
-    self, MESH_KINDS, VERTEX_STRIDE, VXPK_ALIGN, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE, VXPK_MAGIC,
-    VXPK_VERSION,
+    self, COLOR_PAL_NONE, MESH_KINDS, VERTEX_STRIDE, VXPK_ALIGN, VXPK_COLOR_HEADER_SIZE,
+    VXPK_COLOR_VERSION, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE, VXPK_MAGIC, VXPK_VERSION,
 };
 
 pub type ReadError = &'static str;
@@ -236,6 +250,26 @@ pub struct Stamp {
     pub mesh: MeshRange,
 }
 
+/// One VCOL map record: which VPAL entry (and which terrain page) this map's
+/// chunk meshes resolve their `group * 4 + shade` texels through.
+#[derive(Clone, Copy, Debug)]
+pub struct MapColor {
+    pub map_id: u32,
+    /// VPAL index, or [`spec::COLOR_PAL_NONE`].
+    pub world_pal: u16,
+    /// Atlas page index, or [`spec::COLOR_PAL_NONE`] (use `page_of_kind`).
+    pub terrain_page: u16,
+}
+
+/// Parsed VCOL section — every RED++ binding the pak carries.
+#[derive(Debug, Default)]
+pub struct Color {
+    pub flags: u16,
+    pub maps: Vec<MapColor>,
+    /// Per atlas page: VPAL index, or [`spec::COLOR_PAL_NONE`].
+    pub pages: Vec<u16>,
+}
+
 /// Parsed META section.
 #[derive(Clone, Copy, Debug)]
 pub struct Meta {
@@ -273,6 +307,10 @@ pub struct Pak<'a> {
     /// handed to the guest by the `audiodata` op. Empty when the pak carries
     /// no audio.
     pub audio: &'a [u8],
+    /// The VCOL section: RED++ per-tile color bindings. Every field is
+    /// `COLOR_PAL_NONE` on a pak cooked without the color pack, and every
+    /// lookup below then returns `None` — the legacy SGB path.
+    pub color: Color,
 }
 
 impl<'a> Pak<'a> {
@@ -308,6 +346,28 @@ impl<'a> Pak<'a> {
             .iter()
             .position(|p| p.kind == kind)
             .map(|i| i as u16)
+    }
+
+    /// The map's RED++ world palette (VPAL index): the CLUT its terrain,
+    /// water, grass and flower meshes sample. `None` = the legacy path.
+    pub fn map_world_pal(&self, map_id: u32) -> Option<u16> {
+        let rec = self.color.maps.iter().find(|m| m.map_id == map_id)?;
+        (rec.world_pal != COLOR_PAL_NONE).then_some(rec.world_pal)
+    }
+
+    /// The map's own terrain atlas page, when VCOL names one (v1 always
+    /// names the single combined page; the field exists so a per-tileset
+    /// page split needs no format change).
+    pub fn map_terrain_page(&self, map_id: u32) -> Option<u16> {
+        let rec = self.color.maps.iter().find(|m| m.map_id == map_id)?;
+        (rec.terrain_page != COLOR_PAL_NONE).then_some(rec.terrain_page)
+    }
+
+    /// The page's own RED++ palette (sprite OBJ / battle pic). `None` = the
+    /// legacy path (the `palette` op's SGB selection, else the kind ramp).
+    pub fn page_pal(&self, page: u16) -> Option<u16> {
+        let pal = *self.color.pages.get(page as usize)?;
+        (pal != COLOR_PAL_NONE).then_some(pal)
     }
 
     /// UI tile for a character; `None` when the pak has no glyph for it.
@@ -458,7 +518,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     if total_len != data.len() {
         return Err("header length disagrees with the blob (truncated or padded)");
     }
-    const TAGS: [u32; 8] = [
+    const TAGS: [u32; 9] = [
         spec::tag::META,
         spec::tag::GAME,
         spec::tag::CHUNKS,
@@ -467,8 +527,9 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
         spec::tag::STAMPS,
         spec::tag::ATLAS,
         spec::tag::AUDIO,
+        spec::tag::COLOR,
     ];
-    // All eight sections required, ascending tag order (spec: "sections
+    // All nine sections required, ascending tag order (spec: "sections
     // appear in tag order"), ascending non-overlapping payloads.
     if section_count != TAGS.len() {
         return Err("wrong section count");
@@ -476,7 +537,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     let table_end = VXPK_HEADER_SIZE + section_count * VXPK_ENTRY_SIZE;
     let mut expected = TAGS;
     expected.sort_unstable();
-    let mut sections = [(0usize, 0usize, 0u32); 8]; // (offset, length, count) in TAGS order
+    let mut sections = [(0usize, 0usize, 0u32); 9]; // (offset, length, count) in TAGS order
     let mut prev_end = table_end;
     for (i, &want) in expected.iter().enumerate() {
         let tag = r.u32v()?;
@@ -742,6 +803,77 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
         }
     }
 
+    // --- VCOL -------------------------------------------------------------
+    // The RED++ bindings. Every index is range-checked here so no backend
+    // ever indexes VPAL or ATLS with a pak-supplied number unchecked.
+    let color;
+    {
+        let (_, len, table_count) = sections[8];
+        if table_count != 1 {
+            return Err("VCOL table count must be 1");
+        }
+        let mut r = Rd::new(payload(8));
+        if r.u16v()? != VXPK_COLOR_VERSION {
+            return Err("unsupported VCOL version");
+        }
+        let map_count = r.u16v()? as usize;
+        let page_count = r.u16v()? as usize;
+        let flags = r.u16v()?;
+        if r.u32v()? != 0 || r.u32v()? != 0 {
+            return Err("VCOL reserved words are not zero");
+        }
+        if map_count as u32 != meta.map_count || page_count as u32 != meta.atlas_count {
+            return Err("VCOL counts disagree with META");
+        }
+        if len != VXPK_COLOR_HEADER_SIZE + map_count * 8 + page_count * 2 {
+            return Err("VCOL length disagrees with its counts");
+        }
+        let mut map_recs = Vec::with_capacity(map_count);
+        for _ in 0..map_count {
+            let map_id = r.u32v()?;
+            let world_pal = r.u16v()?;
+            let terrain_page = r.u16v()?;
+            if !maps.iter().any(|m| m.map_id == map_id) {
+                return Err("VCOL names a map the chunk directory does not have");
+            }
+            if map_recs.iter().any(|m: &MapColor| m.map_id == map_id) {
+                return Err("duplicate map id in VCOL");
+            }
+            if world_pal != COLOR_PAL_NONE && world_pal as usize >= palettes.len() {
+                return Err("VCOL world palette out of range");
+            }
+            if terrain_page != COLOR_PAL_NONE && terrain_page as usize >= atlases.len() {
+                return Err("VCOL terrain page out of range");
+            }
+            // A group-baked terrain page has no meaning without its CLUT:
+            // the texels are 0..31 group indices, not GB shades.
+            if flags & spec::VXPK_COLOR_FLAG_WORLD != 0
+                && world_pal == COLOR_PAL_NONE
+                && terrain_page != COLOR_PAL_NONE
+            {
+                return Err("VCOL declares baked world color but a map has no palette");
+            }
+            map_recs.push(MapColor {
+                map_id,
+                world_pal,
+                terrain_page,
+            });
+        }
+        let mut pages = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            let pal = r.u16v()?;
+            if pal != COLOR_PAL_NONE && pal as usize >= palettes.len() {
+                return Err("VCOL page palette out of range");
+            }
+            pages.push(pal);
+        }
+        color = Color {
+            flags,
+            maps: map_recs,
+            pages,
+        };
+    }
+
     Ok(Pak {
         meta,
         palettes,
@@ -755,6 +887,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
         charmap,
         game,
         audio,
+        color,
     })
 }
 
@@ -860,6 +993,121 @@ pub(crate) mod tests {
         b.game(br#"{"hello":1}"#);
         b.audio(br#"{"bankOrder":[2]}"#, &[0xaa; 40]);
         b.finish()
+    }
+
+    /// The same pak with RED++ bindings. VPAL: 0..3 the kind defaults, 4 the
+    /// one SGB entry (`draw::SGB_PAL_BASE`), 5 a world CLUT, 6 an OBJ CLUT.
+    /// Map 7 binds 5 over terrain page 0; the sprite page binds 6.
+    pub(crate) const COLORED_WORLD_PAL: u16 = 5;
+    pub(crate) const COLORED_OBJ_PAL: u16 = 6;
+    pub(crate) fn colored_pak_bytes() -> Vec<u8> {
+        let mut b = PakBuilder::new();
+        let mut pal = [0xff00_0000u32; 256];
+        pal[1] = 0xff00_ff00;
+        pal[2] = 0x0000_00ff;
+        for _ in 0..7 {
+            b.palette(pal);
+        }
+        let texels = vec![1u8; 16 * 16];
+        b.atlas_linear(16, 16, atlas_kind::TERRAIN, &[&texels, &texels]);
+        b.atlas_linear(16, 32, atlas_kind::SPRITES, &[&vec![1u8; 16 * 32]]);
+        b.atlas_linear(16, 16, atlas_kind::UI, &[&texels]);
+        let v = |x: i16, z: i16| PakVert {
+            u: 0.25,
+            v: 0.25,
+            abgr: 0xffff_ffff,
+            x,
+            y: 0,
+            z,
+            pad: 0,
+        };
+        let terrain = b.mesh(
+            &[v(0, 0), v(128, 0), v(128, 128), v(0, 128)],
+            &[0, 1, 2, 0, 2, 3],
+        );
+        b.map(
+            7,
+            &[builder::ChunkDef {
+                cx: 0,
+                cy: 0,
+                aabb_min: [0, 0, 0],
+                aabb_max: [128, 0, 128],
+                meshes: [
+                    terrain,
+                    MeshRange::default(),
+                    MeshRange::default(),
+                    MeshRange::default(),
+                ],
+            }],
+        );
+        b.stamps(7, &[]);
+        b.glyph('A' as u16, 3);
+        b.game(b"{}");
+        b.color_flags(spec::VXPK_COLOR_FLAG_WORLD);
+        b.map_color(7, COLORED_WORLD_PAL, 0);
+        b.page_color(1, COLORED_OBJ_PAL);
+        b.finish()
+    }
+
+    #[test]
+    fn color_bindings_round_trip() {
+        let blob = AlignedBlob::from_bytes(&colored_pak_bytes());
+        let pak = read(blob.bytes()).expect("valid colored pak");
+        assert_eq!(pak.color.flags, spec::VXPK_COLOR_FLAG_WORLD);
+        assert_eq!(pak.map_world_pal(7), Some(COLORED_WORLD_PAL));
+        assert_eq!(pak.map_terrain_page(7), Some(0));
+        assert_eq!(pak.map_world_pal(9), None, "unknown map has no binding");
+        assert_eq!(pak.page_pal(1), Some(COLORED_OBJ_PAL));
+        assert_eq!(pak.page_pal(0), None, "terrain takes its CLUT per map");
+        assert_eq!(pak.page_pal(99), None, "out-of-range page is None");
+
+        // A pak cooked without the color pack carries the section with every
+        // index NONE — every lookup falls through to the legacy path.
+        let blob = AlignedBlob::from_bytes(&tiny_pak_bytes());
+        let pak = read(blob.bytes()).expect("valid pak");
+        assert_eq!(pak.color.flags, 0);
+        assert_eq!(pak.color.maps.len(), 1);
+        assert_eq!(pak.color.pages.len(), 3);
+        assert_eq!(pak.map_world_pal(7), None);
+        assert_eq!(pak.page_pal(0), None);
+    }
+
+    #[test]
+    fn corrupt_color_section_errors() {
+        let good = colored_pak_bytes();
+        // Locate VCOL's payload.
+        let mut vcol = None;
+        for s in 0..9 {
+            let entry = VXPK_HEADER_SIZE + s * VXPK_ENTRY_SIZE;
+            let tag = u32::from_le_bytes(good[entry..entry + 4].try_into().unwrap());
+            if tag == spec::tag::COLOR {
+                vcol = Some(
+                    u32::from_le_bytes(good[entry + 4..entry + 8].try_into().unwrap()) as usize,
+                );
+            }
+        }
+        let off = vcol.expect("VCOL present");
+        let poke = |at: usize, v: u16| {
+            let mut b = good.clone();
+            b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+            b
+        };
+        must_err(&poke(off, 99), "unsupported VCOL version");
+        must_err(&poke(off + 2, 5), "map_count disagrees with META");
+        must_err(&poke(off + 4, 5), "page_count disagrees with META");
+        must_err(&poke(off + 8, 1), "reserved word is not zero");
+        // world_pal past the palette count (7 palettes here).
+        must_err(&poke(off + 16 + 4, 50), "world palette out of range");
+        // terrain_page past the atlas count.
+        must_err(&poke(off + 16 + 6, 50), "terrain page out of range");
+        // a map id the chunk directory does not carry.
+        let mut b = good.clone();
+        b[off + 16..off + 20].copy_from_slice(&99u32.to_le_bytes());
+        must_err(&b, "VCOL names an unknown map");
+        // page palette past the palette count.
+        must_err(&poke(off + 16 + 8, 50), "page palette out of range");
+        // flags claim baked world color but the map carries no palette.
+        must_err(&poke(off + 16 + 4, COLOR_PAL_NONE), "baked but unpaletted");
     }
 
     #[test]

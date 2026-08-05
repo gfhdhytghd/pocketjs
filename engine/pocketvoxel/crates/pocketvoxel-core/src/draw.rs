@@ -18,8 +18,9 @@ use crate::math::{Vec3, sinf, vec3};
 use crate::pak::{EMOTE_PAGE_NONE, Pak};
 use crate::scene::Scene;
 use crate::spec::{
-    self, CELL_PX, FLOWER_PULL_SUB_PX, GHOST_ABGR, PULL_BASE, PULL_MIN_SIN, PULL_NUM, PULL_SUB,
-    SHADOW_ALPHA_BATTLE, SHADOW_ALPHA_FIELD, VIEW_H, atlas_kind, ent_flag, mesh_kind,
+    self, CELL_PX, COLOR_PAL_NONE, FLOWER_PULL_SUB_PX, GHOST_ABGR, PULL_BASE, PULL_MIN_SIN,
+    PULL_NUM, PULL_SUB, SHADOW_ALPHA_BATTLE, SHADOW_ALPHA_FIELD, VIEW_H, atlas_kind, ent_flag,
+    mesh_kind,
 };
 use crate::ui;
 
@@ -40,6 +41,39 @@ pub const SKY_ABGR: [u32; SKY_BANDS] = [0xffc08040, 0xffd0a060, 0xffe0c090, 0xff
 /// the SGB set, so backends sample `VPAL[SGB_PAL_BASE + palette]` for the
 /// non-ui kinds when a palette is selected.
 pub const SGB_PAL_BASE: usize = spec::atlas_kind::PICS as usize + 1;
+
+/// The VPAL entry ONE textured draw samples, resolving the precedence the
+/// spec pins for `VXPK_TAG.color`:
+///
+/// 1. the item's own VCOL palette (a chunk/stamp mesh carries its map slot's
+///    world palette in [`MeshDraw::pal`]);
+/// 2. the page's VCOL `page_pal` (sprite OBJ / battle pic);
+/// 3. the `palette` op's SGB selection — `VPAL[SGB_PAL_BASE + i]`, non-ui
+///    kinds only;
+/// 4. the page kind's own GB grayscale ramp.
+///
+/// BOTH backends call this — the software rasterizer and the GE backend must
+/// bind the same CLUT for the same draw, and that agreement is what the
+/// whole per-tile color design rests on. Every rung is range-checked: the op
+/// stream and the pak are both untrusted here.
+pub fn resolve_pal(pak: &Pak, page: u16, kind: u16, pal: u16, selection: i32) -> usize {
+    if pal != COLOR_PAL_NONE && (pal as usize) < pak.palettes.len() {
+        return pal as usize;
+    }
+    if kind != atlas_kind::UI
+        && let Some(p) = pak.page_pal(page)
+        && (p as usize) < pak.palettes.len()
+    {
+        return p as usize;
+    }
+    if kind != atlas_kind::UI && selection >= 0 {
+        let sgb = SGB_PAL_BASE + selection as usize;
+        if sgb < pak.palettes.len() {
+            return sgb;
+        }
+    }
+    kind as usize
+}
 
 /// Entity shadow decal: half-extents as fractions of the card width, and a
 /// lift above the feet so the decal never z-fights the ground it sits on.
@@ -70,6 +104,11 @@ pub struct MeshDraw {
     /// Atlas page + animation frame to bind.
     pub page: u16,
     pub frame: u16,
+    /// The owning map's RED++ world palette (VPAL index), or
+    /// `COLOR_PAL_NONE` — the first rung of [`resolve_pal`]. Per MAP, not
+    /// per page: two maps with different roofs share one terrain page and
+    /// differ only in this CLUT.
+    pub pal: u16,
     /// The owning map slot's seam translation, world px (x east, z south).
     pub off_x: i32,
     pub off_y: i32,
@@ -127,7 +166,9 @@ pub enum Item {
 /// pre-tinted). `palette` is the selected SGB palette (index into the pak's
 /// SGB set, `VPAL[SGB_PAL_BASE + i]`) the non-ui kinds sample through, or
 /// -1 for the GB grayscale ramp; the day tint still modulates on top, and
-/// the ui kind always keeps its own raw ramp.
+/// the ui kind always keeps its own raw ramp. On a pak carrying RED++
+/// per-tile color the pak's own bindings outrank this selection — see
+/// [`resolve_pal`], which every textured draw goes through.
 pub struct DrawList {
     pub cam: Camera,
     pub tint: u32,
@@ -240,7 +281,13 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     });
 
     // Visible chunks, gathered once and replayed per mesh-kind pass.
+    // The gather stays SLOT-MAJOR: one map's chunks are contiguous, so its
+    // world CLUT binds once per pass instead of once per chunk.
     let terrain_page = pak.page_of_kind(atlas_kind::TERRAIN);
+    // Per map slot: the terrain page and world palette its chunks bind.
+    // Only 5 slots exist, so a flat lookup beats widening the gather tuple.
+    let mut slot_page = [terrain_page.unwrap_or(0); crate::scene::MAP_SLOTS];
+    let mut slot_pal = [COLOR_PAL_NONE; crate::scene::MAP_SLOTS];
     let mut visible: Vec<(u8, i32, i32, &crate::pak::Chunk)> = Vec::new();
     let mut shown_maps: Vec<(u8, u32, i32, i32)> = Vec::new();
     {
@@ -252,6 +299,10 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                 continue; // a slot showing a map this pak doesn't know draws nothing
             };
             shown_maps.push((slot as u8, ms.map_id, ms.ox, ms.oy));
+            if let Some(page) = pak.map_terrain_page(ms.map_id) {
+                slot_page[slot] = page;
+            }
+            slot_pal[slot] = pak.map_world_pal(ms.map_id).unwrap_or(COLOR_PAL_NONE);
             for chunk in pak.chunks_of(dir) {
                 let mins = vec3(
                     (chunk.aabb_min[0] as i32 + ms.ox) as f32,
@@ -291,13 +342,16 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let anim_frame = |frames: u16| ((scene.tick / TILE_ANIM_DIV) % frames as u32) as u16;
 
     let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32| {
-        let Some(page) = terrain_page else { return };
-        let frames = pak.atlases[page as usize].frames;
+        if terrain_page.is_none() {
+            return;
+        }
         for &(slot, ox, oy, chunk) in &visible {
             let m = &chunk.meshes[kind as usize];
             if m.index_count == 0 {
                 continue;
             }
+            let page = slot_page[slot as usize];
+            let frames = pak.atlases[page as usize].frames;
             items.push(Item::ChunkMesh {
                 slot,
                 kind,
@@ -311,6 +365,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                     off_x: ox,
                     off_y: oy,
                     pull,
+                    pal: slot_pal[slot as usize],
                 },
             });
         }
@@ -318,9 +373,10 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
 
     // 2. Terrain, then stamps (terrain sub-meshes; few, uncculled).
     mesh_pass(&mut items, mesh_kind::TERRAIN, 0.0);
-    if let Some(page) = terrain_page {
-        let frames = pak.atlases[page as usize].frames;
+    if terrain_page.is_some() {
         for &(slot, map_id, ox, oy) in &shown_maps {
+            let page = slot_page[slot as usize];
+            let frames = pak.atlases[page as usize].frames;
             for stamp in pak.stamps_of(map_id) {
                 if !scene.stamp_shown(map_id, stamp.cx, stamp.cy) {
                     continue;
@@ -341,6 +397,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                         off_x: ox,
                         off_y: oy,
                         pull: 0.0,
+                        pal: slot_pal[slot as usize],
                     },
                 });
             }
@@ -554,6 +611,78 @@ mod tests {
         // Deterministic: the same scene builds the same list.
         let again = build(&s, &pak);
         assert_eq!(list.items, again.items);
+    }
+
+    #[test]
+    fn vcol_palette_outranks_the_sgb_selection() {
+        let blob = pak::AlignedBlob::from_bytes(&pak::tests::colored_pak_bytes());
+        let pak = pak::read(blob.bytes()).unwrap();
+        let world = pak::tests::COLORED_WORLD_PAL;
+        let obj = pak::tests::COLORED_OBJ_PAL;
+        // The precedence ladder, rung by rung (spec: VXPK_TAG.color).
+        // 1. the item's own VCOL palette wins over everything, including a
+        //    live SGB selection — which is the whole point: the map's roof
+        //    colors must survive the guest's `palette(i)` at map entry.
+        assert_eq!(
+            resolve_pal(&pak, 0, atlas_kind::TERRAIN, world, 0),
+            world as usize
+        );
+        // 2. no item palette -> the page's own page_pal (the sprite page).
+        assert_eq!(
+            resolve_pal(&pak, 1, atlas_kind::SPRITES, COLOR_PAL_NONE, 0),
+            obj as usize,
+            "a sprite sheet's OBJ CLUT also outranks the SGB selection"
+        );
+        // 3. neither -> the SGB selection, for non-ui kinds only.
+        assert_eq!(
+            resolve_pal(&pak, 0, atlas_kind::TERRAIN, COLOR_PAL_NONE, 0),
+            SGB_PAL_BASE
+        );
+        // 4. ui never takes a VCOL palette or an SGB one.
+        assert_eq!(
+            resolve_pal(&pak, 2, atlas_kind::UI, COLOR_PAL_NONE, 0),
+            atlas_kind::UI as usize
+        );
+        // Out-of-range indices are refused, never indexed (untrusted bytes).
+        assert_eq!(
+            resolve_pal(&pak, 0, atlas_kind::TERRAIN, 999, -1),
+            atlas_kind::TERRAIN as usize
+        );
+
+        // The world palette reaches the draw list: every chunk/stamp mesh of
+        // a shown map carries its map's CLUT.
+        let mut s = shown_scene();
+        s.op(op::PALETTE, &[0], None);
+        let list = build(&s, &pak);
+        let meshes: Vec<u16> = list
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::ChunkMesh { mesh, .. } | Item::StampMesh { mesh, .. } => Some(mesh.pal),
+                _ => None,
+            })
+            .collect();
+        assert!(!meshes.is_empty());
+        assert!(
+            meshes.iter().all(|&p| p == world),
+            "every mesh of map 7 binds its world palette"
+        );
+    }
+
+    #[test]
+    fn no_vcol_leaves_every_mesh_on_the_legacy_path() {
+        let blob = pak::AlignedBlob::from_bytes(&pak::tests::tiny_pak_bytes());
+        let pak = pak::read(blob.bytes()).unwrap();
+        let list = build(&shown_scene(), &pak);
+        for item in &list.items {
+            if let Item::ChunkMesh { mesh, .. } | Item::StampMesh { mesh, .. } = item {
+                assert_eq!(mesh.pal, COLOR_PAL_NONE);
+            }
+        }
+        assert_eq!(
+            resolve_pal(&pak, 0, atlas_kind::TERRAIN, COLOR_PAL_NONE, -1),
+            atlas_kind::TERRAIN as usize
+        );
     }
 
     #[test]

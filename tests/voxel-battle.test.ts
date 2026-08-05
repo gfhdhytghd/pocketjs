@@ -422,6 +422,9 @@ class CaptureHost implements VoxelHost {
   gamedata(): ArrayBuffer | null {
     return null;
   }
+  audiodata(): ArrayBuffer | null {
+    return null;
+  }
   stats(): ArrayBuffer | null {
     return null;
   }

@@ -284,7 +284,13 @@ export const EMOTE = {
 //                                          into the pak's SGB set (sampled
 //                                          from VPAL[4 + index]); -1 restores
 //                                          the GB grayscale ramp; ui always
-//                                          keeps the raw ramp
+//                                          keeps the raw ramp. A pak carrying
+//                                          per-tile RED++ color (VXPK_TAG
+//                                          .color) overrides this per map and
+//                                          per page — see that tag's
+//                                          precedence rule. Color is a pak
+//                                          capability, not a guest concern:
+//                                          the wire is unchanged either way
 //   entities
 //     ent(slot, sheet, frame, x, y, lift, flags)   x/y world px Q4; lift px
 //     entHide(slot)
@@ -377,13 +383,21 @@ export const EVENT_CAP = 64;
 // never indexes unchecked.
 
 export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
-/** 2 since the required section set gained AUDI (the chip synth's banks). */
-export const VXPK_VERSION = 2;
+/** 3 since the required section set gained VCOL (the per-tile color bindings). */
+export const VXPK_VERSION = 3;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
 /** The AUDI payload's own header (json_len, program_len, two pad words). */
 export const VXPK_AUDIO_HEADER_SIZE = 16;
+/** The VCOL payload's own header (version, counts, flags, two pad words). */
+export const VXPK_COLOR_HEADER_SIZE = 16;
+/** VCOL payload format version. */
+export const VXPK_COLOR_VERSION = 1;
+/** VCOL flag bit 0: the terrain page carries per-tile RED++ group indices. */
+export const VXPK_COLOR_FLAG_WORLD = 1 << 0;
+/** "no VCOL palette here" — fall through to the legacy binding. */
+export const COLOR_PAL_NONE = 0xffff;
 
 /** Section tags (4CC, LE u32). */
 export const VXPK_TAG = {
@@ -426,6 +440,35 @@ export const VXPK_TAG = {
    * runs silent. See apps/voxelmon/game/audio/banks.ts for the reader.
    */
   audio: 0x49445541, // 'AUDI'
+  /**
+   * Per-tile color bindings — RED++ / pokered-gbc parity, entirely pak-side
+   * (no op, no guest change). The cooker bakes the RED++ palette GROUP into
+   * the terrain texel index (`texel = group * 4 + shade`, 0..31; 0xff stays
+   * transparent) and this section says which VPAL entry each draw resolves
+   * that index through:
+   *
+   *   0  u16 version = VXPK_COLOR_VERSION
+   *   2  u16 map_count      == the CHNK map count
+   *   4  u16 page_count     == the ATLS page count
+   *   6  u16 flags          VXPK_COLOR_FLAG_WORLD when the terrain page is
+   *                         group-baked (so a world_pal is mandatory for
+   *                         every map whose sheet was baked)
+   *   8  u32 pad = 0 | 12 u32 pad = 0
+   *   16 map_count * 8: u32 map_id | u16 world_pal | u16 terrain_page
+   *   .. page_count * 2: u16 page_pal
+   *
+   * Every u16 palette/page index is either COLOR_PAL_NONE or a valid index;
+   * the core range-validates all of them. Map records carry `map_id`
+   * explicitly, so the section is order-independent of the CHNK directory.
+   *
+   * PRECEDENCE, for every textured draw: the item's own VCOL palette (a
+   * chunk/stamp mesh takes its map slot's `world_pal`) wins, else the page's
+   * `page_pal`, else the `palette` op's SGB selection (`VPAL[SGB_PAL_BASE +
+   * i]`, non-ui kinds only), else the page kind's GB grayscale ramp. The ui
+   * kind never takes a VCOL palette. A pak whose VCOL is all COLOR_PAL_NONE
+   * renders exactly as a v2 pak did.
+   */
+  color: 0x4c4f4356, // 'VCOL'
 } as const;
 
 /** Atlas page kinds. */

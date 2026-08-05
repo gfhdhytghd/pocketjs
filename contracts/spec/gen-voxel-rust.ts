@@ -14,6 +14,7 @@ import {
   ARENA_SHAPE,
   ATLAS_KIND,
   BLOCK_PX,
+  COLOR_PAL_NONE,
   BLOCK_TILES,
   CAM_FOCAL,
   CELL_PX,
@@ -73,6 +74,9 @@ import {
   VOX_OP,
   VXPK_ALIGN,
   VXPK_AUDIO_HEADER_SIZE,
+  VXPK_COLOR_FLAG_WORLD,
+  VXPK_COLOR_HEADER_SIZE,
+  VXPK_COLOR_VERSION,
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
@@ -310,6 +314,14 @@ export function generateVoxelRust(): string {
   put(`pub const VXPK_ALIGN: usize = ${VXPK_ALIGN};`);
   put("/// The AUDI payload's own header (json_len, program_len, two pad words).");
   put(`pub const VXPK_AUDIO_HEADER_SIZE: usize = ${VXPK_AUDIO_HEADER_SIZE};`);
+  put("/// The VCOL payload's own header (version, counts, flags, two pad words).");
+  put(`pub const VXPK_COLOR_HEADER_SIZE: usize = ${VXPK_COLOR_HEADER_SIZE};`);
+  put("/// VCOL payload format version.");
+  put(`pub const VXPK_COLOR_VERSION: u16 = ${VXPK_COLOR_VERSION};`);
+  put("/// VCOL flag bit 0: the terrain page carries per-tile RED++ groups.");
+  put(`pub const VXPK_COLOR_FLAG_WORLD: u16 = ${VXPK_COLOR_FLAG_WORLD};`);
+  put('/// "no VCOL palette here" — fall through to the legacy binding.');
+  put(`pub const COLOR_PAL_NONE: u16 = ${hex(COLOR_PAL_NONE, 4)};`);
   put("");
   constMod(put, "tag", "u32", VXPK_TAG, ["Section tags (4CC, LE u32)."]);
   constMod(put, "atlas_kind", "u16", ATLAS_KIND, ["Atlas page kinds."]);

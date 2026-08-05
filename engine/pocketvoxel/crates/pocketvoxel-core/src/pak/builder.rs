@@ -8,7 +8,9 @@
 use alloc::vec::Vec;
 
 use super::{EMOTE_PAGE_NONE, MeshRange, PakVert, swizzle_rows, swizzle_stride};
-use crate::spec::{self, MESH_KINDS, VXPK_ALIGN, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE};
+use crate::spec::{
+    self, COLOR_PAL_NONE, MESH_KINDS, VXPK_ALIGN, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE,
+};
 
 /// One chunk record for [`PakBuilder::map`].
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +74,11 @@ pub struct PakBuilder {
     audio_json: Vec<u8>,
     audio_programs: Vec<u8>,
     emote_page: u32,
+    color_flags: u16,
+    /// map_id -> (world_pal, terrain_page); maps not named here take NONE.
+    color_maps: Vec<(u32, u16, u16)>,
+    /// page -> palette; pages past the end take NONE.
+    color_pages: Vec<u16>,
 }
 
 impl PakBuilder {
@@ -88,7 +95,31 @@ impl PakBuilder {
             audio_json: Vec::new(),
             audio_programs: Vec::new(),
             emote_page: EMOTE_PAGE_NONE,
+            color_flags: 0,
+            color_maps: Vec::new(),
+            color_pages: Vec::new(),
         }
+    }
+
+    /// A VCOL map record: the world CLUT (and terrain page) this map's chunk
+    /// meshes bind. Pass `COLOR_PAL_NONE` for either to keep the legacy path.
+    pub fn map_color(&mut self, map_id: u32, world_pal: u16, terrain_page: u16) {
+        self.color_maps.push((map_id, world_pal, terrain_page));
+    }
+
+    /// A VCOL page record: the CLUT this atlas page binds (sprite OBJ /
+    /// battle pic). Pages left unset take `COLOR_PAL_NONE`.
+    pub fn page_color(&mut self, page: u16, pal: u16) {
+        if self.color_pages.len() <= page as usize {
+            self.color_pages.resize(page as usize + 1, COLOR_PAL_NONE);
+        }
+        self.color_pages[page as usize] = pal;
+    }
+
+    /// VCOL flags (`spec::VXPK_COLOR_FLAG_WORLD` when the terrain page is
+    /// group-baked).
+    pub fn color_flags(&mut self, flags: u16) {
+        self.color_flags = flags;
     }
 
     /// Append a 256-entry ABGR palette. Palette index = atlas kind, so add
@@ -340,9 +371,35 @@ impl PakBuilder {
             audi.extend_from_slice(&self.audio_programs);
         }
 
+        // --- VCOL: 16-byte header, map records, page records ---
+        let mut vcol = Vec::new();
+        vcol.extend_from_slice(&spec::VXPK_COLOR_VERSION.to_le_bytes());
+        vcol.extend_from_slice(&(self.maps.len() as u16).to_le_bytes());
+        vcol.extend_from_slice(&(self.atlases.len() as u16).to_le_bytes());
+        vcol.extend_from_slice(&self.color_flags.to_le_bytes());
+        vcol.extend_from_slice(&0u32.to_le_bytes());
+        vcol.extend_from_slice(&0u32.to_le_bytes());
+        for m in &self.maps {
+            let rec = self.color_maps.iter().find(|(id, _, _)| *id == m.map_id);
+            let (world_pal, terrain_page) =
+                rec.map_or((COLOR_PAL_NONE, COLOR_PAL_NONE), |&(_, w, t)| (w, t));
+            vcol.extend_from_slice(&m.map_id.to_le_bytes());
+            vcol.extend_from_slice(&world_pal.to_le_bytes());
+            vcol.extend_from_slice(&terrain_page.to_le_bytes());
+        }
+        for page in 0..self.atlases.len() {
+            let pal = self
+                .color_pages
+                .get(page)
+                .copied()
+                .unwrap_or(COLOR_PAL_NONE);
+            vcol.extend_from_slice(&pal.to_le_bytes());
+        }
+
         // --- container: ascending tag order, 16-aligned payloads ---
         let mut sections = [
             (spec::tag::META, meta, 1u32),
+            (spec::tag::COLOR, vcol, 1),
             (spec::tag::GAME, self.game.clone(), 1),
             (spec::tag::AUDIO, audi, 1),
             (spec::tag::CHUNKS, chnk, self.maps.len() as u32),

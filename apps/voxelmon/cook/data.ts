@@ -6,10 +6,12 @@
 // (data/voxel_heights.lua) to JSON through a LuaJIT one-shot — the same
 // mechanism the importer's parity path uses.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import type { RedppPack } from "./redpp.ts";
 
 export const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 export const GEN_DIR = join(ROOT, "dist/voxelmon/gen");
@@ -67,10 +69,21 @@ export interface PalettesDef {
   source?: string;
 }
 
+/** One imported sprite record; `source` carries the ROM crosswalk the RED++
+ * OBJ-palette assignment is keyed by ("ROM:SpriteSheetPointerTable[N]"). */
+export interface SpriteDef {
+  id: string;
+  source: string;
+  image: string;
+  frames: number;
+  walker?: boolean;
+}
+
 export interface GenData {
   maps: Record<string, MapDef>;
   tilesets: Record<string, TilesetDef>;
   palettes: PalettesDef;
+  sprites: Record<string, SpriteDef>;
   gfx: Record<string, GfxEntry>;
   gfxBin: Uint8Array;
   font: {
@@ -108,6 +121,7 @@ export function loadGen(genDir = GEN_DIR): GenData {
     maps: readJson(genDir, "maps.json"),
     tilesets: readJson(genDir, "tilesets.json"),
     palettes: readJson(genDir, "palettes.json"),
+    sprites: readJson(genDir, "sprites.json"),
     gfx: readJson(genDir, "gfx.json"),
     gfxBin: new Uint8Array(readFileSync(join(genDir, "gfx.bin"))),
     font: readJson(genDir, "font.json"),
@@ -328,4 +342,53 @@ export function loadProfile(): Profile | null {
   }
   profileCache = JSON.parse(proc.stdout.toString()) as Profile;
   return profileCache;
+}
+
+// ---------------------------------------------------------------------------
+// the RED++ color pack (gen1recomp data/palettes_gbc.lua) via the same
+// LuaJIT one-shot, cached under dist/ — apps/voxelmon/SCHEMA.md §gen/
+// ---------------------------------------------------------------------------
+
+export function gen1recompDir(): string {
+  return process.env.VOXELMON_G1R ?? join(homedir(), "code/gen1recomp");
+}
+
+let redppCache: RedppPack | null | undefined;
+
+/**
+ * Load `data/palettes_gbc.lua` (pokered-gbc-derived, MIT, NOT ROM-derived),
+ * dumped to `gen/palettes_gbc.json` and re-dumped whenever the source is
+ * newer. Returns null — with a printed reason, the `loadProfile` discipline
+ * — when the checkout or luajit is absent; the cooker then omits every
+ * RED++ binding and the pak renders exactly as it does today.
+ */
+export function loadRedpp(genDir = GEN_DIR): RedppPack | null {
+  if (redppCache !== undefined) return redppCache;
+  const path = join(gen1recompDir(), "data/palettes_gbc.lua");
+  const cache = join(genDir, "palettes_gbc.json");
+  if (!existsSync(path)) {
+    console.error(`voxel cook: RED++ color pack not found: ${path} (set VOXELMON_G1R)`);
+    redppCache = null;
+    return null;
+  }
+  const fresh =
+    existsSync(cache) && statSync(cache).mtimeMs >= statSync(path).mtimeMs;
+  if (fresh) {
+    redppCache = JSON.parse(readFileSync(cache, "utf8")) as RedppPack;
+    return redppCache;
+  }
+  if (!Bun.which("luajit")) {
+    console.error("voxel cook: luajit is not installed (needed to read palettes_gbc.lua)");
+    redppCache = null;
+    return null;
+  }
+  const proc = Bun.spawnSync(["luajit", LUA_DUMP, path]);
+  if (proc.exitCode !== 0) {
+    throw new Error(`lua-dump failed for ${path}:\n${proc.stderr.toString()}`);
+  }
+  const json = proc.stdout.toString();
+  mkdirSync(genDir, { recursive: true });
+  writeFileSync(cache, json);
+  redppCache = JSON.parse(json) as RedppPack;
+  return redppCache;
 }

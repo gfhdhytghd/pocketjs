@@ -258,12 +258,20 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 2;
+pub const VXPK_VERSION: u16 = 3;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
 /// The AUDI payload's own header (json_len, program_len, two pad words).
 pub const VXPK_AUDIO_HEADER_SIZE: usize = 16;
+/// The VCOL payload's own header (version, counts, flags, two pad words).
+pub const VXPK_COLOR_HEADER_SIZE: usize = 16;
+/// VCOL payload format version.
+pub const VXPK_COLOR_VERSION: u16 = 1;
+/// VCOL flag bit 0: the terrain page carries per-tile RED++ groups.
+pub const VXPK_COLOR_FLAG_WORLD: u16 = 1;
+/// "no VCOL palette here" — fall through to the legacy binding.
+pub const COLOR_PAL_NONE: u16 = 0xffff;
 
 /// Section tags (4CC, LE u32).
 pub mod tag {
@@ -275,6 +283,7 @@ pub mod tag {
     pub const CHARMAP: u32 = 1346456899;
     pub const GAME: u32 = 1162690887;
     pub const AUDIO: u32 = 1229215041;
+    pub const COLOR: u32 = 1280262998;
 }
 
 /// Atlas page kinds.

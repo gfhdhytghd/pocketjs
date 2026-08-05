@@ -6,15 +6,18 @@
 // 16-aligned swizzled blobs, CHNK header + 12B map dirs + 64B chunk records
 // + 16-aligned vert/index pools, STMP 16B records into the CHNK pools, CMAP
 // ascending u16 pairs, GAME raw JSON, AUDI 16B header + JSON + 16-aligned
-// program banks; section table in ascending numeric tag order, 16-aligned
-// ascending payloads, total_len patched last.
+// program banks, VCOL 16B header + 8B map records + u16 page records;
+// section table in ascending numeric tag order, 16-aligned ascending
+// payloads, total_len patched last.
 
 import {
+  COLOR_PAL_NONE,
   VERTEX_STRIDE,
   VIEW_H,
   VIEW_W,
   VXPK_ALIGN,
   VXPK_AUDIO_HEADER_SIZE,
+  VXPK_COLOR_VERSION,
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
@@ -108,6 +111,16 @@ export interface PakInput {
   audioJson?: Uint8Array;
   audioPrograms?: Uint8Array;
   emotePage: number | null;
+  /**
+   * The VCOL bindings (cook/redpp.ts). Omit for a pak with no RED++ pack:
+   * the section is still written (it is required), with every index
+   * COLOR_PAL_NONE and no flags — which renders exactly as a v2 pak did.
+   */
+  colour?: {
+    maps: { mapId: number; worldPal: number; terrainPage: number }[];
+    pagePal: number[];
+    flags: number;
+  };
 }
 
 export interface PakStats {
@@ -314,9 +327,40 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
     audi.bytes(audioPrograms);
   }
 
+  // --- VCOL: the RED++ color bindings (voxel-spec.ts §VXPK_TAG.color) ---
+  const colour = input.colour ?? {
+    maps: input.maps.map((m) => ({
+      mapId: m.mapId,
+      worldPal: COLOR_PAL_NONE,
+      terrainPage: COLOR_PAL_NONE,
+    })),
+    pagePal: input.pages.map(() => COLOR_PAL_NONE),
+    flags: 0,
+  };
+  if (colour.maps.length !== input.maps.length) {
+    throw new Error("VCOL map record count disagrees with the cooked maps");
+  }
+  if (colour.pagePal.length !== input.pages.length) {
+    throw new Error("VCOL page record count disagrees with the atlas pages");
+  }
+  const vcol = new ByteWriter();
+  vcol.u16(VXPK_COLOR_VERSION);
+  vcol.u16(colour.maps.length);
+  vcol.u16(colour.pagePal.length);
+  vcol.u16(colour.flags);
+  vcol.u32(0);
+  vcol.u32(0);
+  for (const m of colour.maps) {
+    vcol.u32(m.mapId);
+    vcol.u16(m.worldPal);
+    vcol.u16(m.terrainPage);
+  }
+  for (const p of colour.pagePal) vcol.u16(p);
+
   // --- container: ascending tag order, 16-aligned payloads ---
   const sections: [number, string, Uint8Array, number][] = [
     [VXPK_TAG.meta, "META", meta.out(), 1],
+    [VXPK_TAG.color, "VCOL", vcol.out(), 1],
     [VXPK_TAG.game, "GAME", input.gameJson, 1],
     [VXPK_TAG.audio, "AUDI", audi.out(), 1],
     [VXPK_TAG.chunks, "CHNK", chnk.out(), input.maps.length],

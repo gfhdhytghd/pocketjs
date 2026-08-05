@@ -40,13 +40,14 @@ extern crate alloc;
 
 pub mod pool;
 
+use alloc::vec::Vec;
 use core::ffi::c_void;
 
-use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, SKY_BANDS};
+use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, SKY_BANDS, resolve_pal};
 use pocketvoxel_core::draw::modulate_rgb;
 use pocketvoxel_core::math::{Mat4, Vec3, vec3};
 use pocketvoxel_core::pak::{Pak, PakVert, swizzle_stride};
-use pocketvoxel_core::spec::{TILE_PX, VERTEX_STRIDE, VIEW_H, VIEW_W};
+use pocketvoxel_core::spec::{COLOR_PAL_NONE, TILE_PX, VERTEX_STRIDE, VIEW_H, VIEW_W};
 use psp::sys::{
     self, AlphaFunc, BlendFactor, BlendOp, ClearBuffer, ClutPixelFormat, DepthFunc,
     GuPrimitive, GuState, GuTexWrapMode, MipmapLevel, ShadingModel, TextureColorComponent,
@@ -188,18 +189,17 @@ fn pulled(eye: Vec3, pos: Vec3, pull: f32) -> Vec3 {
 // Renderer
 // ---------------------------------------------------------------------------
 
-/// Palette kinds are the CLUT cache key; the pak pins kind < 4 (atlas_kind),
-/// 8 leaves headroom without a heap.
-const MAX_PALS: usize = 8;
-
 pub struct Renderer {
     pool: FramePool,
-    /// Last bound texture: (page, frame, tinted).
-    bound: Option<(u16, u16, bool)>,
-    /// Per-frame pool-staged CLUTs by palette kind: tinted (3D passes,
-    /// the day tint as a CLUT rewrite) and raw (the GB UI layer).
-    tinted_clut: [Option<*const c_void>; MAX_PALS],
-    raw_clut: [Option<*const c_void>; MAX_PALS],
+    /// Last bound texture: (page, frame, tinted, resolved VPAL index).
+    bound: Option<(u16, u16, bool, u16)>,
+    /// Per-frame pool-staged CLUTs by VPAL INDEX (not by kind: RED++ binds
+    /// one CLUT per map and one per sprite sheet, so the cache is as wide as
+    /// VPAL). Tinted = the 3D passes, the day tint as a CLUT rewrite; raw =
+    /// the GB UI layer. Both vectors are allocated once and reused —
+    /// `render` clears them, it never reallocates per frame.
+    tinted_clut: Vec<Option<*const c_void>>,
+    raw_clut: Vec<Option<*const c_void>>,
     tint: u32,
     /// The frame's SGB palette selection (DrawList.palette; -1 = GB ramp).
     palette: i32,
@@ -210,8 +210,8 @@ impl Renderer {
         Self {
             pool: FramePool::new(),
             bound: None,
-            tinted_clut: [None; MAX_PALS],
-            raw_clut: [None; MAX_PALS],
+            tinted_clut: Vec::new(),
+            raw_clut: Vec::new(),
             tint: 0xffff_ffff,
             palette: -1,
         }
@@ -230,8 +230,10 @@ impl Renderer {
     /// have been written back (`writeback`) after loading.
     pub unsafe fn render(&mut self, list: &DrawList, pak: &Pak) {
         self.bound = None;
-        self.tinted_clut = [None; MAX_PALS];
-        self.raw_clut = [None; MAX_PALS];
+        self.tinted_clut.clear();
+        self.tinted_clut.resize(pak.palettes.len(), None);
+        self.raw_clut.clear();
+        self.raw_clut.resize(pak.palettes.len(), None);
         self.palette = list.palette;
         self.tint = list.tint;
 
@@ -316,28 +318,23 @@ impl Renderer {
 
     // -- textures -----------------------------------------------------------
 
-    /// Pool-stage (and write back) the 256-entry CLUT for a palette kind:
-    /// the day tint is a CLUT rewrite (the GB's own trick — raster.rs tints
-    /// its palettes identically via `modulate_rgb`); the UI samples raw.
-    unsafe fn clut_for(&mut self, pak: &Pak, kind: usize, tinted: bool) -> *const c_void {
-        let slot = kind.min(MAX_PALS - 1);
-        let cached = if tinted {
-            self.tinted_clut[slot]
+    /// Pool-stage (and write back) one VPAL entry as a 256-entry CLUT: the
+    /// day tint is a CLUT rewrite (the GB's own trick — raster.rs tints its
+    /// palettes identically via `modulate_rgb`); the UI samples raw. The
+    /// index is already resolved (`draw::resolve_pal`), so this function
+    /// makes no palette policy decision at all — that policy lives once, in
+    /// the core, which is what keeps this backend and the software
+    /// rasterizer binding the same CLUT for the same draw.
+    unsafe fn clut_for(&mut self, pak: &Pak, index: usize, tinted: bool) -> *const c_void {
+        let cache = if tinted {
+            &mut self.tinted_clut
         } else {
-            self.raw_clut[slot]
+            &mut self.raw_clut
         };
-        if let Some(p) = cached {
-            return p;
+        if let Some(Some(p)) = cache.get(index) {
+            return *p;
         }
-        // SGB selection (draw.rs SGB_PAL_BASE): non-ui kinds recolor through
-        // VPAL[4 + palette]; ui always keeps its raw ramp.
-        let sgb = 4usize.wrapping_add(self.palette.max(0) as usize);
-        let pick = if self.palette >= 0 && kind != 2 && sgb < pak.palettes.len() {
-            sgb
-        } else {
-            kind
-        };
-        let src = &pak.palettes[pick];
+        let src = &pak.palettes[index];
         let dst = self.pool.alloc(256 * 4) as *mut u32;
         for (i, &c) in src.iter().enumerate() {
             let c = if tinted { modulate_rgb(c, self.tint) } else { c };
@@ -345,10 +342,13 @@ impl Renderer {
         }
         sys::sceKernelDcacheWritebackRange(dst as *const c_void, 256 * 4);
         let p = dst as *const c_void;
-        if tinted {
-            self.tinted_clut[slot] = Some(p);
+        let cache = if tinted {
+            &mut self.tinted_clut
         } else {
-            self.raw_clut[slot] = Some(p);
+            &mut self.raw_clut
+        };
+        if let Some(slot) = cache.get_mut(index) {
+            *slot = Some(p);
         }
         p
     }
@@ -358,14 +358,21 @@ impl Renderer {
     /// the po2 envelope with `sceGuTexScale` bridging the pak's
     /// actual-size-normalized UVs (3D pipe only; TRANSFORM_2D raw-texel UVs
     /// bypass the scale, which is exactly right for the UI pass).
-    unsafe fn bind(&mut self, pak: &Pak, page_idx: u16, frame: u16, tinted: bool) {
-        if self.bound == Some((page_idx, frame, tinted)) {
-            return;
-        }
+    ///
+    /// `pal` is the draw's own VCOL palette (`COLOR_PAL_NONE` for anything
+    /// that has none); the core resolves the rest of the precedence ladder.
+    /// It joins the cache key because one page now draws through several
+    /// CLUTs in a frame — Pallet Town and Route 1 share the terrain page and
+    /// differ only in their roof colors.
+    unsafe fn bind(&mut self, pak: &Pak, page_idx: u16, frame: u16, tinted: bool, pal: u16) {
         let Some(page) = pak.atlases.get(page_idx as usize) else {
             return;
         };
-        let clut = self.clut_for(pak, page.kind as usize, tinted);
+        let index = resolve_pal(pak, page_idx, page.kind, pal, self.palette) as u16;
+        if self.bound == Some((page_idx, frame, tinted, index)) {
+            return;
+        }
+        let clut = self.clut_for(pak, index as usize, tinted);
         sys::sceGuClutMode(ClutPixelFormat::Psm8888, 0, 0xff, 0);
         sys::sceGuClutLoad(32, clut);
         let (w, h) = (page.w as i32, page.h as i32);
@@ -386,7 +393,7 @@ impl Renderer {
         sys::sceGuTexFlush();
         sys::sceGuTexScale(w as f32 / pw as f32, h as f32 / ph as f32);
         sys::sceGuTexOffset(0.0, 0.0);
-        self.bound = Some((page_idx, frame, tinted));
+        self.bound = Some((page_idx, frame, tinted, index));
     }
 
     // -- item passes --------------------------------------------------------
@@ -461,7 +468,7 @@ impl Renderer {
         // order), so a single sceGuFrontFace cannot be right for all of
         // them. The honest fix is geometric: drop fully-occluded faces at
         // COOK time, where each face's neighbours are known.
-        self.bind(pak, m.page, m.frame, true);
+        self.bind(pak, m.page, m.frame, true, m.pal);
 
         // Splice this mesh's u16 index range through the pool (pak indices
         // are relative to vert_base — GE batch style, validated < vert_count
@@ -601,7 +608,9 @@ impl Renderer {
         sys::sceGuEnable(GuState::Texture2D);
         sys::sceGuEnable(GuState::AlphaTest);
         sys::sceGuDisable(GuState::Blend);
-        self.bind(pak, page, 0, true);
+        // A card carries no per-item palette: its OBJ/pic CLUT is a
+        // property of the PAGE, which `bind` resolves through VCOL.
+        self.bind(pak, page, 0, true, COLOR_PAL_NONE);
 
         let (u0, u1) = if mirror { (uv[2], uv[0]) } else { (uv[0], uv[2]) };
         let (v0, v1) = (uv[1], uv[3]);
@@ -671,7 +680,7 @@ impl Renderer {
         sys::sceGuEnable(GuState::Texture2D);
         sys::sceGuEnable(GuState::AlphaTest);
         sys::sceGuDisable(GuState::Blend);
-        self.bind(pak, page, 0, false);
+        self.bind(pak, page, 0, false, COLOR_PAL_NONE);
 
         let cols = ((p.w as i32 / TILE_PX) as u16).max(1);
         let dst = self.pool.alloc(n * 2 * core::mem::size_of::<Vert2dTc>()) as *mut Vert2dTc;

@@ -210,7 +210,10 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   battleRng: Rng;
   save!: GameSave;
   overworld!: Overworld;
-  /** Music, SFX and cries. Silent until setAudio() hands it the pak banks. */
+  /** Music, SFX and cries. Silent until a caller hands it real banks —
+   *  setAudio(banks) on the Bun transport, setAudioFromPak() on a host that
+   *  can afford the synth. A director with no banks returns on its first
+   *  line every tick and never opens a host stream. */
   audio = new AudioDirector(null);
   private stack: GameState[] = [];
   private scene: Scene;
@@ -233,14 +236,31 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   }
 
   /**
-   * Install the chip synth's program banks. Emits the `audiodata` op on
-   * EVERY host, so the recorded trace matches what a device run replays;
-   * pass `banks` on the Bun transport (gen/audio.json + programs.bin), or
-   * null to take the pak's AUDIO section from the op's answer.
+   * Install the chip synth's program banks — `null` means NO banks, which is
+   * total silence: the director returns on the first line of every tick and
+   * never opens a host stream. Pass real banks on the Bun transport
+   * (gen/audio.json + programs.bin); `setAudioFromPak()` is the device path.
+   *
+   * The `audiodata` op fires either way, on EVERY host, so a recorded trace
+   * carries the same op stream a device run replays (SCHEMA.md ".vtrace").
+   * Only setAudioFromPak() reads the answer.
    */
   setAudio(banks: AudioBanks | null, rate = AUDIO_RATE): void {
-    const bytes = this.host.audiodata();
-    this.audio = new AudioDirector(banks ?? fromSection(bytes), { rate });
+    void this.host.audiodata();
+    this.audio = new AudioDirector(banks, { rate });
+  }
+
+  /**
+   * Load the chip synth's banks from the pak's AUDIO section, over the
+   * `audiodata` op — the device transport. A pak cooked without audio
+   * answers null and the director stays silent (banks.ts fromSection).
+   *
+   * This is the ONE switch that turns device audio on; psp-main.ts documents
+   * why it is not the default (the interpreted synth cannot reach realtime on
+   * a PSP, docs/VOXEL.md §8).
+   */
+  setAudioFromPak(rate = AUDIO_RATE): void {
+    this.audio = new AudioDirector(fromSection(this.host.audiodata()), { rate });
   }
 
   /**

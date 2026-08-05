@@ -38,6 +38,11 @@ pocketvoxel-gu = { path = "../pocketvoxel-gu" }
 # tick (VOXEL_CAP_MARKS) to ms0:/vox_cap. Never in a normal build.
 capture = []
 
+# Per-300-frame work/frame/gc timing appended to host0:/voxperf.txt. Dev-only
+# scaffolding: a memory-stick launch has no host0:, where the open fails but
+# the formatting cost is still paid, so a shipped build leaves it out.
+telemetry = []
+
 [[bin]]
 name = "pocketvoxel-psp"
 path = "src/main.rs"

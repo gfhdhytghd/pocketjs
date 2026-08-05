@@ -16,6 +16,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { AUDIO_RING_FRAMES, audioFramesForTick } from "../contracts/spec/audio.ts";
+import {
+  VOX_OP,
+  VXPK_ALIGN,
+  VXPK_AUDIO_HEADER_SIZE,
+} from "../contracts/spec/voxel-spec.ts";
 import { decodeWav } from "../framework/src/audio-api.ts";
 import { AudioDirector, type AudioOps } from "../apps/voxelmon/game/audio/music.ts";
 import {
@@ -541,6 +546,70 @@ class VirtualAudio implements AudioOps {
   }
 }
 
+/**
+ * hosts/psp/src/audio_mod.rs, modelled: absolute ring cursors, a mixer that
+ * consumes on its own clock, and poll() emitting a credit ONLY when the free
+ * count drifted from the last value the guest saw (LAST_FREE). `mirrorFixed`
+ * selects whether write_pcm subtracts what it accepted from that mirror.
+ *
+ * With `mirrorFixed` false and a mixer that empties the ring between two
+ * polls — which is what a 9 fps guest gets — free reads RING_FRAMES on both
+ * sides of the write, no credit is ever sent, and the guest's own mirror
+ * decays by everything it writes until `want` hits zero and it stops feeding.
+ */
+class PspCreditModel implements AudioOps {
+  rate = 0;
+  playing = false;
+  write = 0;
+  read = 0;
+  lastFree = AUDIO_RING_FRAMES;
+  framesWritten = 0;
+  credits = 0;
+  constructor(readonly mirrorFixed: boolean) {}
+
+  createStream(sampleRate: number): number {
+    this.rate = sampleRate;
+    this.lastFree = AUDIO_RING_FRAMES;
+    return 7;
+  }
+  destroyStream(): void {}
+  writePcm(handle: number, pcm: ArrayBuffer): number {
+    if (handle !== 7) return 0;
+    const frames = new Int16Array(pcm).length / 2;
+    const queued = this.write - this.read;
+    const n = Math.min(frames, AUDIO_RING_FRAMES - Math.min(queued, AUDIO_RING_FRAMES));
+    this.write += n;
+    this.framesWritten += n;
+    if (this.mirrorFixed) this.lastFree = Math.max(0, this.lastFree - n);
+    return n;
+  }
+  play(): void {
+    this.playing = true;
+  }
+  pause(): void {
+    this.playing = false;
+  }
+  stop(): void {
+    this.playing = false;
+    this.read = this.write;
+  }
+  setVolume(): void {}
+  endStream(): void {}
+  poll(): string | undefined {
+    const queued = this.write - this.read;
+    const free = AUDIO_RING_FRAMES - Math.min(queued, AUDIO_RING_FRAMES);
+    if (free === this.lastFree) return undefined;
+    this.lastFree = free;
+    this.credits += 1;
+    return JSON.stringify({ t: "credit", h: 7, free });
+  }
+  /** The mixer, at a frame rate so far under realtime that it empties the
+   *  ring every time — the regime the device is actually in. */
+  drain(): void {
+    if (this.playing) this.read = this.write;
+  }
+}
+
 async function withAudio<T>(mod: AudioOps | null, body: () => T | Promise<T>): Promise<T> {
   const g = globalThis as { audio?: unknown };
   const had = "audio" in g;
@@ -620,6 +689,52 @@ describe("AudioDirector", () => {
     });
   });
 
+  test("a fully-draining mixer keeps feeding the guest through the credit mirror", async () => {
+    const host = new PspCreditModel(true);
+    await withAudio(host, () => {
+      const d = new AudioDirector(banks(), { rate: 11025 });
+      d.startMap("TEST_MAP");
+      let previous = 0;
+      const wrote: number[] = [];
+      for (let i = 0; i < 200; i++) {
+        d.tick();
+        wrote.push(host.framesWritten - previous);
+        previous = host.framesWritten;
+        host.drain();
+      }
+      // every tick past the first still feeds: the mirror never decays
+      for (let i = 1; i < wrote.length; i++) expect(wrote[i]).toBeGreaterThan(0);
+      expect(host.credits).toBeGreaterThan(100);
+    });
+  });
+
+  test("without the write-side mirror update the same run starves and stops", async () => {
+    // The bug hosts/psp/src/audio_mod.rs write_pcm now guards against, pinned
+    // so the guard cannot be removed silently: credits stop, the guest's own
+    // free mirror decays by everything it writes, and `want` reaches zero.
+    const host = new PspCreditModel(false);
+    await withAudio(host, () => {
+      const d = new AudioDirector(banks(), { rate: 11025 });
+      d.startMap("TEST_MAP");
+      for (let i = 0; i < 120; i++) {
+        d.tick();
+        host.drain();
+      }
+      // the exact signature: not one credit ever arrived, so the guest spent
+      // its initial mirror down to zero and wrote exactly one ring's worth of
+      // audio in its whole life — about 1.5 s at 11.025 kHz
+      expect(host.credits).toBe(0);
+      expect(host.framesWritten).toBe(AUDIO_RING_FRAMES);
+      const before = host.framesWritten;
+      for (let i = 0; i < 120; i++) {
+        d.tick();
+        host.drain();
+      }
+      expect(host.framesWritten).toBe(before); // dead, and silently so
+      expect(d.playing).toBe("TEST"); // the policy layer never notices
+    });
+  });
+
   test("map -> battle -> back is three song changes, and a repeat is none", async () => {
     const host = new VirtualAudio();
     await withAudio(host, () => {
@@ -680,7 +795,88 @@ describe("AudioDirector", () => {
 // Layer 4 — the whole game, ROM banks, a virtual audio clock
 // ---------------------------------------------------------------------------
 
+/**
+ * The pak's AUDI section, laid out exactly as apps/voxelmon/cook/pak.ts
+ * writes it (SCHEMA.md): u32 jsonLen, u32 programLen, the manifest JSON at
+ * VXPK_AUDIO_HEADER_SIZE, the banks at the next VXPK_ALIGN boundary. This is
+ * the byte shape the `audiodata` op hands the guest on device.
+ */
+function audiSection(json: Uint8Array, programs: Uint8Array): ArrayBuffer {
+  const programsOff =
+    Math.ceil((VXPK_AUDIO_HEADER_SIZE + json.length) / VXPK_ALIGN) * VXPK_ALIGN;
+  const out = new Uint8Array(programsOff + programs.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, json.length, true);
+  view.setUint32(4, programs.length, true);
+  out.set(json, VXPK_AUDIO_HEADER_SIZE);
+  out.set(programs, programsOff);
+  return out.buffer;
+}
+
+/** A RecorderHost that answers the `audiodata` op like the device does. */
+class PakAudioHost extends RecorderHost {
+  constructor(private readonly section: ArrayBuffer) {
+    super();
+  }
+  override audiodata(): ArrayBuffer | null {
+    super.audiodata(); // record the op; the answer is this host's business
+    return this.section;
+  }
+}
+
 describe.skipIf(!hasAudio)("voxelmon with audio mounted", () => {
+  test("setAudio(null) is SILENCE, with the audio module mounted", async () => {
+    // The reported device symptom: the EBOOT played Music_PalletTown from
+    // tick 0 in the bedroom because `null` used to mean "load the banks from
+    // the pak". `null` means no banks; the audiodata op still fires so the
+    // recorded trace matches a device run.
+    const data = await loadRuntimeData(genDir);
+    const host = new PspCreditModel(true);
+    await withAudio(host, () => {
+      const recorder = new RecorderHost();
+      const game = new VoxelmonGame(data, recorder, 17);
+      game.setAudio(null);
+      game.newGame();
+      for (let i = 0; i < 200; i++) {
+        game.tick(0);
+        host.drain();
+      }
+      expect(game.audio.live).toBe(false);
+      expect(game.audio.playing).toBeNull();
+      // nothing crossed to the host: no stream, no PCM, no play()
+      expect(host.rate).toBe(0);
+      expect(host.framesWritten).toBe(0);
+      expect(host.playing).toBe(false);
+      // ...and the op stream is unchanged — `audiodata` still fired
+      expect(recorder.text().split("\n")).toContain(`o ${VOX_OP.audiodata}`);
+    });
+  }, 30_000);
+
+  test("setAudioFromPak() loads the AUDI section and starts the map theme", async () => {
+    // The switch psp-main.ts documents: the pak path still works end to end,
+    // over the same bytes the device's `audiodata` op hands over.
+    const data = await loadRuntimeData(genDir);
+    const banks = await fromGenDir(genDir);
+    const section = audiSection(
+      new Uint8Array(await Bun.file(join(genDir, "audio.json")).arrayBuffer()),
+      new Uint8Array(await Bun.file(join(genDir, "programs.bin")).arrayBuffer()),
+    );
+    const host = new VirtualAudio();
+    await withAudio(host, () => {
+      const game = new VoxelmonGame(data, new PakAudioHost(section), 17);
+      game.setAudioFromPak();
+      game.newGame();
+      for (let i = 0; i < 30; i++) {
+        game.tick(0);
+        host.advance();
+      }
+      expect(game.audio.live).toBe(true);
+      expect(game.audio.playing).toBe(banks!.manifest.mapSongs.REDS_HOUSE_2F);
+      expect(host.framesWritten).toBeGreaterThan(0);
+      expect(host.peak).toBeGreaterThan(AUDIBLE);
+    });
+  }, 30_000);
+
   test("the battle tape's route plays map, battle and restored themes", async () => {
     const data = await loadRuntimeData(genDir);
     const banks = await fromGenDir(genDir);

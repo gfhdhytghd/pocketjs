@@ -40,6 +40,16 @@ resolves them from `VOXELMON_G1R` (default `~/code/gen1recomp`) and
   importer is driven by. The importer is **manifest-driven, not
   offset-hardcoded**; we consume that manifest verbatim rather than
   transcribing a megabyte of addresses.
+- the same checkout supplies `data/palettes_gbc.lua` — the RED++ colour
+  pack: 239 named SuperPalettes, 151 species→name entries, and the
+  `world` table (per-tileset tile→palette-group vectors, per-group colours,
+  the per-town roof pairs, 8 OBJ palettes and their ROM-picture-id
+  assignment). It is **pokered-gbc-derived, not ROM-derived**: Pokémon Red
+  ships no CGB code, so **there is no `CGBBasePalettes` for Red at all** —
+  every colour in this file comes from the pokered-gbc source tree, and
+  gen1recomp commits the generated table under its own MIT licence. It
+  converts at cook time exactly like the VoxelMod tables, into git-ignored
+  `dist/voxelmon/gen/palettes_gbc.json`.
 - the VoxelMod checkout supplies `data/voxel_heights.lua` (tile class
   profiles, 55 building templates) and `data/battle_arenas.lua` (94 authored
   arena entries), converted at cook time.
@@ -99,6 +109,11 @@ tick: `frame(buttons)`, exactly once.
   up to 16 entity billboards, removable stamps, emotes, the battle stage, and
   a retained GB UI tile grid (20×18) with a reveal counter for typewriter
   text;
+- resolves every textured draw's CLUT through one function,
+  `draw::resolve_pal` — the pak's per-map world palette, then the page's own
+  palette, then the `palette` op's SGB selection, then the page kind's GB
+  ramp. Both backends call it, so the software rasterizer and the GE can
+  never bind different colours for the same draw;
 - builds one ordered draw list per frame. Draw order (from the mod, minus
   shader-bound passes): sky bands → terrain chunks → water (flat, animated
   atlas) → shadow decals → player ghost (inverted depth, no write) → entity
@@ -116,7 +131,13 @@ drift guard — the `mon-spec.ts` discipline unchanged. Op groups:
 - **world** — `mapShow(slot, mapId, ox, oy)` / `mapHide(slot)` (slot 0 =
   current, 1..4 = connected neighbours at their seam offsets), `cam(x, y)`,
   `pitch(rung)`, `tint(abgr)`, `stamp(mapId, cx, cy, on)` (cut tree, moved
-  boulder — pre-cooked removable sub-meshes toggled at runtime).
+  boulder — pre-cooked removable sub-meshes toggled at runtime),
+  `palette(index)` (the SGB SuperPalette for the map, index into the pak's
+  SGB set). On a pak cooked with the RED++ pack the per-map and per-page
+  bindings in the `VCOL` section outrank `palette(index)` entirely, and
+  **the guest emits the identical op stream either way** — no op, no flag
+  and no gamedata field differs between the two colour models. Which model
+  a build uses is decided by the cook, not by the guest.
 - **entities** — `ent(slot, sheet, frame, x, y, lift, flags)`, `entHide`,
   `emote(slot, kind)`. Billboards lean back by camera pitch and pull toward
   the eye along each vertex's own ray — the mod's projection-invariant depth
@@ -171,10 +192,50 @@ instead of every session on the handheld:
 4. pack atlases as pre-swizzled CLUT8 — one terrain atlas copy per animation
    frame (water, flowers), so tile animation on device is a texture bind, not
    a texel write; day tint is a CLUT rewrite, the GB's own trick;
-5. write `dist/voxelmon/voxelmon.vxpak` (MONPAK-style container: magic,
+5. bake RED++ colour into the terrain page and resolve the bindings
+   (`cook/redpp.ts`, below);
+6. write `dist/voxelmon/voxelmon.vxpak` (MONPAK-style container: magic,
    section table, 16-byte alignment, validated zero-copy reader in the core)
-   including the GAME section the guest reads at boot and the AUDI section
-   carrying `audio.json` + `programs.bin` verbatim.
+   including the GAME section the guest reads at boot, the AUDI section
+   carrying `audio.json` + `programs.bin` verbatim, and the VCOL section
+   naming each map's and each page's CLUT.
+
+### Per-tile colour (RED++ / pokered-gbc)
+
+pokered-gbc assigns one of **8 four-colour palettes to every tile GRAPHIC
+id** of a tileset — by tile id, not by map position — and swaps only the
+ROOF slot per town. gen1recomp's ADVANCED mode CPU-recolours the whole
+tileset atlas per map from that data. We reach the same colours without
+recolouring anything, by moving the group into the texel index:
+
+```
+texel = group * 4 + shade     // 0..31
+0xff  = transparent           // unchanged
+```
+
+8 groups × 4 shades = **32 of the CLUT's 256 entries**, and a tileset's
+whole RED++ colour set is 18–20 distinct colours (measured), so the entire
+per-tile assignment fits inside the byte the page already stored: **zero
+delta in page dimensions, texel count, texture format, fill rate, vertex
+count, draw calls and guest ops**. The CLUT bound for a chunk mesh becomes
+the shown map's world palette, so Pallet Town's white roofs and Viridian's
+green roofs share one terrain page and cost one CLUT load each. The runtime
+cost is a few extra 1 KB pool-staged CLUTs per frame.
+
+The roof swap replaces **only colours 1 and 2** of the ROOF group;
+colour 0 (sky through the gaps) and colour 3 (outline black) keep the
+tileset's own base, exactly as `LoadTownPalette` writes
+`W2_BgPaletteData + $32`. Sprites take one of 8 OBJ palettes keyed by ROM
+picture id, and battle pics take their species' named palette — both
+per-page bindings the backends resolve at bind time, so no entity op
+changes. **v1 measures 3 world CLUTs, 4 OBJ and 10 pic over the seven
+cooked maps: +17 KB of VPAL and 824 bytes of VCOL on a 13.9 MB pak.**
+
+Parity is claimed **at the CLUT, not at the framebuffer**: our terrain
+modulates the CLUT colour by baked AO × face shade, so no pixel can match a
+flat 2D reference. `tests/voxel-cook.test.ts` runs gen1recomp's own
+`PaletteFX.worldGroupAt`/`worldGroupColors` under LuaJIT and compares all
+2688 resolved colours (7 maps × 96 tile ids × 4 shades) against the cook.
 
 ## 6. What renders on PSP, and what deliberately does not
 
@@ -207,6 +268,37 @@ pull-displaced mesh re-stages through the pak's own 20-byte format), and
 **CLUT8 atlas pages must be at least 64 px wide** (a 16-px-wide sprite
 sheet missamples into vertical-strip noise; the cooker pads sprite and
 emote pages and the card U normalizes by page width).
+
+### What per-tile colour does NOT reproduce in v1
+
+Every item here is a deliberate limit with a stated reason:
+
+- **The GB UI, menus, textboxes and the battle screen stay grayscale.**
+  RED++ colours them through named SuperPalettes over SGB zones, which needs
+  a `uiPal(x, y, w, h, pal)` op — a new op, so a new spec round. HP-bar
+  colour by fill (`GetHealthBarColor`) waits on the same op.
+- **Dark caves.** `wMapPalOffset`/`FadePal2` shifts the palettes feeding the
+  bake, not a shader. v1's seven maps contain no dark map.
+- **The Celadon Mart tile exceptions and the `$37 → $5a` alias tiles.** v1
+  bakes ONE terrain page shared by every map, so a per-map tile-id exception
+  cannot apply; `cook/redpp.ts` carries the reference's tables and the
+  cooker **refuses to cook** a map that needs one rather than mis-colouring
+  it silently.
+- **The Route 6 / Saffron roof y-split.** The reference's own atlas path
+  skips it too, so skipping it *is* parity with RED++ as implemented.
+- **Per-NPC `"random"` sprite palettes.** The reference resolves the
+  `"random"` sentinel from a stable per-instance seed; the CLUT here belongs
+  to the sprite PAGE, so v1 resolves it once per sheet at cook time (seeded
+  by the sheet key, through the reference's own `h = h*31 + byte` hash).
+  Individual NPCs may therefore draw a different one of the four colours
+  than gen1recomp does on the same map.
+- **Per-tileset terrain page splitting.** Two tilesets may share a sheet only
+  if their 96-entry group vectors agree — 0 of v1's 4 sheets disagree, 2 of
+  the whole game's 19 do (`gate.png`, `pokecenter.png`). A disagreement is a
+  cook-time error; the VCOL map record already reserves a `terrain_page`
+  field so the splitter lands without a format change.
+- **No user-facing colour mode.** The pak carries one colour model; changing
+  it is a re-cook, not a toggle.
 
 ## 7. Determinism and verification
 
@@ -260,6 +352,18 @@ frame budget, and it mirrors its free-frame credit rather than querying. The
 tap opens only after the first write lands, so a track change never opens on
 an empty ring.
 
+On PSP hardware the synth does not fit the clock. Measured on device, one PCM
+frame of the four-channel interpreter costs **~0.21 ms**, so 11.025 kHz needs
+**~2.3 seconds of CPU per second of audio** — the guest can never reach the
+ring's lead, `want` pins at the three-tick catch-up cap on every tick, and the
+frame collapses to ~9 fps while the music plays slow and gapped. The device
+guest therefore constructs the director with **no banks**
+(`psp-main.ts`: `game.setAudio(null)`), which is total silence and a tick that
+costs nothing; `setAudioFromPak()` is the switch, kept for the Bun transport
+and for whenever the synth is not interpreted. The Bun sim and the goldens
+were always silent — they mount no `globalThis.audio` — so nothing about
+`tools/voxel.ts wav`, the audio tests, or the recorded traces changes.
+
 The synth runs at **11.025 kHz** stereo (`AUDIO_RATE` in `game.ts`) — every
 `AUDIO_RATES` value divides 44.1 kHz exactly, so the host resamples with
 integer math, and the highest note the ROM's pitch table reaches (~2 kHz)
@@ -303,9 +407,14 @@ battle screen composited over it. One tape drives Bun, the Rust rasterizer
 (committed hash goldens: 11 story + 4 battle marks) and the PSP capture
 EBOOT. Sound is the ROM's own channel programs, interpreted and rendered to
 PCM guest-side (`game/audio/`): map themes, the wild-battle and victory
-themes, the textbox beep and species cries.
+themes, the textbox beep and species cries. Colour is RED++ / pokered-gbc
+**per tile**, baked into the terrain texel index and bound per map (§5),
+oracle-checked against the reference's own `PaletteFX`; the GB UI layer
+stays grayscale.
 
-Later rungs, in dependency order: pak slimming for the PSP-1000's 24 MB
+Later rungs, in dependency order: the GB UI colour layer (a `uiPal` op — the
+one piece of RED++ parity that needs a new op); pak slimming for the
+PSP-1000's 24 MB
 (stamp instancing over the tree-wall boxes; per-map streaming); the arena
 clearance walk (needs cook-time heights in gamedata) and the authored arena
 table; the full script verb set and story flags; trainer battles + AI

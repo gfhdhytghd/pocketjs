@@ -13,7 +13,6 @@
 // gamedata.json — the GAME section verbatim), so a Bun run records exactly
 // what this entry replays on device.
 
-import { fromSection } from "./audio/banks.ts";
 import { fromObject } from "./data.ts";
 import { VoxelmonGame } from "./game.ts";
 import type { VoxelHost } from "./host.ts";
@@ -72,8 +71,9 @@ class QuickJsHost implements VoxelHost {
     return null;
   }
   audiodata(): ArrayBuffer | null {
-    // One cold read at boot, like gamedata(); undefined = a pak without
-    // audio, which the director takes as "run silent".
+    // One cold read at boot, like gamedata(). The boot path below discards
+    // the answer (audio is off on device, see the note there); only
+    // setAudioFromPak() decodes it. undefined = a pak cooked without audio.
     return native.audiodata ? (native.audiodata() ?? null) : null;
   }
   stats(): ArrayBuffer | null {
@@ -160,16 +160,23 @@ class QuickJsHost implements VoxelHost {
 const host = new QuickJsHost();
 const source = JSON.parse(native.gamedata()) as Record<string, unknown>;
 const game = new VoxelmonGame(fromObject(source), host, SEED);
-// The chip synth's banks ride in the pak's AUDI section, read once through
-// the `audiodata` op; a pak without one leaves the director silent and the
-// rest of the game unchanged.
-// TEMPORARILY OFF on device: the guest-side chip synth runs inside the
-// tick, and its real cost on QuickJS/MIPS has never been measured (the Bun
-// figure is 35-52 us/tick; the interpreter is 50-100x slower). Enabling it
-// visibly stuttered the frame on hardware, so the director stays silent
-// until the per-tick synthesis cost is measured and budgeted.
+// AUDIO IS OFF ON DEVICE, and `null` is what turns it off: the director is
+// built with no banks, so its tick returns on the first line and it never
+// opens a host stream. The `audiodata` op still fires, so this run's op
+// stream matches the recorded .vtrace.
+//
+// The cost was measured, not guessed: one PCM frame of the four-channel
+// interpreter costs ~0.21 ms on this MIPS part, so 11.025 kHz needs ~2.3
+// seconds of CPU per second of audio. The guest can never reach the ring's
+// lead, `want` pins at the three-tick catch-up cap (552 frames) on every
+// tick, and the frame collapses to ~9 fps while the music plays slow and
+// gapped. Device playback is arithmetically out of reach for an interpreted
+// synth, not merely over budget.
+//
+// THE SWITCH: replace this line with `game.setAudioFromPak();` to A/B it on
+// hardware — that loads the pak's AUDI banks and starts the map theme, which
+// is exactly what shipped before this was fixed.
 game.setAudio(null);
-void fromSection;
 game.newGame();
 
 (globalThis as unknown as { frame: (buttons: number) => void }).frame = (
