@@ -131,6 +131,10 @@ pub struct Scene {
     pub pitch_t: u32,
     /// Global day tint, ABGR (0xffffffff = neutral).
     pub tint: u32,
+    /// Selected SGB palette: index into the pak's SGB set (VPAL[4 + i]) for
+    /// the non-ui atlas kinds; -1 = the GB grayscale ramp (voxel-spec.ts
+    /// `palette`).
+    pub palette: i32,
     /// Stamps toggled OFF: (map_id, cx, cy). Stamps default to shown.
     pub stamps_off: Vec<(u32, i16, i16)>,
     pub ents: [Ent; ENTS_MAX],
@@ -157,6 +161,7 @@ impl Scene {
             pitch_from_deg: PITCH_RUNGS[0],
             pitch_t: PITCH_TWEEN_TICKS, // settled at rung 0
             tint: 0xffff_ffff,
+            palette: -1,
             stamps_off: Vec::new(),
             ents: [Ent::default(); ENTS_MAX],
             ui: [0u16; UI_COLS * UI_ROWS],
@@ -255,6 +260,11 @@ impl Scene {
                 }
             }
             op::TINT => self.tint = a(0) as u32,
+            op::PALETTE => {
+                if !args.is_empty() {
+                    self.palette = a(0);
+                }
+            }
             op::STAMP => {
                 if args.len() >= 4 {
                     let key = (a(0) as u32, a(1) as i16, a(2) as i16);
@@ -417,6 +427,15 @@ mod tests {
         s.op(op::TINT, &[0x40ff8040u32 as i32], None);
         assert_eq!(s.tint, 0x40ff8040);
 
+        assert_eq!(s.palette, -1, "boot palette is the GB grayscale ramp");
+        s.op(op::PALETTE, &[3], None);
+        assert_eq!(s.palette, 3);
+        s.op(op::PALETTE, &[-1], None);
+        assert_eq!(s.palette, -1);
+        s.op(op::PALETTE, &[5], None);
+        s.op(op::PALETTE, &[], None);
+        assert_eq!(s.palette, 5, "malformed palette op is a no-op");
+
         s.op(op::STAMP, &[7, 3, 4, 0], None);
         assert!(!s.stamp_shown(7, 3, 4));
         assert!(s.stamp_shown(7, 3, 5));
@@ -501,9 +520,11 @@ mod tests {
         assert_eq!(u32::from_le_bytes(stats[0..4].try_into().unwrap()), s.tick);
         assert_eq!(s.op(op::GAMEDATA, &[], None), OpResult::Gamedata);
 
+        s.op(op::PALETTE, &[7], None);
         s.op(op::RESET, &[], None);
         assert_eq!(s.cam_x, 0);
         assert_eq!(s.tick, 0);
+        assert_eq!(s.palette, -1, "reset restores the grayscale ramp");
     }
 
     fn featured_px(px: i32) -> i32 {

@@ -32,6 +32,7 @@ interface VoxelNative {
   pitch(rung: number): void;
   tint(abgr: number): void;
   stamp(mapId: number, cx: number, cy: number, on: number): void;
+  palette(index: number): void;
   ent(
     slot: number,
     sheet: number,
@@ -92,6 +93,9 @@ class QuickJsHost implements VoxelHost {
   }
   stamp(mapId: number, cx: number, cy: number, on: number): void {
     native.stamp(mapId, cx, cy, on);
+  }
+  palette(index: number): void {
+    native.palette(index);
   }
   ent(
     slot: number,

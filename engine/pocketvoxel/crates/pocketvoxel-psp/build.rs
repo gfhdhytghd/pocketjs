@@ -27,7 +27,7 @@ fn main() {
     fs::write(Path::new(&out_dir).join("game.js"), js).unwrap();
     println!("cargo:rerun-if-env-changed=VOXELMON_JS");
 
-    for var in ["VOXEL_CAP_INPUT", "VOXEL_CAP_MARKS"] {
+    for var in ["VOXEL_CAP_INPUT", "VOXEL_CAP_MARKS", "VOXEL_CAP_DUMP"] {
         println!("cargo:rustc-env={var}={}", env::var(var).unwrap_or_default());
         println!("cargo:rerun-if-env-changed={var}");
     }

@@ -34,9 +34,13 @@
 //!   0  u16 count
 //!   2  count * 1024 bytes: 256 u32 ABGR entries per palette, packed
 //!      immediately after the u16 (byte-wise reads; parsed into alloc).
-//!   An atlas page samples the palette indexed by its `kind` (ATLAS_KIND),
-//!   so `count` must exceed every page kind — the day-tint CLUT rewrite is
-//!   one palette per art family, the GB's own trick.
+//!   The list is the 4 ATLAS_KIND default (GB grayscale) palettes followed
+//!   by the SGB set (`count` may exceed 4). By default an atlas page samples
+//!   the palette indexed by its `kind` (ATLAS_KIND), so `count` must exceed
+//!   every page kind — the day-tint CLUT rewrite is one palette per art
+//!   family, the GB's own trick. When the `palette` op has selected an SGB
+//!   entry, backends sample `VPAL[draw::SGB_PAL_BASE + palette]` in place of
+//!   the kind's ramp for every non-ui kind (ui keeps its own raw ramp).
 //!
 //! ATLS  (table count = page count):
 //!   0  u16 count

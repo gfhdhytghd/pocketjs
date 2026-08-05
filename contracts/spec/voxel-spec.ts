@@ -273,6 +273,12 @@ export const EMOTE = {
 //     pitch(rung)                          PITCH_RUNGS index; tweens
 //     tint(abgr)                           global day tint (CLUT rewrite)
 //     stamp(mapId, cx, cy, on)             toggle a removable stamp
+//     palette(index)                       selects the SGB palette for the
+//                                          terrain/sprites/pics CLUTs: index
+//                                          into the pak's SGB set (sampled
+//                                          from VPAL[4 + index]); -1 restores
+//                                          the GB grayscale ramp; ui always
+//                                          keeps the raw ramp
 //   entities
 //     ent(slot, sheet, frame, x, y, lift, flags)   x/y world px Q4; lift px
 //     entHide(slot)
@@ -307,6 +313,7 @@ export const VOX_OP = {
   pitch: 13,
   tint: 14,
   stamp: 15,
+  palette: 16,
 
   ent: 30,
   entHide: 31,
@@ -372,7 +379,12 @@ export const VXPK_ALIGN = 16;
 export const VXPK_TAG = {
   /** u32 counts + view meta; see cook/pak.ts for the packed shape. */
   meta: 0x4154454d, // 'META'
-  /** CLUT palettes: u16 count, then count * 256 u32 ABGR entries. */
+  /**
+   * CLUT palettes: u16 count, then count * 256 u32 ABGR entries. The list
+   * is the 4 ATLAS_KIND default (GB grayscale) palettes followed by the SGB
+   * set; the `palette` op selects an SGB entry that REPLACES the color ramp
+   * for non-ui kinds (ui always samples its own default).
+   */
   palette: 0x4c415056, // 'VPAL'
   /**
    * Atlas pages: u16 count, then per page a 16-byte header

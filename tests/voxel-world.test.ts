@@ -13,7 +13,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { VOX_BTN } from "../contracts/spec/voxel-spec.ts";
+import { VOX_BTN, VOX_OP } from "../contracts/spec/voxel-spec.ts";
 import { loadRuntimeData, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
 import { seqRng } from "../apps/voxelmon/game/rng.ts";
 import { ENCOUNTER_BUCKETS } from "../apps/voxelmon/game/rules/encounter.ts";
@@ -586,6 +586,16 @@ describe("story tape", () => {
       expect(a.text()).toBe(b.text());
       // the wild battle textbox crossed the boundary
       expect(a.text()).toContain('s 52 1 14 "Wild PIDGEY"');
+      // the SGB palette op rides map entry (cooked gamedata only: the boot
+      // bedroom is a Pallet interior -> PALLET; Route 1 -> ROUTE); a raw
+      // gen/ run has no mapPalette and emits the grayscale -1 once instead
+      const trace = a.text();
+      if (romData!.mapPalette) {
+        expect(trace).toContain(`o ${VOX_OP.palette} ${romData!.mapPalette.PALLET_TOWN}`);
+        expect(trace).toContain(`o ${VOX_OP.palette} ${romData!.mapPalette.ROUTE_1}`);
+      } else {
+        expect(trace).toContain(`o ${VOX_OP.palette} -1`);
+      }
     },
     30_000,
   );

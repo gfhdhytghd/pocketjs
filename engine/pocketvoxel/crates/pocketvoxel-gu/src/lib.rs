@@ -201,6 +201,8 @@ pub struct Renderer {
     tinted_clut: [Option<*const c_void>; MAX_PALS],
     raw_clut: [Option<*const c_void>; MAX_PALS],
     tint: u32,
+    /// The frame's SGB palette selection (DrawList.palette; -1 = GB ramp).
+    palette: i32,
 }
 
 impl Renderer {
@@ -211,6 +213,7 @@ impl Renderer {
             tinted_clut: [None; MAX_PALS],
             raw_clut: [None; MAX_PALS],
             tint: 0xffff_ffff,
+            palette: -1,
         }
     }
 
@@ -229,6 +232,7 @@ impl Renderer {
         self.bound = None;
         self.tinted_clut = [None; MAX_PALS];
         self.raw_clut = [None; MAX_PALS];
+        self.palette = list.palette;
         self.tint = list.tint;
 
         // The Projection slot carries the whole VP (bit-identical to the
@@ -325,7 +329,15 @@ impl Renderer {
         if let Some(p) = cached {
             return p;
         }
-        let src = &pak.palettes[kind];
+        // SGB selection (draw.rs SGB_PAL_BASE): non-ui kinds recolor through
+        // VPAL[4 + palette]; ui always keeps its raw ramp.
+        let sgb = 4usize.wrapping_add(self.palette.max(0) as usize);
+        let pick = if self.palette >= 0 && kind != 2 && sgb < pak.palettes.len() {
+            sgb
+        } else {
+            kind
+        };
+        let src = &pak.palettes[pick];
         let dst = self.pool.alloc(256 * 4) as *mut u32;
         for (i, &c) in src.iter().enumerate() {
             let c = if tinted { modulate_rgb(c, self.tint) } else { c };
@@ -588,14 +600,11 @@ impl Renderer {
         let (v0, v1) = (uv[1], uv[3]);
         // Verts arrive bl, br, tr, tl; v0 is the texture top (raster.rs).
         let uvs = [(u0, v1), (u1, v1), (u1, v0), (u0, v0)];
-        // REAL-HARDWARE GOTCHA: textured VERTEX_32BITF draws sample garbage
-        // texels on the GE (bisected on device — page, CLUT, UV format,
-        // state context and indexing were each eliminated; the identical
-        // draw through the pak's i16+indexed WORLD_VTYPE renders
-        // correctly, and pocket3d-gu never used a textured f32 vertex).
-        // So cards ride the proven format: i16 positions (world px, the
-        // ×32768 model matrix counters the GE's ÷32768), pull applied
-        // before the round — sub-pixel loss < 0.5 px at 2x scale.
+        // Two real-GE gotchas bisected on device + PPSSPPHeadless (see the
+        // crate docs): textured 3D vertices must be the i16+indexed
+        // WORLD_VTYPE (textured VERTEX_32BITF draws sample garbage), and
+        // atlas pages must be >= 64 px wide (the cooker pads sprite sheets;
+        // 16-px-wide pages missample into vertical-strip noise).
         let mut out = [PakVert {
             u: 0.0,
             v: 0.0,

@@ -59,9 +59,33 @@ export function gbPalette(): Uint32Array {
   return pal;
 }
 
-/** One palette per ATLAS_KIND (page kind indexes the palette list). */
-export function buildPalettes(): Uint32Array[] {
-  return Object.keys(ATLAS_KIND).map(() => gbPalette());
+/** One SGB SuperPalette as a 256-entry CLUT: entries 0..3 are its 4 colors
+ * (palettes.json stores lightest first, so color i lands on GB shade i),
+ * PX_CLEAR transparent, the rest black — the gbPalette shape recolored. */
+export function sgbPalette(rgb: [number, number, number][]): Uint32Array {
+  const pal = new Uint32Array(256).fill(0xff000000);
+  for (let i = 0; i < 4; i++) {
+    const [r, g, b] = rgb[i];
+    pal[i] = (0xff000000 | (b << 16) | (g << 8) | r) >>> 0;
+  }
+  pal[PX_CLEAR] = 0x00000000; // transparent
+  return pal;
+}
+
+/**
+ * The VPAL list (voxel-spec.ts §VXPK_TAG.palette): one GB grayscale default
+ * per ATLAS_KIND, then every SGB SuperPalette in the ROM's own order — the
+ * `palette` op's index i selects VPAL[4 + i], and gamedata's `mapPalette`
+ * values index the same order.
+ */
+export function buildPalettes(gen: GenData): Uint32Array[] {
+  const defaults = Object.keys(ATLAS_KIND).map(() => gbPalette());
+  const sgb = gen.palettes.order.map((name) => {
+    const rgb = gen.palettes.palettes[name];
+    if (!rgb) throw new Error(`palettes.json order names a missing palette: ${name}`);
+    return sgbPalette(rgb);
+  });
+  return [...defaults, ...sgb];
 }
 
 // ---------------------------------------------------------------------------
@@ -157,13 +181,22 @@ export function buildTerrainPage(gen: GenData, tilesets: TilesetDef[]): TerrainL
   };
 }
 
-/** One sprite page per walk sheet (16x16 cells stacked vertically). */
+/**
+ * One sprite page per walk sheet (16x16 cells stacked vertically), padded to
+ * 64 px wide: the GE missamples 16-px-wide pages (bisected on device and
+ * under PPSSPPHeadless — a 128-wide page through the same card draw renders
+ * perfectly). Content stays at x in [0, 16); draw.rs normalizes card U by
+ * CELL_PX / page.w, so the pad is never sampled.
+ */
+export const SPRITE_PAGE_W = 64;
 export function buildSpritePage(gen: GenData, key: string): PageDef {
   const art = artOf(gen, key);
   if (!art) throw new Error(`missing sprite sheet: ${key}`);
-  const linear = new Uint8Array(art.w * art.h);
-  blitArt(linear, art.w, art, 0, 0);
-  return { w: art.w, h: art.h, kind: ATLAS_KIND.sprites, frames: [linear], name: key };
+  const w = Math.max(art.w, SPRITE_PAGE_W);
+  const linear = new Uint8Array(w * art.h).fill(PX_CLEAR);
+  for (let y = 0; y < art.h; y++)
+    for (let x = 0; x < art.w; x++) linear[y * w + x] = art.px(x, y);
+  return { w, h: art.h, kind: ATLAS_KIND.sprites, frames: [linear], name: key };
 }
 
 /** The emote page: gen's 48x16 horizontal strip restacked 16x48 vertical
@@ -172,15 +205,22 @@ export function buildEmotePage(gen: GenData): PageDef | null {
   const art = artOf(gen, "emotes");
   if (!art) return null;
   const cells = Math.floor(art.w / 16);
-  const linear = new Uint8Array(16 * cells * 16);
+  // Same 64-wide pad as buildSpritePage (the GE missamples 16-px pages).
+  const linear = new Uint8Array(SPRITE_PAGE_W * cells * 16).fill(PX_CLEAR);
   for (let i = 0; i < cells; i++) {
     for (let y = 0; y < 16; y++) {
       for (let x = 0; x < 16; x++) {
-        linear[(i * 16 + y) * 16 + x] = art.px(i * 16 + x, y);
+        linear[(i * 16 + y) * SPRITE_PAGE_W + x] = art.px(i * 16 + x, y);
       }
     }
   }
-  return { w: 16, h: cells * 16, kind: ATLAS_KIND.sprites, frames: [linear], name: "emotes" };
+  return {
+    w: SPRITE_PAGE_W,
+    h: cells * 16,
+    kind: ATLAS_KIND.sprites,
+    frames: [linear],
+    name: "emotes",
+  };
 }
 
 /**

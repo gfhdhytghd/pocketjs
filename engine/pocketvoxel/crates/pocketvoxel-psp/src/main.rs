@@ -279,6 +279,12 @@ unsafe fn run() {
             renderer.reset_pool(); // GE idle: safe to rewind (pool contract)
             sys::sceGuStart(GuContextType::Direct, host::list_ptr());
             renderer.render(&list, &pak);
+            // Belt-and-braces coherence: ~0.1 ms flushes every dirty line
+            // before the kick, so no per-write WritebackRange call can be
+            // missed as staging paths evolve. (The one garble actually
+            // observed on hardware was the narrow-atlas-page sampling, not
+            // proven cache incoherence — this stays because it is cheap.)
+            sys::sceKernelDcacheWritebackAll();
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
             let t_kicked = sys::sceKernelGetSystemTimeLow();
             perf_sample(
@@ -310,6 +316,11 @@ unsafe fn run() {
                 sys::sceGuSwapBuffers();
                 capture::log_line("mark: dump");
                 capture::dump_frame(frame);
+                // Hold each mark ~3 s on screen so a live PSPLINK session
+                // can scrshot it (headless runs just get slightly longer).
+                for _ in 0..180 {
+                    sys::sceDisplayWaitVblankStart();
+                }
             }
             capture::tick_exit(frame);
         }

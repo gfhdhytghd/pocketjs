@@ -11,10 +11,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { buildUiPage } from "../apps/voxelmon/cook/atlas.ts";
+import { buildPalettes, buildUiPage } from "../apps/voxelmon/cook/atlas.ts";
 import { cook, DEFAULT_MAPS } from "../apps/voxelmon/cook/cli.ts";
 import { GEN_DIR, genMissingReason, loadGen } from "../apps/voxelmon/cook/data.ts";
-import { buildCharmap } from "../apps/voxelmon/cook/gamedata.ts";
+import { buildCharmap, buildMapPalette } from "../apps/voxelmon/cook/gamedata.ts";
 
 const root = join(import.meta.dir, "..");
 const scratch = join(root, "dist/voxelmon");
@@ -57,6 +57,53 @@ describe.skipIf(reason !== null)("voxel cook", () => {
     for (const m of resultA.mapStats) {
       expect(m.chunks).toBeGreaterThan(0);
       expect(m.verts).toBeGreaterThan(0);
+    }
+  });
+
+  test("VPAL: 4 kind defaults + the 37 SGB SuperPalettes", () => {
+    const gen = loadGen(GEN_DIR);
+    expect(gen.palettes.order.length).toBe(37);
+    const pals = buildPalettes(gen);
+    expect(pals.length).toBe(4 + 37);
+    // An SGB palette maps its 4 colors (lightest first) onto shades 0..3
+    // as ABGR, keeps PX_CLEAR transparent, and blacks out the rest.
+    const pallet = pals[4 + gen.palettes.order.indexOf("PALLET")];
+    for (let shade = 0; shade < 4; shade++) {
+      const [r, g, b] = gen.palettes.palettes.PALLET[shade];
+      expect(pallet[shade]).toBe(((0xff000000 | (b << 16) | (g << 8) | r) >>> 0));
+    }
+    expect(pallet[0xff]).toBe(0); // transparent
+    expect(pallet[4]).toBe(0xff000000);
+    // The GB grayscale defaults stay in front, one per ATLAS_KIND.
+    expect(pals[0][0]).toBe(0xffffffff);
+    expect(pals[3][3]).toBe(0xff000000);
+  });
+
+  test("mapPalette ports SetPal_Overworld (OverworldController.lua:603)", () => {
+    const gen = loadGen(GEN_DIR);
+    const mp = buildMapPalette(gen);
+    const idx = (name: string) => gen.palettes.order.indexOf(name);
+    // towns wear their signature palettes (FieldDefaults.lua:17-25 byMap)
+    expect(mp.PALLET_TOWN).toBe(idx("PALLET"));
+    expect(mp.VIRIDIAN_CITY).toBe(idx("VIRIDIAN"));
+    expect(mp.CELADON_CITY).toBe(idx("CELADON"));
+    // routes take PAL_ROUTE (byPrefix), not a town's palette
+    expect(mp.ROUTE_1).toBe(idx("ROUTE"));
+    // tileset cases (byTileset): Pokemon Tower + caves
+    expect(mp.POKEMON_TOWER_1F).toBe(idx("GRAYMON"));
+    expect(mp.MT_MOON_1F).toBe(idx("CAVE"));
+    // interiors inherit their outdoor map (the wLastMap memory, static)
+    expect(mp.REDS_HOUSE_1F).toBe(idx("PALLET"));
+    expect(mp.REDS_HOUSE_2F).toBe(idx("PALLET"));
+    expect(mp.OAKS_LAB).toBe(idx("PALLET"));
+    expect(mp.VIRIDIAN_FOREST).toBe(idx("ROUTE")); // entered from Route 2
+    // the Elite Four byMap quirks ride along
+    expect(mp.LORELEIS_ROOM).toBe(idx("PALLET"));
+    expect(mp.BRUNOS_ROOM).toBe(idx("CAVE"));
+    // every imported map resolves to a real SGB index
+    for (const id of Object.keys(gen.maps)) {
+      expect(mp[id]).toBeGreaterThanOrEqual(0);
+      expect(mp[id]).toBeLessThan(gen.palettes.order.length);
     }
   });
 

@@ -188,6 +188,15 @@ depth (`GreaterOrEqual`, clear 0), GL-style −1..1 projection, dcache
 writeback after every CPU write the GE reads, pool reset only after
 `sceGuSync`, 333 MHz set explicitly at boot.
 
+Two more GE rules this runtime bisected on real hardware (PPSSPP's software
+renderer agrees on the second — both draw plausible-looking garbage, never
+crash): **textured TRANSFORM_3D draws must use the i16+indexed WORLD
+vertex** (a textured `VERTEX_32BITF` card samples noise; every card and
+pull-displaced mesh re-stages through the pak's own 20-byte format), and
+**CLUT8 atlas pages must be at least 64 px wide** (a 16-px-wide sprite
+sheet missamples into vertical-strip noise; the cooker pads sprite and
+emote pages and the card U normalizes by page width).
+
 ## 7. Determinism and verification
 
 The frame is a pure function of (tick index, buttons). The tick clock is the

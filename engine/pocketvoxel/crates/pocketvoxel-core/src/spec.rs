@@ -224,6 +224,7 @@ pub mod op {
     pub const PITCH: u32 = 13;
     pub const TINT: u32 = 14;
     pub const STAMP: u32 = 15;
+    pub const PALETTE: u32 = 16;
     pub const ENT: u32 = 30;
     pub const ENT_HIDE: u32 = 31;
     pub const EMOTE: u32 = 32;

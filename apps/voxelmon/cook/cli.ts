@@ -150,7 +150,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   const gameJson = buildGamedata(gen, atlas);
   const glyphs = buildCharmap(gen);
   const { bytes, stats } = writePak({
-    palettes: buildPalettes(),
+    palettes: buildPalettes(gen),
     pages,
     maps: packedMaps,
     glyphs,

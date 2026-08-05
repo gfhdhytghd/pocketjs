@@ -414,6 +414,11 @@ export function buildCylinders(
   art: Art,
   groundTiles: number[],
 ): void {
+  // Perf experiment / low-detail mode: VOXEL_TREE_BOXES=1 skips ALL hull
+  // carving — every round-scenery cell falls to the mesher's plain box (the
+  // mod's own beyond-ROUND_RING degraded mode). A Pallet frame's tri count
+  // is dominated by carved tree balls on real hardware (measured 66 ms GE).
+  if (process.env.VOXEL_TREE_BOXES === "1") return;
   const tw = map.def.width * 4;
   const th = map.def.height * 4;
   const gsig = [...groundTiles].sort((a, b) => a - b).join(",");

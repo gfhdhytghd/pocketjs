@@ -444,6 +444,9 @@ class CaptureHost implements VoxelHost {
   stamp(...a: number[]): void {
     this.rec("stamp", ...a);
   }
+  palette(...a: number[]): void {
+    this.rec("palette", ...a);
+  }
   ent(...a: number[]): void {
     this.rec("ent", ...a);
   }

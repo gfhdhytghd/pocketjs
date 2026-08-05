@@ -255,6 +255,10 @@ export interface VoxelmonData {
   trainer_headers?: Record<string, unknown>;
   growth_rates?: Record<string, GrowthRateRecord>;
   evolution_methods?: Record<string, unknown>;
+  /** Cooked map id -> SGB palette index (the cooker's buildMapPalette;
+   * indexes the pak's SGB set). Absent pre-cook: the scene then emits -1
+   * (the GB grayscale ramp) for every map. */
+  mapPalette?: Record<string, number>;
 }
 
 // ---------------------------------------------------------------------------

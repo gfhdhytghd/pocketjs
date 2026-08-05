@@ -11,10 +11,10 @@
 //! two passes with its inverted 16-bit depth range; the *visible result* is
 //! the contract, not the depth encoding.
 
-use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, modulate_rgb};
+use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, SGB_PAL_BASE, modulate_rgb};
 use pocketvoxel_core::math::{Mat4, Vec3, vec3};
 use pocketvoxel_core::pak::{AtlasPage, Pak, unswizzle};
-use pocketvoxel_core::spec::{TILE_PX, VIEW_H, VIEW_W};
+use pocketvoxel_core::spec::{TILE_PX, VIEW_H, VIEW_W, atlas_kind};
 
 pub const W: usize = VIEW_W as usize;
 pub const H: usize = VIEW_H as usize;
@@ -339,8 +339,32 @@ fn abgr_to_rgba_f(c: u32) -> [f32; 4] {
 /// World-space vertex → clip-space [`PV`], applying the camera-ward pull
 /// along the vertex's own eye ray first (the mod's depth bias).
 fn to_clip(vp: &Mat4, eye: Vec3, pos: Vec3, pull: f32, u: f32, v: f32, rgba: [f32; 4]) -> PV {
+    to_clip_opts(vp, eye, pos, pull, u, v, rgba, false)
+}
+
+/// `i16_trunc` models the GE backend's re-staging of textured displaced
+/// vertices through the pak's i16 vertex format (textured f32 vertices draw
+/// garbage on real hardware): positions truncate toward zero exactly like
+/// Rust's `as i16`, so both backends shade identical pixels. Untextured
+/// passes (ghost, shadows) stay f32 on the GE and here.
+#[allow(clippy::too_many_arguments)]
+fn to_clip_opts(
+    vp: &Mat4,
+    eye: Vec3,
+    pos: Vec3,
+    pull: f32,
+    u: f32,
+    v: f32,
+    rgba: [f32; 4],
+    i16_trunc: bool,
+) -> PV {
     let pos = if pull != 0.0 {
-        pos.add(eye.sub(pos).normalize().scale(pull))
+        let p = pos.add(eye.sub(pos).normalize().scale(pull));
+        if i16_trunc {
+            vec3(p.x.trunc(), p.y.trunc(), p.z.trunc())
+        } else {
+            p
+        }
     } else {
         pos
     };
@@ -377,20 +401,29 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
     let vp = &list.cam.vp;
     let eye = list.cam.eye;
 
-    fn mesh_tex<'a>(
-        cache: &'a AtlasCache,
-        tinted: &'a [[u32; 256]],
-        m: &MeshDraw,
-    ) -> Option<TexCtx<'a>> {
+    // The `palette` op: non-ui kinds sample the selected SGB palette
+    // (VPAL[SGB_PAL_BASE + i]) in place of their kind ramp; the day tint is
+    // already folded in above. Out-of-range selections fall back to the
+    // kind ramp (defensive — the op stream is untrusted).
+    let pal_index = |kind: u16| -> usize {
+        if kind != atlas_kind::UI && list.palette >= 0 {
+            let idx = SGB_PAL_BASE + list.palette as usize;
+            if idx < tinted.len() {
+                return idx;
+            }
+        }
+        kind as usize
+    };
+    let mesh_tex = |m: &MeshDraw| -> Option<TexCtx<'_>> {
         let page = cache.pages.get(m.page as usize)?;
         let texels = page.frames.get(m.frame as usize % page.frames.len())?;
         Some(TexCtx {
             texels,
             w: page.w,
             h: page.h,
-            pal: tinted.get(page.kind as usize)?,
+            pal: tinted.get(pal_index(page.kind))?,
         })
-    }
+    };
 
     for item in &list.items {
         match item {
@@ -408,7 +441,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
             }
 
             Item::ChunkMesh { mesh, .. } | Item::StampMesh { mesh, .. } => {
-                let Some(tex) = mesh_tex(cache, &tinted, mesh) else {
+                let Some(tex) = mesh_tex(mesh) else {
                     continue;
                 };
                 let base = mesh.vert_base as usize;
@@ -417,7 +450,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                     let tri: [PV; 3] = core::array::from_fn(|k| {
                         let vi = pak.indices[idx0 + t * 3 + k] as usize + base;
                         let pv = &pak.verts[vi];
-                        to_clip(
+                        to_clip_opts(
                             vp,
                             eye,
                             vec3(
@@ -429,6 +462,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                             pv.u,
                             pv.v,
                             abgr_to_rgba_f(pv.abgr),
+                            true,
                         )
                     });
                     draw_clip_tri(&mut frame, tri, Some(&tex), DepthMode::LessWrite, false);
@@ -485,7 +519,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                     texels: &cp.frames[0],
                     w: cp.w,
                     h: cp.h,
-                    pal: &tinted[cp.kind as usize],
+                    pal: &tinted[pal_index(cp.kind)],
                 };
                 let (u0, u1) = if *mirror {
                     (uv[2], uv[0])
@@ -497,7 +531,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                 let uvs = [(u0, v1), (u1, v1), (u1, v0), (u0, v0)];
                 let white = [255.0f32; 4];
                 let quad: [PV; 4] = core::array::from_fn(|i| {
-                    to_clip(
+                    to_clip_opts(
                         vp,
                         eye,
                         vec3(verts[i][0], verts[i][1], verts[i][2]),
@@ -505,6 +539,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                         uvs[i].0,
                         uvs[i].1,
                         white,
+                        true,
                     )
                 });
                 quad_tris(quad, |t| {

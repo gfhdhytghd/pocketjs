@@ -82,6 +82,7 @@ export class Scene {
   private host: VoxelHost;
   private started = false;
   private lastCam: string | null = null;
+  private lastPalette: number | null = null;
   private mapSlots: (string | null)[] = [null, null, null, null, null];
   private entLast: (string | null)[] = new Array(ENTS_MAX).fill(null);
   private lastEmote: { slot: number; kind: number } | null = null;
@@ -198,6 +199,14 @@ export class Scene {
         this.host.mapHide(slot);
       }
       this.mapSlots[slot] = key;
+    }
+    // The current map's SGB palette (gamedata mapPalette — the cooker's
+    // port of SetPal_Overworld), delta-emitted like the slots above: one
+    // palette op whenever the slot-0 map changes it. -1 = grayscale ramp.
+    const want = view.data.mapPalette?.[ow.map.id] ?? -1;
+    if (want !== this.lastPalette) {
+      this.host.palette(want);
+      this.lastPalette = want;
     }
   }
 

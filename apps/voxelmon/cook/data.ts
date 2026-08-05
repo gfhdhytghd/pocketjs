@@ -44,7 +44,7 @@ export interface MapDef {
   blocks: number[];
   borderBlock: number;
   connections?: Record<string, { map: string; offset: number }>;
-  warps?: unknown[];
+  warps?: { x: number; y: number; destMap: string; destWarp: number }[];
   signs?: unknown[];
   objects?: unknown[];
   outdoor?: boolean;
@@ -57,9 +57,20 @@ export interface GfxEntry {
   walker?: boolean;
 }
 
+/** The imported SGB palette module (gen/palettes.json — ROM SuperPalettes):
+ * 37 named 4-color palettes, lightest shade first, plus the ROM's own order
+ * (the pak's SGB set is packed in exactly this order) and the species map. */
+export interface PalettesDef {
+  palettes: Record<string, [number, number, number][]>;
+  order: string[];
+  pokemon: Record<string, string>;
+  source?: string;
+}
+
 export interface GenData {
   maps: Record<string, MapDef>;
   tilesets: Record<string, TilesetDef>;
+  palettes: PalettesDef;
   gfx: Record<string, GfxEntry>;
   gfxBin: Uint8Array;
   font: {
@@ -96,6 +107,7 @@ export function loadGen(genDir = GEN_DIR): GenData {
   return {
     maps: readJson(genDir, "maps.json"),
     tilesets: readJson(genDir, "tilesets.json"),
+    palettes: readJson(genDir, "palettes.json"),
     gfx: readJson(genDir, "gfx.json"),
     gfxBin: new Uint8Array(readFileSync(join(genDir, "gfx.bin"))),
     font: readJson(genDir, "font.json"),

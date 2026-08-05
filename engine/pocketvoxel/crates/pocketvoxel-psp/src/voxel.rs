@@ -75,6 +75,7 @@ op_fn!(js_cam, op::CAM, 2);
 op_fn!(js_pitch, op::PITCH, 1);
 op_fn!(js_tint, op::TINT, 1);
 op_fn!(js_stamp, op::STAMP, 4);
+op_fn!(js_palette, op::PALETTE, 1);
 op_fn!(js_ent, op::ENT, 7);
 op_fn!(js_ent_hide, op::ENT_HIDE, 1);
 op_fn!(js_emote, op::EMOTE, 2);
@@ -150,6 +151,7 @@ pub unsafe fn register(ctx: *mut JSContext, global: JSValue) {
     add_fn(ctx, obj, b"pitch\0", js_pitch, 1);
     add_fn(ctx, obj, b"tint\0", js_tint, 1);
     add_fn(ctx, obj, b"stamp\0", js_stamp, 4);
+    add_fn(ctx, obj, b"palette\0", js_palette, 1);
     add_fn(ctx, obj, b"ent\0", js_ent, 7);
     add_fn(ctx, obj, b"entHide\0", js_ent_hide, 1);
     add_fn(ctx, obj, b"emote\0", js_emote, 2);

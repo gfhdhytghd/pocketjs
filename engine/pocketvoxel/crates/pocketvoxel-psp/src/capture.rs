@@ -114,6 +114,11 @@ pub fn is_mark(tick: u32) -> bool {
 /// Call between `sceGuSwapBuffers` and the next list kick (the display
 /// buffer must be settled).
 pub unsafe fn dump_frame(presented_tick: u32) {
+    // Device runs (PSPLINK) screenshot externally; the VRAM->ms0 frame
+    // write hangs on real hardware IO. VOXEL_CAP_DUMP=0 skips it.
+    if matches!(option_env!("VOXEL_CAP_DUMP"), Some("0")) {
+        return;
+    }
     let (idx, count, last) = mark_info(presented_tick);
     if count == 0 {
         return;

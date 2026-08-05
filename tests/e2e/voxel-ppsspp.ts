@@ -44,7 +44,7 @@ const headless = process.env.PPSSPP_HEADLESS || `${homedir()}/ppsspp-src/build/P
 // PPSSPPHeadless maps ms0: to ~/.ppsspp — dumps land in ~/.ppsspp/vox_cap.
 // Contents persist across runs; always clean first.
 const capDir = `${homedir()}/.ppsspp/vox_cap`;
-const eboot = `${root}engine/pocketvoxel/crates/pocketvoxel-psp/target/mipsel-sony-psp/debug/EBOOT.PBP`;
+const eboot = `${root}engine/pocketvoxel/crates/pocketvoxel-psp/target/mipsel-sony-psp/release/EBOOT.PBP`;
 const pak = `${root}dist/voxelmon/voxelmon.vxpak`;
 const trace = `${root}dist/voxelmon/trace/story.vtrace`;
 
@@ -184,7 +184,7 @@ mkdirSync(`${outDir}/sim`, { recursive: true });
 
 console.log("# build the capture EBOOT ...");
 {
-  const build = await run(["bun", "tools/voxel.ts", "psp", "--features", "capture"], {
+  const build = await run(["bun", "tools/voxel.ts", "psp", "--release", "--features", "capture"], {
     env: {
       ...process.env,
       VOXEL_CAP_INPUT: transitions.join(","),

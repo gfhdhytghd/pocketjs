@@ -19,6 +19,13 @@ fn build_pak() -> Vec<u8> {
     b.palette(pal); // terrain
     b.palette(pal); // sprites
     b.palette(pal); // ui
+    b.palette(pal); // pics (unused page kind; completes the 4 defaults)
+    // One SGB palette after the kind defaults (draw::SGB_PAL_BASE).
+    let mut sgb = [0xff00_00ffu32; 256]; // red field
+    sgb[1] = 0xff00_a0ff; // orange
+    sgb[2] = 0xff20_20c0; // dark red
+    sgb[3] = 0x0000_0000; // transparent, like the defaults
+    b.palette(sgb);
 
     let terrain: Vec<u8> = (0..16 * 16)
         .map(|i| if i % 5 == 0 { 2 } else { 1 })
@@ -101,6 +108,28 @@ fn tape_replay_is_deterministic() {
     let empty = trace::parse("voxtrace 1\nt 0 0\nm boot\n").unwrap();
     let base = trace::run(&pak, &cache, &empty, |_, _| {}).unwrap();
     assert_ne!(base[0].1, run1[0].1, "the diorama actually rendered");
+}
+
+#[test]
+fn sgb_palette_recolors_non_ui_kinds() {
+    let bytes = build_pak();
+    let blob = AlignedBlob::from_bytes(&bytes);
+    let pak = pak::read(blob.bytes()).expect("valid pak");
+    let cache = AtlasCache::new(&pak);
+    let hash = |tape: &str| {
+        let entries = trace::parse(tape).unwrap();
+        trace::run(&pak, &cache, &entries, |_, _| {}).unwrap()[0].1
+    };
+
+    let gray = hash("voxtrace 1\nt 0 0\no 10 0 7 0 0\no 12 1024 1088\nm f\n");
+    let sgb = hash("voxtrace 1\nt 0 0\no 10 0 7 0 0\no 12 1024 1088\no 16 0\nm f\n");
+    assert_ne!(gray, sgb, "palette(0) recolors the terrain");
+
+    let back = hash("voxtrace 1\nt 0 0\no 10 0 7 0 0\no 12 1024 1088\no 16 0\no 16 -1\nm f\n");
+    assert_eq!(back, gray, "palette(-1) restores the grayscale ramp");
+
+    let oob = hash("voxtrace 1\nt 0 0\no 10 0 7 0 0\no 12 1024 1088\no 16 99\nm f\n");
+    assert_eq!(oob, gray, "an out-of-range selection falls back to the ramp");
 }
 
 /// The CLI loop over real files: write hashes, replay with `--assert`,

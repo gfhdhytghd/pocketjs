@@ -21,6 +21,9 @@ export interface VoxelHost {
   pitch(rung: number): void;
   tint(abgr: number): void;
   stamp(mapId: number, cx: number, cy: number, on: number): void;
+  /** SGB palette index into the pak's SGB set (VPAL[4 + i]) for the non-ui
+   * atlas kinds; -1 restores the GB grayscale ramp. */
+  palette(index: number): void;
   // entities
   /** x/y world px Q4; lift px; flags = ENT_FLAG mask. */
   ent(
@@ -100,6 +103,9 @@ export class RecorderHost implements VoxelHost {
   }
   stamp(mapId: number, cx: number, cy: number, on: number): void {
     this.op(VOX_OP.stamp, mapId, cx, cy, on);
+  }
+  palette(index: number): void {
+    this.op(VOX_OP.palette, index);
   }
   ent(
     slot: number,

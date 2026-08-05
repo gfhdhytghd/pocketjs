@@ -88,7 +88,8 @@ impl PakBuilder {
     }
 
     /// Append a 256-entry ABGR palette. Palette index = atlas kind, so add
-    /// them in `ATLAS_KIND` order.
+    /// them in `ATLAS_KIND` order; entries past the 4 kind defaults form the
+    /// SGB set the `palette` op selects from (`draw::SGB_PAL_BASE`).
     pub fn palette(&mut self, pal: [u32; 256]) -> u16 {
         self.palettes.push(pal);
         (self.palettes.len() - 1) as u16

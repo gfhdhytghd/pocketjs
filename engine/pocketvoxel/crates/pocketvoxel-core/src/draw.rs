@@ -35,6 +35,12 @@ pub const TILE_ANIM_DIV: u32 = 30;
 pub const SKY_BANDS: usize = 4;
 pub const SKY_ABGR: [u32; SKY_BANDS] = [0xffc08040, 0xffd0a060, 0xffe0c090, 0xfff0e0c0];
 
+/// VPAL layout (voxel-spec.ts §VXPK_TAG.palette): the 4 ATLAS_KIND default
+/// (GB grayscale) palettes, then the SGB set. [`DrawList::palette`] indexes
+/// the SGB set, so backends sample `VPAL[SGB_PAL_BASE + palette]` for the
+/// non-ui kinds when a palette is selected.
+pub const SGB_PAL_BASE: usize = spec::atlas_kind::PICS as usize + 1;
+
 /// Entity shadow decal: half-extents as fractions of the card width, and a
 /// lift above the feet so the decal never z-fights the ground it sits on.
 pub const SHADOW_W_FRAC: f32 = 0.375;
@@ -118,10 +124,14 @@ pub enum Item {
 
 /// One frame, plain data. `cam` carries the VP and the eye for the pull;
 /// `tint` is the day tint backends fold into the CLUT (sky bands arrive
-/// pre-tinted).
+/// pre-tinted). `palette` is the selected SGB palette (index into the pak's
+/// SGB set, `VPAL[SGB_PAL_BASE + i]`) the non-ui kinds sample through, or
+/// -1 for the GB grayscale ramp; the day tint still modulates on top, and
+/// the ui kind always keeps its own raw ramp.
 pub struct DrawList {
     pub cam: Camera,
     pub tint: u32,
+    pub palette: i32,
     pub items: Vec<Item>,
 }
 
@@ -253,7 +263,22 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                     chunk.aabb_max[1] as f32,
                     (chunk.aabb_max[2] as i32 + ms.oy) as f32,
                 );
-                if frustum.intersects_aabb(mins, maxs) {
+                // Distance cap on top of the frustum: at the orbit rungs the
+                // playable view depth is bounded, but the frustum's far plane
+                // is effectively infinite (dist*4 + 4096), so a leaned camera
+                // otherwise admits every chunk up-map. 2.5 view heights is
+                // the mod's own north-reach cap for its shadow frustum; the
+                // real PSP GE is the budget this protects (measured: Pallet
+                // full-set 56 ms -> bounded set well under half).
+                const CULL_DIST: f32 = 2.5 * (crate::spec::WORLD_VIEW_H as f32);
+                let (ccx, ccy) = (
+                    (mins.x + maxs.x) * 0.5 - scene.cam_x as f32 / crate::spec::Q4 as f32,
+                    (mins.z + maxs.z) * 0.5 - scene.cam_y as f32 / crate::spec::Q4 as f32,
+                );
+                let half = (maxs.x - mins.x).max(maxs.z - mins.z) * 0.5;
+                let within = ccx * ccx + ccy * ccy
+                    <= (CULL_DIST + half) * (CULL_DIST + half);
+                if within && frustum.intersects_aabb(mins, maxs) {
                     visible.push((slot as u8, ms.ox, ms.oy, chunk));
                 }
             }
@@ -362,11 +387,14 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
 
     // 5. Player ghost (inverted depth), then 6. entity + battle cards.
     let sheet_uv = |page: &crate::pak::AtlasPage, frame: i32| -> [f32; 4] {
-        // Walk sheets stack 16x16 frames vertically (SCHEMA.md gfx shapes).
+        // Walk sheets stack 16x16 frames vertically at x in [0, CELL_PX);
+        // pages are padded wider than the content (the GE missamples
+        // 16-px-wide pages), so U normalizes by the page width.
         let rows = (page.h as i32 / CELL_PX).max(1);
         let row = frame.rem_euclid(rows) as f32;
         let vh = 1.0 / rows as f32;
-        [0.0, row * vh, 1.0, (row + 1.0) * vh]
+        let u1 = CELL_PX as f32 / (page.w as f32).max(CELL_PX as f32);
+        [0.0, row * vh, u1, (row + 1.0) * vh]
     };
     for ent in scene.ents.iter().filter(|e| e.shown) {
         if ent.flags & ent_flag::GHOST != 0 {
@@ -427,6 +455,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     DrawList {
         cam,
         tint: scene.tint,
+        palette: scene.palette,
         items,
     }
 }
@@ -508,6 +537,13 @@ mod tests {
         );
         s.op(op::UI_TILE, &[2, 3, 5], None);
         let list = build(&s, &pak);
+        assert_eq!(list.palette, -1, "no palette op = the grayscale ramp");
+        s.op(op::PALETTE, &[2], None);
+        assert_eq!(
+            build(&s, &pak).palette,
+            2,
+            "the selected SGB palette rides the draw list"
+        );
         let ranks: Vec<u32> = list.items.iter().map(rank).collect();
         let mut sorted = ranks.clone();
         sorted.sort_unstable();
