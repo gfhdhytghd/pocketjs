@@ -140,6 +140,15 @@ export interface ItemDef {
   machine?: { kind: string; number: number; move: string };
 }
 
+/** A 16x96 walk sheet (6 frames) or a 1..3-frame prop sheet (sprites.lua). */
+export interface SpriteSheetDef {
+  id: string;
+  image?: string;
+  frames: number;
+  walker?: boolean;
+  source?: string;
+}
+
 export interface MapConnection {
   map: string;
   offset: number;
@@ -239,6 +248,7 @@ export interface VoxelmonData {
   trainers?: Record<string, TrainerClass>;
   maps?: Record<string, MapDef>;
   tilesets?: Record<string, TilesetDef>;
+  sprites?: Record<string, SpriteSheetDef>;
   field?: Record<string, unknown>;
   text?: Record<string, unknown>;
   text_pointers?: Record<string, unknown>;
@@ -267,6 +277,7 @@ export const GEN_MODULES = [
   "trainers",
   "maps",
   "tilesets",
+  "sprites",
   "field",
   "text",
   "text_pointers",
