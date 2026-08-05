@@ -223,9 +223,14 @@ export class Scene {
   }
 
   private sheetIndex(view: SceneView, spriteId: string): number {
-    const order = view.data.constants.spriteOrder;
-    const i = order ? order.indexOf(spriteId) : -1;
-    return i >= 0 ? i : 0;
+    // The ent op carries the pak's ABSOLUTE atlas page (core page_at):
+    // resolve SPRITE_RED -> atlas.sprites["red"] through the cooked page
+    // map. The ROM spriteOrder index is NOT a page index — sending it bound
+    // the player to page 0 (the terrain atlas: a card wearing tree art).
+    const atlas = (view.data as { atlas?: { sprites?: Record<string, number> } }).atlas;
+    const name = spriteId.replace(/^SPRITE_/, "").toLowerCase();
+    const page = atlas?.sprites?.[name];
+    return typeof page === "number" ? page : -1; // -1: core skips the card
   }
 
   private emitEnts(view: SceneView): void {
