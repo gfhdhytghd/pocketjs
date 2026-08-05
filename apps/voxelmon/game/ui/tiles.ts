@@ -195,25 +195,51 @@ for (const [seq, code] of CHARMAP_PAIRS) {
 MULTI.sort((a, b) => b[0].length - a[0].length);
 
 /**
+ * MULTI bucketed by first character. The naive encoder scanned the whole
+ * table at every character position; on the PSP's QuickJS (~1.7 us/op) a
+ * 40-glyph dialogue line cost tens of milliseconds PER FRAME, which is what
+ * made the typewriter crawl on real hardware. Buckets make the common case
+ * (no digraph starts here) one Map lookup.
+ */
+const MULTI_BY_HEAD = new Map<string, [string, number][]>();
+for (const entry of MULTI) {
+  const head = entry[0][0]!;
+  const bucket = MULTI_BY_HEAD.get(head);
+  if (bucket) bucket.push(entry);
+  else MULTI_BY_HEAD.set(head, [entry]);
+}
+
+/** encodeGlyphs memo: dialogue re-encodes the same handful of lines. */
+const GLYPH_CACHE = new Map<string, number[]>();
+const GLYPH_CACHE_MAX = 64;
+
+/**
  * Segment a line into GB glyph codes — the port of Font.split + Font.encode
  * for the fixed-width vanilla page. Unknown characters fall back to SPACE
  * so pagination widths never drift on an unmapped char.
  */
 export function encodeGlyphs(text: string): number[] {
+  const hit = GLYPH_CACHE.get(text);
+  if (hit) return hit;
   const out: number[] = [];
   let i = 0;
   outer: while (i < text.length) {
-    for (const [seq, code] of MULTI) {
-      if (text.startsWith(seq, i)) {
-        out.push(code);
-        i += seq.length;
-        continue outer;
+    const bucket = MULTI_BY_HEAD.get(text[i]!);
+    if (bucket) {
+      for (const [seq, code] of bucket) {
+        if (text.startsWith(seq, i)) {
+          out.push(code);
+          i += seq.length;
+          continue outer;
+        }
       }
     }
     const cp = String.fromCodePoint(text.codePointAt(i)!);
     out.push(SINGLE.get(cp) ?? SPACE);
     i += cp.length;
   }
+  if (GLYPH_CACHE.size >= GLYPH_CACHE_MAX) GLYPH_CACHE.clear();
+  GLYPH_CACHE.set(text, out);
   return out;
 }
 
@@ -230,11 +256,14 @@ export function sliceGlyphs(text: string, n: number): string {
   let i = 0;
   let count = 0;
   outer: while (i < text.length && count < n) {
-    for (const [seq] of MULTI) {
-      if (text.startsWith(seq, i)) {
-        i += seq.length;
-        count += 1;
-        continue outer;
+    const bucket = MULTI_BY_HEAD.get(text[i]!);
+    if (bucket) {
+      for (const [seq] of bucket) {
+        if (text.startsWith(seq, i)) {
+          i += seq.length;
+          count += 1;
+          continue outer;
+        }
       }
     }
     const cp = String.fromCodePoint(text.codePointAt(i)!);

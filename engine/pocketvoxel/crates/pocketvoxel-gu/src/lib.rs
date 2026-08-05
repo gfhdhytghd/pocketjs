@@ -292,18 +292,18 @@ impl Renderer {
                 } => {
                     self.card(pak, *verts, *page, *uv, *mirror, *pull, list.cam.eye);
                 }
-                Item::UiQuad {
-                    x,
-                    y,
-                    w,
-                    h,
-                    page,
-                    tile,
-                } => {
-                    self.ui_quad(pak, *x, *y, *w, *h, *page, *tile);
+                Item::UiQuad { .. } => {
+                    // Batched below: UiQuads are contiguous at the tail of
+                    // the list (draw order), and one upload + one draw for
+                    // the whole GB layer instead of ~100 of each is the
+                    // difference between a 145 ms and a 17 ms dialogue frame
+                    // on real hardware (each upload carries a dcache
+                    // writeback and a GE command flush).
                 }
             }
         }
+
+        self.ui_batch(list, pak);
 
         // Hand back a 2D-clean state (the pocket3d-gu end_3d discipline).
         sys::sceGuDisable(GuState::DepthTest);
@@ -642,10 +642,24 @@ impl Renderer {
 
     /// One GB UI tile: screen-space sprite, no depth, UNTINTED palette
     /// (raster.rs composites the UI layer verbatim), raw-texel UVs.
-    unsafe fn ui_quad(&mut self, pak: &Pak, x: f32, y: f32, w: f32, h: f32, page: u16, tile: u16) {
+    /// The whole GB UI layer in one pass: state set once, one pooled
+    /// upload, one `sceGuDrawArray` over every tile's sprite pair.
+    unsafe fn ui_batch(&mut self, list: &DrawList, pak: &Pak) {
+        let mut page_idx = None;
+        let mut n = 0usize;
+        for item in &list.items {
+            if let Item::UiQuad { page, .. } = item {
+                page_idx.get_or_insert(*page);
+                n += 1;
+            }
+        }
+        let (Some(page), true) = (page_idx, n > 0) else {
+            return;
+        };
         let Some(p) = pak.atlases.get(page as usize) else {
             return;
         };
+
         sys::sceGuDisable(GuState::DepthTest);
         sys::sceGuEnable(GuState::Texture2D);
         sys::sceGuEnable(GuState::AlphaTest);
@@ -653,45 +667,51 @@ impl Renderer {
         self.bind(pak, page, 0, false);
 
         let cols = ((p.w as i32 / TILE_PX) as u16).max(1);
-        let tx0 = (tile % cols) as i16 * TILE_PX as i16;
-        let ty0 = (tile / cols) as i16 * TILE_PX as i16;
-        // The GB layer scales by the pinned non-integer UI_SCALE (ui.rs);
-        // positions round to the nearest device pixel — the rasterizer
-        // resolves the same edge per-pixel, so seams differ by <= 1 px
-        // (inside the e2e's AE tolerance).
-        let x0 = round_i16(x);
-        let y0 = round_i16(y);
-        let x1 = round_i16(x + w);
-        let y1 = round_i16(y + h);
-        let quad = [
-            Vert2dTc {
+        let dst = self.pool.alloc(n * 2 * core::mem::size_of::<Vert2dTc>()) as *mut Vert2dTc;
+        let mut at = 0usize;
+        for item in &list.items {
+            let Item::UiQuad { x, y, w, h, tile, .. } = item else {
+                continue;
+            };
+            let tx0 = (tile % cols) as i16 * TILE_PX as i16;
+            let ty0 = (tile / cols) as i16 * TILE_PX as i16;
+            // The GB layer scales by the pinned non-integer UI_SCALE
+            // (ui.rs); positions round to the nearest device pixel — the
+            // rasterizer resolves the same edge per-pixel, so seams differ
+            // by <= 1 px (inside the e2e's AE tolerance).
+            dst.add(at).write(Vert2dTc {
                 u: tx0,
                 v: ty0,
                 abgr: 0xffff_ffff,
-                x: x0,
-                y: y0,
+                x: round_i16(*x),
+                y: round_i16(*y),
                 z: 0,
                 pad: 0,
-            },
-            Vert2dTc {
+            });
+            dst.add(at + 1).write(Vert2dTc {
                 u: tx0 + TILE_PX as i16,
                 v: ty0 + TILE_PX as i16,
                 abgr: 0xffff_ffff,
-                x: x1,
-                y: y1,
+                x: round_i16(*x + *w),
+                y: round_i16(*y + *h),
                 z: 0,
                 pad: 0,
-            },
-        ];
-        let verts = self.pool.upload(as_bytes(&quad));
+            });
+            at += 2;
+        }
+        sys::sceKernelDcacheWritebackRange(
+            dst as *const c_void,
+            (n * 2 * core::mem::size_of::<Vert2dTc>()) as u32,
+        );
         sys::sceGuDrawArray(
             GuPrimitive::Sprites,
             UI_VTYPE,
-            2,
+            (n * 2) as i32,
             core::ptr::null(),
-            verts as *const c_void,
+            dst as *const c_void,
         );
     }
+
 }
 
 impl Default for Renderer {

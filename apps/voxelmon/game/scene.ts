@@ -372,8 +372,11 @@ export class Scene {
       const isLast = i === box.shown.length - 1;
       // non-last rows are stamped padded to MAX_COLS so a scroll clears the
       // stale glyphs beneath; the typing row stays unpadded for the reveal
-      const pad = Math.max(0, MAX_COLS - encodeGlyphs(line.text).length);
-      const text = isLast ? line.text : line.text + " ".repeat(pad);
+      // Only non-last rows need the pad (a scroll must clear the glyphs
+      // beneath); the typing row skips the encode entirely.
+      const text = isLast
+        ? line.text
+        : line.text + " ".repeat(Math.max(0, MAX_COLS - encodeGlyphs(line.text).length));
       const cached = this.uiRows[i];
       if (!cached || cached.text !== text) {
         host.uiText(TEXT_X, rowYs[i], text);
