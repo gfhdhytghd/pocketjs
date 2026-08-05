@@ -82,35 +82,6 @@ const WORLD_VTYPE: VertexType = VertexType::from_bits_truncate(
         | VertexType::TRANSFORM_3D.bits(),
 );
 
-/// CPU-built textured f32 vertex (pull-displaced meshes, cards).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct TexVert {
-    u: f32,
-    v: f32,
-    abgr: u32,
-    x: f32,
-    y: f32,
-    z: f32,
-}
-const _: () = assert!(core::mem::size_of::<TexVert>() == 24);
-
-const TEX_VTYPE: VertexType = VertexType::from_bits_truncate(
-    VertexType::TEXTURE_32BITF.bits()
-        | VertexType::COLOR_8888.bits()
-        | VertexType::VERTEX_32BITF.bits()
-        | VertexType::TRANSFORM_3D.bits(),
-);
-
-/// Indexed variant of [`TEX_VTYPE`] for the displaced chunk meshes.
-const TEX_IDX_VTYPE: VertexType = VertexType::from_bits_truncate(
-    VertexType::TEXTURE_32BITF.bits()
-        | VertexType::COLOR_8888.bits()
-        | VertexType::VERTEX_32BITF.bits()
-        | VertexType::INDEX_16BIT.bits()
-        | VertexType::TRANSFORM_3D.bits(),
-);
-
 /// CPU-built untextured f32 vertex (shadow decals, the ghost).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -494,12 +465,12 @@ impl Renderer {
             );
             sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&Mat4::IDENTITY));
         } else {
-            // Model must NOT inherit the ×32768 scale here: the displaced
-            // verts are f32 world units (pocket3d-gu mesh.rs discipline —
-            // set for the draw, restore identity after; identity IS the
-            // non-world state, so nothing to restore).
+            // Displaced verts re-stage as i16 through the pool: textured
+            // VERTEX_32BITF fetches garbage on the real GE (see card()), so
+            // the pull result rounds back into the pak's own vertex format
+            // with the seam offsets baked in (model = pure ×32768 scale).
             let n = m.vert_count as usize;
-            let dst = self.pool.alloc(n * core::mem::size_of::<TexVert>()) as *mut TexVert;
+            let dst = self.pool.alloc(n * core::mem::size_of::<PakVert>()) as *mut PakVert;
             let src = &pak.verts[m.vert_base as usize..m.vert_base as usize + n];
             for (i, pv) in src.iter().enumerate() {
                 let pos = pulled(
@@ -511,26 +482,29 @@ impl Renderer {
                     ),
                     m.pull,
                 );
-                dst.add(i).write(TexVert {
+                dst.add(i).write(PakVert {
                     u: pv.u,
                     v: pv.v,
                     abgr: pv.abgr,
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
+                    x: pos.x as i16,
+                    y: pos.y as i16,
+                    z: pos.z as i16,
+                    pad: 0,
                 });
             }
             sys::sceKernelDcacheWritebackRange(
                 dst as *const c_void,
-                (n * core::mem::size_of::<TexVert>()) as u32,
+                (n * core::mem::size_of::<PakVert>()) as u32,
             );
+            sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&world_model(0, 0)));
             sys::sceGuDrawArray(
                 GuPrimitive::Triangles,
-                TEX_IDX_VTYPE,
+                WORLD_VTYPE,
                 m.index_count as i32,
                 idx_ptr as *const c_void,
                 dst as *const c_void,
             );
+            sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&Mat4::IDENTITY));
         }
     }
 
@@ -614,33 +588,47 @@ impl Renderer {
         let (v0, v1) = (uv[1], uv[3]);
         // Verts arrive bl, br, tr, tl; v0 is the texture top (raster.rs).
         let uvs = [(u0, v1), (u1, v1), (u1, v0), (u0, v0)];
-        let mut out = [TexVert {
+        // REAL-HARDWARE GOTCHA: textured VERTEX_32BITF draws sample garbage
+        // texels on the GE (bisected on device — page, CLUT, UV format,
+        // state context and indexing were each eliminated; the identical
+        // draw through the pak's i16+indexed WORLD_VTYPE renders
+        // correctly, and pocket3d-gu never used a textured f32 vertex).
+        // So cards ride the proven format: i16 positions (world px, the
+        // ×32768 model matrix counters the GE's ÷32768), pull applied
+        // before the round — sub-pixel loss < 0.5 px at 2x scale.
+        let mut out = [PakVert {
             u: 0.0,
             v: 0.0,
             abgr: 0xffff_ffff,
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        }; 6];
-        for (slot, ci) in [0usize, 1, 2, 0, 2, 3].iter().enumerate() {
-            let p = pulled(eye, vec3(verts[*ci][0], verts[*ci][1], verts[*ci][2]), pull);
-            out[slot] = TexVert {
-                u: uvs[*ci].0,
-                v: uvs[*ci].1,
+            x: 0,
+            y: 0,
+            z: 0,
+            pad: 0,
+        }; 4];
+        for ci in 0..4 {
+            let p = pulled(eye, vec3(verts[ci][0], verts[ci][1], verts[ci][2]), pull);
+            out[ci] = PakVert {
+                u: uvs[ci].0,
+                v: uvs[ci].1,
                 abgr: 0xffff_ffff,
-                x: p.x,
-                y: p.y,
-                z: p.z,
+                x: p.x as i16,
+                y: p.y as i16,
+                z: p.z as i16,
+                pad: 0,
             };
         }
+        const CARD_IDX: [u16; 6] = [0, 1, 2, 0, 2, 3];
         let data = self.pool.upload(as_bytes(&out));
+        let idx = self.pool.upload(as_bytes(&CARD_IDX));
+        sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&world_model(0, 0)));
         sys::sceGuDrawArray(
             GuPrimitive::Triangles,
-            TEX_VTYPE,
+            WORLD_VTYPE,
             6,
-            core::ptr::null(),
+            idx as *const c_void,
             data as *const c_void,
         );
+        sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&Mat4::IDENTITY));
     }
 
     /// One GB UI tile: screen-space sprite, no depth, UNTINTED palette

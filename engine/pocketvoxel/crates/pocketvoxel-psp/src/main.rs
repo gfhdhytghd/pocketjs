@@ -238,6 +238,8 @@ unsafe fn run() {
         #[cfg(feature = "capture")]
         let mask = capture::scripted_buttons(frame);
 
+        let t_frame_start = sys::sceKernelGetSystemTimeLow();
+
         // One guest turn per host tick: frame(buttons), exactly once.
         let mut args = [JS_NewInt32(ctx, mask as i32)];
         let r = JS_Call(ctx, frame_fn, global, 1, args.as_mut_ptr());
@@ -270,6 +272,7 @@ unsafe fn run() {
         #[cfg(not(feature = "capture"))]
         {
             let list = draw::build(scene, &pak);
+            let t_work_done = sys::sceKernelGetSystemTimeLow();
             sys::sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
             sys::sceDisplayWaitVblankStart();
             sys::sceGuSwapBuffers();
@@ -277,6 +280,12 @@ unsafe fn run() {
             sys::sceGuStart(GuContextType::Direct, host::list_ptr());
             renderer.render(&list, &pak);
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
+            let t_kicked = sys::sceKernelGetSystemTimeLow();
+            perf_sample(
+                frame,
+                t_work_done.wrapping_sub(t_frame_start),
+                t_kicked.wrapping_sub(t_frame_start),
+            );
         }
 
         // ---- CAPTURE PRESENT: only the mark frames render (capture.rs
@@ -313,6 +322,41 @@ unsafe fn run() {
 /// see the module docs. The analog stick walks too, one axis at a time
 /// (the world is a grid; a diagonal push picks a lane).
 #[cfg_attr(feature = "capture", allow(dead_code))]
+/// Rolling frame-time telemetry: every 300 frames one line appends to
+/// host0:/voxperf.txt (PSPLINK serves it; absent host0: fails silently) —
+/// `frames avg_work_us avg_frame_us` where work = JS + tick + list build
+/// (pre-sync CPU) and frame = work + GE sync + vblank + record.
+static mut PERF_WORK: u64 = 0;
+static mut PERF_FRAME: u64 = 0;
+unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32) {
+    PERF_WORK += work_us as u64;
+    PERF_FRAME += frame_us as u64;
+    if frame == 0 || frame % 300 != 0 {
+        return;
+    }
+    let mut line = alloc::string::String::new();
+    let _ = core::fmt::write(
+        &mut line,
+        format_args!(
+            "f{} work {}us frame {}us\n",
+            frame,
+            PERF_WORK / 300,
+            PERF_FRAME / 300
+        ),
+    );
+    PERF_WORK = 0;
+    PERF_FRAME = 0;
+    let fd = sys::sceIoOpen(
+        b"host0:/voxperf.txt\0".as_ptr(),
+        IoOpenFlags::WR_ONLY | IoOpenFlags::CREAT | IoOpenFlags::APPEND,
+        0o644,
+    );
+    if fd.0 >= 0 {
+        sys::sceIoWrite(fd, line.as_ptr() as *const c_void, line.len());
+        sys::sceIoClose(fd);
+    }
+}
+
 fn map_buttons(pad: &SceCtrlData) -> u32 {
     let b = pad.buttons;
     let mut mask = 0;
