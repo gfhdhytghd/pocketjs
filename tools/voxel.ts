@@ -209,8 +209,26 @@ async function buildEboot(cargoArgs: string[]): Promise<number> {
       ["TITLE", "VOXELMON"],
     ]),
   );
+  // The XMB cover art rides through this repack too — passing NULL for the
+  // icon slots (as the first version did) silently dropped what cargo-psp
+  // had just packed, leaving a blank tile on the console.
+  const asset = (name: string) => {
+    const p = `${ebootDir}/assets/${name}`;
+    return existsSync(p) ? p : "NULL";
+  };
   const packRc = await run(
-    ["pack-pbp", `${outDir}/EBOOT.PBP`, sfo, "NULL", "NULL", "NULL", "NULL", "NULL", prx, "NULL"],
+    [
+      "pack-pbp",
+      `${outDir}/EBOOT.PBP`,
+      sfo,
+      asset("ICON0.png"),
+      "NULL", // ICON1.PMF (animated icon)
+      "NULL", // PIC0.PNG
+      asset("PIC1.png"),
+      "NULL", // SND0.AT3
+      prx,
+      "NULL",
+    ],
     outDir,
     env,
   );
