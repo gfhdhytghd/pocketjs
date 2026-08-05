@@ -74,6 +74,31 @@ calls `voxel.gamedata()` once, `JSON.parse`s, and never crosses the boundary
 for data again. In Bun (headless sim) the same object is loaded straight from
 `gen/` by `apps/voxelmon/game/data.ts` — one loader, two transports.
 
+## UI tile ids — the GB VRAM convention
+
+`uiTile`/`uiFill` tile ids and the CMAP section's values ARE the GB tile
+codes: the cooker packs the UI atlas so `fonts/font` glyphs sit at their
+charmap codes (`mainBase 0x80..0xff`) and `fonts/font_extra`
+(textbox borders, arrows, HP bar) at `extraBase 0x60..0x7f`. Tile id 0 is
+transparent (UI cell unset). Guest-side names for the border/arrow tiles
+live in `apps/voxelmon/game/ui/tiles.ts`; the cooker owns the packing and
+must satisfy this mapping.
+
+## `.tape` — intent tapes
+
+`apps/voxelmon/tapes/*.tape` describe intent, never frame counts (the
+Pocket Mon lesson): one command per line, `#` comments.
+
+```
+walk <u|d|l|r> <cells>     # hold the direction until that many steps LAND
+press <a|b|start|select|u|d|l|r>   # tap: one tick down, then released
+wait <ticks>
+mark <name>                # checkpoint: the sim renders + hashes here
+```
+
+A turn-in-place is not a step; `walk` counts landed steps and releases the
+direction when `landed + in_flight == target` so walks never overshoot.
+
 ## `.vtrace` — the op trace, one tape on every host
 
 The Bun headless run records everything that crossed the boundary;
