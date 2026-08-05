@@ -22,6 +22,8 @@ members = [
     "pocket3d/examples/handheld",
     "pocket3d/examples/note-widget",
     "pocket3d/examples/uihost",
+    "pocketvoxel/crates/pocketvoxel-core",
+    "pocketvoxel/crates/pocketvoxel-sim",
 ]
 exclude = [
     "backends/esp32p4-ppa",

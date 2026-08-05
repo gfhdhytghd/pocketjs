@@ -1709,6 +1709,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocketvoxel-core"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "pocketvoxel-sim"
+version = "0.1.0"
+dependencies = [
+ "pocketvoxel-core",
+]
+
+[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
