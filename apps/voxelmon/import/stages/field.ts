@@ -43,6 +43,22 @@ export function extractField(ctx: Ctx): Record<string, unknown> {
   const shadow = ctx.symbol("LedgeHoppingShadow");
   gfx.add("fx/shadow", decode1bpp(rom.bytes(shadow.bank, shadow.address, 8), 8, 8, true));
 
+  // gen1recomp RomExtractor.lua:2028-2032 — the in-battle HUD sheets the UI
+  // atlas overlays onto the $62-$78 font area (src/render/HudTiles.lua):
+  // HP bar segments, <LV>/<HP> glyphs, and the three HUD line pages.
+  const hpBar = ctx.symbol("HpBarAndStatusGraphics");
+  gfx.add(
+    "battle/font_battle_extra",
+    decode2bpp(rom.bytes(hpBar.bank, hpBar.address, (120 * 16) / 4), 120, 16, true),
+  );
+  for (const n of [1, 2, 3] as const) {
+    const hud = ctx.symbol(`BattleHudTiles${n}`);
+    gfx.add(
+      `battle/battle_hud_${n}`,
+      decode1bpp(rom.bytes(hud.bank, hud.address, 24), 24, 8, true),
+    );
+  }
+
   // gen1recomp RomExtractor.lua:1992 — the cuttable tree is Overworld_GFX
   // tiles $2d/$2e/$3d/$3e out of the OVERWORLD tileset's own graphics blob,
   // not a named symbol.

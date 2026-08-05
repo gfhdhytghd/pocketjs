@@ -280,7 +280,11 @@ export const EMOTE = {
 //   ui (the GB tile layer; tile ids index the cooked UI atlas)
 //     uiTile(x, y, tile)
 //     uiFill(x, y, w, h, tile)
-//     uiText(x, y, str)                    STRING arg; charmap-resolved
+//     uiText(x, y, str)                    STRING arg; charmap-resolved.
+//                                          THE one live typewriter run: the
+//                                          core retains only the last, gated
+//                                          by uiReveal — static labels go
+//                                          into the grid via uiTile instead
 //     uiReveal(n)                          glyphs of the last uiText shown
 //     uiClear()
 //   battle

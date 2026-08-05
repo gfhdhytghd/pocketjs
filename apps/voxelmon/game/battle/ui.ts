@@ -177,7 +177,12 @@ export class BattleUi {
   }
 
   private text(host: VoxelHost, x: number, y: number, s: string): void {
-    host.uiText(x, y, s);
+    // Static chrome goes into the tile grid glyph-by-glyph: uiText is the
+    // ONE live typewriter run (the core retains only the last, gated by
+    // uiReveal), so labels routed through it vanish when the next message
+    // arrives — glyph codes ARE ui tile ids under the GB convention.
+    const glyphs = encodeGlyphs(s);
+    for (let i = 0; i < glyphs.length; i++) host.uiTile(x + i, y, glyphs[i]);
     this.chromeTextDirty = true;
   }
 

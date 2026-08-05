@@ -91,16 +91,31 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     frontPageByKey.set(key, pages.length);
     pages.push(buildPicPage(gen, key));
   }
-  for (const [id, def] of Object.entries(gen.pokemon)) {
-    const path = def.spriteFront as string | undefined;
-    if (!path) continue;
-    const key = path.replace(/^assets\/generated\//, "").replace(/\.png$/, "");
-    const page = frontPageByKey.get(key);
-    if (page !== undefined) frontIndex[id] = page;
+  // Back pics mirror the front path: one page per sheet, species-keyed —
+  // the battle staging reads atlas.picBack[species] for the player's card.
+  const backKeys = Object.keys(gen.gfx)
+    .filter((k) => k.startsWith("battle/back/"))
+    .sort();
+  const backPageByKey = new Map<string, number>();
+  for (const key of backKeys) {
+    backPageByKey.set(key, pages.length);
+    pages.push(buildPicPage(gen, key));
   }
-  if (gen.gfx["battle/back/redb"]) {
+  const pageForPath = (byKey: Map<string, number>, path: string | undefined) => {
+    if (!path) return undefined;
+    const key = path.replace(/^assets\/generated\//, "").replace(/\.png$/, "");
+    return byKey.get(key);
+  };
+  for (const [id, def] of Object.entries(gen.pokemon)) {
+    const front = pageForPath(frontPageByKey, def.spriteFront as string | undefined);
+    if (front !== undefined) frontIndex[id] = front;
+    const back = pageForPath(backPageByKey, def.spriteBack as string | undefined);
+    if (back !== undefined) backIndex[id] = back;
+  }
+  // The trainer back pic lives at battle/redb (no back/ prefix upstream).
+  if (gen.gfx["battle/redb"]) {
     backIndex.redb = pages.length;
-    pages.push(buildPicPage(gen, "battle/back/redb"));
+    pages.push(buildPicPage(gen, "battle/redb"));
   }
 
   // --- mesh ---------------------------------------------------------------
@@ -126,8 +141,8 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   // --- GAME + CMAP + pack --------------------------------------------------
   const atlas: AtlasIndex = {
     sprites: spriteIndex,
-    front: frontIndex,
-    back: backIndex,
+    picFront: frontIndex,
+    picBack: backIndex,
     emotePage,
     uiPage,
     terrainPage: 0,
@@ -145,6 +160,11 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
 
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, bytes);
+  // The Bun headless sim loads this instead of re-deriving from gen/, so
+  // both hosts see the SAME gamedata (the pak GAME section verbatim —
+  // notably the atlas page maps, without which no battle card ops emit and
+  // the recorded trace would diverge from a live device run).
+  writeFileSync(join(dirname(outPath), "gamedata.json"), gameJson);
 
   return {
     outPath,

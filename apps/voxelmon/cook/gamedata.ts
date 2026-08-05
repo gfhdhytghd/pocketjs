@@ -12,10 +12,10 @@ import type { GenData, TilesetDef } from "./data.ts";
 export interface AtlasIndex {
   /** sprite sheet name ("red", "oak", ...) -> atlas page. */
   sprites: Record<string, number>;
-  /** species id -> front-pic atlas page. */
-  front: Record<string, number>;
-  /** back-pic name ("redb") -> atlas page. */
-  back: Record<string, number>;
+  /** species id -> front-pic atlas page (the guest accessor contract). */
+  picFront: Record<string, number>;
+  /** species id (+ "redb") -> back-pic atlas page. */
+  picBack: Record<string, number>;
   emotePage: number | null;
   uiPage: number;
   terrainPage: number;

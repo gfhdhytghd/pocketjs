@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { VOX_BTN } from "../contracts/spec/voxel-spec.ts";
-import { fromGenDir, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
+import { loadRuntimeData, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
 import { seqRng } from "../apps/voxelmon/game/rng.ts";
 import { ENCOUNTER_BUCKETS } from "../apps/voxelmon/game/rules/encounter.ts";
 import { VoxelmonGame } from "../apps/voxelmon/game/game.ts";
@@ -32,7 +32,7 @@ const hasGen = REQUIRED_MODULES.every((m) => existsSync(join(genDir, `${m}.json`
 if (!hasGen) {
   console.log("[voxel-world] dist/voxelmon/gen absent (run `bun tools/voxel.ts import`) — ROM-gated suites skipped");
 }
-const romData: VoxelmonData | null = hasGen ? await fromGenDir(genDir) : null;
+const romData: VoxelmonData | null = hasGen ? await loadRuntimeData(genDir) : null;
 
 function makeGame(seed = 1): VoxelmonGame {
   const game = new VoxelmonGame(romData!, new RecorderHost(), seed);

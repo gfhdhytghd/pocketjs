@@ -29,7 +29,8 @@ import {
   BattleUi,
   hpBarTiles,
 } from "../apps/voxelmon/game/battle/ui.ts";
-import { fromGenDir, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
+import { loadRuntimeData, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
+import { encodeGlyphs } from "../apps/voxelmon/game/ui/tiles.ts";
 import type { VoxelHost } from "../apps/voxelmon/game/host.ts";
 import { RecorderHost } from "../apps/voxelmon/game/host.ts";
 import { seqRng } from "../apps/voxelmon/game/rng.ts";
@@ -49,7 +50,7 @@ if (!hasGen) {
     "[voxel-battle] dist/voxelmon/gen absent (run `bun tools/voxel.ts import`) — ROM-gated suites skipped",
   );
 }
-const data: VoxelmonData | null = hasGen ? await fromGenDir(genDir) : null;
+const data: VoxelmonData | null = hasGen ? await loadRuntimeData(genDir) : null;
 
 // ---------------------------------------------------------------------------
 // drive harness
@@ -498,6 +499,21 @@ class CaptureHost implements VoxelHost {
     }
     return undefined;
   }
+
+  /**
+   * Static chrome labels land in the grid as glyph tiles (uiText is the one
+   * typewriter run): read back the run starting at (x, y) and compare it to
+   * a string via its glyph encoding.
+   */
+  tiles(x: number, y: number, n: number): number[] {
+    const grid = new Map<string, number>();
+    for (const o of this.ops) {
+      if (o.op === "uiTile") grid.set(`${o.args[0]},${o.args[1]}`, o.args[2] as number);
+    }
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) out.push(grid.get(`${x + i},${y}`) ?? 0);
+    return out;
+  }
 }
 
 describe("battle screen layout", () => {
@@ -511,9 +527,9 @@ describe("battle screen layout", () => {
     ui.emit(host, b);
     // BATTLE_MENU_TEMPLATE: box (8,12) 12x6, labels from (10,14),
     // <PK><MN> at (16,14)+(17,14), '▶' at column 9 row 14
-    expect(host.text(10, 14)).toBe("FIGHT");
-    expect(host.text(10, 16)).toBe("ITEM");
-    expect(host.text(16, 16)).toBe("RUN");
+    expect(host.tiles(10, 14, 5)).toEqual(encodeGlyphs("FIGHT"));
+    expect(host.tiles(10, 16, 4)).toEqual(encodeGlyphs("ITEM"));
+    expect(host.tiles(16, 16, 3)).toEqual(encodeGlyphs("RUN"));
     expect(host.tile(16, 14)).toBe(0xe1);
     expect(host.tile(17, 14)).toBe(0xe2);
     expect(host.tile(9, 14)).toBe(0xed);
@@ -524,16 +540,16 @@ describe("battle screen layout", () => {
     expect(host.tile(19, 17)).toBe(0x7e);
     // enemy HUD: name row 0 col 1, <LV> at (4,1), bar row 2 with the $6C
     // nub at (10,2); player HUD: name (10,7), digits (11,10), $6D at (18,9)
-    expect(host.text(1, 0)).toBe("PIDGEY");
+    expect(host.tiles(1, 0, 6)).toEqual(encodeGlyphs("PIDGEY"));
     expect(host.tile(4, 1)).toBe(HUD_LV);
     expect(host.tile(2, 2)).toBe(HUD_HP_LABEL);
     expect(host.tile(3, 2)).toBe(HUD_BAR_LEFT);
     expect(host.tile(10, 2)).toBe(HUD_CAP_NUB);
-    expect(host.text(10, 7)).toBe("SQUIRTLE");
+    expect(host.tiles(10, 7, 8)).toEqual(encodeGlyphs("SQUIRTLE"));
     expect(host.tile(18, 9)).toBe(HUD_CAP_DOUBLE);
     const p = b.player.mon;
-    expect(host.text(11, 10)).toBe(
-      `${String(p.hp).padStart(3)}/${String(p.stats.hp).padStart(3)}`,
+    expect(host.tiles(11, 10, 7)).toEqual(
+      encodeGlyphs(`${String(p.hp).padStart(3)}/${String(p.stats.hp).padStart(3)}`),
     );
   });
 
@@ -545,13 +561,13 @@ describe("battle screen layout", () => {
     const ui = new BattleUi();
     ui.emit(host, b);
     // MoveSelectionMenu: names at column 6 from row 13, cursor column 5
-    expect(host.text(6, 13)).toBe("TACKLE");
-    expect(host.text(6, 14)).toBe("TAIL WHIP");
+    expect(host.tiles(6, 13, 6)).toEqual(encodeGlyphs("TACKLE"));
+    expect(host.tiles(6, 14, 9)).toEqual(encodeGlyphs("TAIL WHIP"));
     expect(host.tile(5, 13)).toBe(0xed);
     // PrintMenuItem: TYPE/ at (1,9), the type at (2,10), PP at (5,11)
-    expect(host.text(1, 9)).toBe("TYPE/");
-    expect(host.text(2, 10)).toBe("NORMAL");
-    expect(host.text(5, 11)).toBe("35/35");
+    expect(host.tiles(1, 9, 5)).toEqual(encodeGlyphs("TYPE/"));
+    expect(host.tiles(2, 10, 6)).toEqual(encodeGlyphs("NORMAL"));
+    expect(host.tiles(5, 11, 5)).toEqual(encodeGlyphs("35/35"));
     // the border-merge cells (#240)
     expect(host.tile(4, 12)).toBe(0x7a);
     expect(host.tile(10, 12)).toBe(0x7e);

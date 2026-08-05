@@ -9,7 +9,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { fromGenDir } from "../data.ts";
+import { loadRuntimeData } from "../data.ts";
 import { VoxelmonGame } from "../game.ts";
 import { RecorderHost } from "../host.ts";
 import { parseTape, TapePlayer, TapeStallError } from "./tape.ts";
@@ -33,7 +33,7 @@ if (!tapePath || !outPath) {
 
 const tapeText = await Bun.file(tapePath).text();
 const commands = parseTape(tapeText);
-const data = await fromGenDir(genDir);
+const data = await loadRuntimeData(genDir);
 
 const host = new RecorderHost();
 const game = new VoxelmonGame(data, host, seed);

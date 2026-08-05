@@ -313,3 +313,16 @@ export async function fromGenDir(dir: string): Promise<VoxelmonData> {
   }
   return fromObject(out);
 }
+
+/**
+ * The headless-run loader: prefer the cooked gamedata written next to the
+ * pak (the GAME section verbatim — including the atlas page maps, without
+ * which no battle card ops emit), so a Bun run records exactly what a
+ * device run replays. Falls back to the raw import for pre-cook runs.
+ */
+export async function loadRuntimeData(genDir: string): Promise<VoxelmonData> {
+  const at = genDir.lastIndexOf("/");
+  const cooked = Bun.file(`${genDir.slice(0, at < 0 ? 0 : at)}/gamedata.json`);
+  if (await cooked.exists()) return fromObject(JSON.parse(await cooked.text()));
+  return fromGenDir(genDir);
+}

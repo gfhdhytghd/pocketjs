@@ -193,7 +193,9 @@ export function buildUiPage(gen: GenData): PageDef {
   const h = 128; // 256 tiles / 16 per row * 8 px
   const linear = new Uint8Array(w * h).fill(PX_CLEAR);
   const place = (art: Art, base: number): void => {
-    const glyphsPerRow = gen.font.glyphsPerRow || 16;
+    // Source rows are the sheet's own width in tiles (font sheets are 16
+    // wide, the battle HUD pages 15 and 3).
+    const glyphsPerRow = Math.floor(art.w / 8);
     const count = Math.floor(art.w / 8) * Math.floor(art.h / 8);
     for (let g = 0; g < count; g++) {
       const sx = (g % glyphsPerRow) * 8;
@@ -216,6 +218,19 @@ export function buildUiPage(gen: GenData): PageDef {
   if (extra) place(extra, gen.font.extraBase);
   const font = artOf(gen, "fonts/font");
   if (font) place(font, gen.font.mainBase);
+  // The in-battle HUD overlay (gen1recomp HudTiles.lua PAGES): pokered
+  // overlays the $62-$78 font area — font_battle_extra at $62, then the
+  // three HUD line pages on top of its tail ($6D/$73/$76). The textbox
+  // borders at $79-$7F survive; battle and overworld share one UI page.
+  for (const [key, base] of [
+    ["battle/font_battle_extra", 0x62],
+    ["battle/battle_hud_1", 0x6d],
+    ["battle/battle_hud_2", 0x73],
+    ["battle/battle_hud_3", 0x76],
+  ] as const) {
+    const sheet = artOf(gen, key);
+    if (sheet) place(sheet, base);
+  }
   return { w, h, kind: ATLAS_KIND.ui, frames: [linear], name: "ui" };
 }
 
