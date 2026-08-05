@@ -13,6 +13,8 @@ pocketjs/
 │  ├─ wasm/       core compiled to wasm32 for web/sim hosts (standalone crate)
 │  ├─ symbian/    no_std Symbian UI static library: C ABI, capture raster + GLES2 DrawList backend (standalone crate)
 │  ├─ pocket3d/   the 3D core family (bsp, cook, gu, vita, GLES2) + desktop examples
+│  ├─ pocketvoxel/ the Pocket Voxel runtime family (docs/VOXEL.md): core + sim in
+│  │              the desktop workspace; gu + psp standalone (console toolchain)
 │  ├─ crates/     non-3D engine crates: pocket-mod, pocket-ui-surface, pocket-ui-wgpu, pocket-vrm, pocket-widget
 │  └─ Cargo.toml  the desktop workspace root (core/, wasm/, symbian/, and
 │                 console-toolchain crates are deliberately excluded and

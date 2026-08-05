@@ -154,6 +154,8 @@ The grammar is implemented once, as infrastructure every runtime reuses:
 | `pocket3d-gu` | The 3D substrate, PSP edition: renders cooked worlds through the GE (sceGu) with PVS culling, CLUT8 textures, and dynamic meshes. |
 | `pocketjs-psp` (lib) | Guest hosting + `ui` surface, PSP edition: the arena allocator, the QuickJS embedding, the DrawList GE backend (with an overlay mode for 3D compositing), pak feeding, and the DevTools mailbox — everything the 2D EBOOT proved, linkable by game EBOOTs. |
 | `pocket3d-vita` | The 3D substrate, Vita edition: CPU projection and six-plane clipping into vita2d/GXM at 960x544, painter-sorted so a PocketJS HUD can share the same scene. |
+| `pocketvoxel-core` | The Pocket Voxel presentation core (docs/VOXEL.md): the VXPK cooked-diorama reader, the retained voxel scene (chunks, billboards, camera rungs, battle rigs, the GB UI tile layer) and the `voxel` surface dispatcher. The gameplay it presents lives entirely in the guest — the first runtime where the game state is TypeScript and the core owns only the scene. |
+| `pocketvoxel-sim` | The Pocket Voxel headless host: replays recorded op traces through the real core and a software rasterizer into frame hashes and local PNGs — the acceptance path for a runtime whose guest is developed under Bun. |
 | `pocketjs-vita` (lib) | Guest hosting + `ui` surface, Vita edition: QuickJS, density-2 pak/font resources, controller/dual-analog input, logical-coordinate front-panel contacts and a native-density 960x544 vita2d backend over the portable 480x272 logical layout. |
 
 A specialized runtime is then a thin composition. OpenStrike is:
