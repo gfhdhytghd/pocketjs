@@ -8,7 +8,10 @@
 // (px + 16, py + 8) — the player sprite at screen tile (8,8). cam() takes
 // that centre in Q4.
 
-import { ENT_FLAG, ENTS_MAX, Q4 } from "../../../contracts/spec/voxel-spec.ts";
+import { ENT_FLAG, ENTS_MAX, Q4, Q8 } from "../../../contracts/spec/voxel-spec.ts";
+import type { WildBattle } from "./battle/battle.ts";
+import { desiredCards, type BattleStaging } from "./battle/staging.ts";
+import type { BattleUi } from "./battle/ui.ts";
 import type { VoxelmonData } from "./data.ts";
 import type { VoxelHost } from "./host.ts";
 import { computeNeighbors, type Overworld } from "./world/overworld.ts";
@@ -50,6 +53,13 @@ export interface ChoiceSource {
   yes: boolean;
 }
 
+/** The battle state the scene stages and draws (game.ts's battle state). */
+export interface BattleSceneView {
+  battle: WildBattle;
+  staging: BattleStaging | null;
+  ui: BattleUi;
+}
+
 /** What the scene reads each tick — game.ts satisfies this. */
 export interface SceneView {
   data: VoxelmonData;
@@ -58,6 +68,9 @@ export interface SceneView {
   uiBox(): UiBoxSource | null;
   /** Topmost YES/NO choice, if any (drawn over its parent box). */
   uiChoice(): ChoiceSource | null;
+  /** The active battle, if any — the scene then stages the arena and hands
+   * the GB tile layer to the battle ui. */
+  battleView(): BattleSceneView | null;
 }
 
 interface UiRowCache {
@@ -78,6 +91,10 @@ export class Scene {
   private uiArrow = false;
   private choiceDrawn = false;
   private choiceYes = true;
+  // battle staging deltas (docs/VOXEL.md §4 battle ops)
+  private battleActive = false;
+  private arenaStaged = false;
+  private cardShown = new Map<number, string>();
 
   constructor(host: VoxelHost) {
     this.host = host;
@@ -94,7 +111,70 @@ export class Scene {
     this.emitCam(view);
     this.emitEnts(view);
     this.emitEmote(view);
+    const bv = view.battleView();
+    if (bv) {
+      this.emitBattle(view, bv);
+      return;
+    }
+    if (this.battleActive) {
+      this.endBattle();
+    }
     this.emitUi(view);
+  }
+
+  // battle — arena/card/battleCam on entry, cardHide/arenaEnd on exit; the
+  // GB tile layer is handed to the battle ui (battle/ui.ts) while a battle
+  // is up. Nothing moves the player: the camera goes to the arena.
+  private emitBattle(view: SceneView, bv: BattleSceneView): void {
+    const host = this.host;
+    if (!this.battleActive) {
+      this.battleActive = true;
+      // drop the overworld ui program; the battle ui repaints from uiClear
+      this.uiOwner = null;
+      this.uiRows = [];
+      this.uiPage = -1;
+      this.uiArrow = false;
+      this.choiceDrawn = false;
+      if (bv.staging) {
+        const a = bv.staging.arena;
+        host.arena(bv.staging.mapIndex, a.x, a.y, a.shape, bv.staging.rig);
+        // battleCam defaults: orbit 0, pitch 0, zoom 1.0 (Q8); the solved
+        // rig constants live core-side, keyed by the arena op's rig arg
+        host.battleCam(0, 0, Q8);
+        this.arenaStaged = true;
+      }
+    }
+    const desired = bv.staging ? desiredCards(view.data, bv.battle, bv.staging) : [];
+    const seen = new Set<number>();
+    for (const c of desired) {
+      seen.add(c.side);
+      const key = `${c.pic},${c.x},${c.y}`;
+      if (this.cardShown.get(c.side) !== key) {
+        host.card(c.side, c.pic, c.x, c.y);
+        this.cardShown.set(c.side, key);
+      }
+    }
+    for (const side of [...this.cardShown.keys()]) {
+      if (!seen.has(side)) {
+        host.cardHide(side);
+        this.cardShown.delete(side);
+      }
+    }
+    bv.ui.emit(host, bv.battle);
+  }
+
+  private endBattle(): void {
+    const host = this.host;
+    for (const side of [...this.cardShown.keys()]) {
+      host.cardHide(side);
+    }
+    this.cardShown.clear();
+    if (this.arenaStaged) {
+      host.arenaEnd();
+      this.arenaStaged = false;
+    }
+    host.uiClear();
+    this.battleActive = false;
   }
 
   // world — slot 0 current, 1..4 the directly connected neighbours at their

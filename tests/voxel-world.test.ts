@@ -471,8 +471,8 @@ describe("encounters", () => {
         species: slots[slotIdx].species,
         level: slots[slotIdx].level,
       });
-      // BATTLE-PORT SEAM: the stub battle state is on top
-      expect(game.stackKinds()).toEqual(["overworld", "stubbattle"]);
+      // the REAL wild battle is on top (the battle port replaced the stub)
+      expect(game.stackKinds()).toEqual(["overworld", "battle"]);
     }
   });
 
@@ -486,13 +486,17 @@ describe("encounters", () => {
     expect(ow.encounterCount).toBe(0);
   });
 
-  test.skipIf(!hasGen)("the stub battle closes on B and pops back to the overworld", () => {
+  test.skipIf(!hasGen)("a grass encounter opens the real wild battle", () => {
     const game = grassStep(0, 100);
-    expect(game.stackKinds()).toEqual(["overworld", "stubbattle"]);
-    idle(game, 120); // let the box type out
-    game.tick(VOX_BTN.b);
-    game.tick(0);
-    expect(game.stackKinds()).toEqual(["overworld"]);
+    expect(game.stackKinds()).toEqual(["overworld", "battle"]);
+    const bv = game.battleView();
+    expect(bv).not.toBeNull();
+    expect(bv!.battle.kind).toBe("wild");
+    expect(bv!.battle.enemy.mon.species).toBe(game.overworld.lastEncounter!.species);
+    expect(bv!.battle.enemy.mon.level).toBe(game.overworld.lastEncounter!.level);
+    // the player stayed exactly where the encounter fired — nothing moves
+    // the player; the camera goes to the arena (docs/VOXEL.md §4)
+    expect([game.overworld.player.cellX, game.overworld.player.cellY]).toEqual([11, 7]);
   });
 });
 

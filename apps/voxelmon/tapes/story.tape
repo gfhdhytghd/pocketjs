@@ -1,8 +1,10 @@
 # story.tape — the overworld vertical slice, end to end (docs/VOXEL.md §9):
 # wake in the bedroom (REDS_HOUSE_2F 3,6), take the stairs down, leave the
 # house, read the Pallet Town sign, visit Oak's lab and step back out, walk
-# Route 1 north through the grass until a wild encounter opens (the stub
-# battle closes on B — the battle-port seam), and finish in Viridian City.
+# Route 1 north through the grass until a wild encounter opens the REAL
+# battle (fight one round with move 1, then RUN — the player's speed beats
+# the wild mon's, so TryRunningFromBattle always escapes), and finish in
+# Viridian City.
 #
 # Cell paths are plotted against dist/voxelmon/gen walkability grids; the
 # wild encounter fires on the (14,9) grass landing on ROUTE_1 with the
@@ -84,9 +86,28 @@ mark mid-route
 walk u 2
 walk u 2
 walk u 1
+# intro: the 72-tick silhouette slide + "Wild PIDGEY appeared!" types out
+wait 200
+press a
+# send-out beats (40 + 18) + "Go! SQUIRTLE!" types
 wait 150
-press b
+press a
+# POOF row resolves, the action menu opens on FIGHT
+wait 20
+press a
+# move menu opens on slot 1 (TACKLE)
 wait 10
+press a
+# one full exchange: used-move texts, anim beats, HP drains, residual acts
+wait 400
+# back at the menu on FIGHT; RUN is row 1 col 1
+press d
+press r
+press a
+# "Got away safely!" types, then A dismisses and the battle pops
+wait 100
+press a
+wait 30
 mark encounter-seen
 
 # out the top of the patch and up the (10,*)/(11,*) corridor

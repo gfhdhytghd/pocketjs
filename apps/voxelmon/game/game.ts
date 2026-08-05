@@ -10,13 +10,29 @@
 // the frame a script/box closes non-actionable for the world below) ->
 // presentation emit -> frameDone.
 
+import { WildBattle } from "./battle/battle.ts";
+import { healMon, newMon, type PartyMon } from "./battle/mon.ts";
+import { computeStaging, type BattleStaging } from "./battle/staging.ts";
+import { BattleUi } from "./battle/ui.ts";
 import type { VoxelmonData } from "./data.ts";
 import type { VoxelHost } from "./host.ts";
 import { Input } from "./input.ts";
 import { seededRng, type Rng } from "./rng.ts";
-import { Scene, type ChoiceSource, type SceneView, type UiBoxSource } from "./scene.ts";
+import { POST_BATTLE_RETURN } from "./rules/timing.ts";
+import {
+  Scene,
+  type BattleSceneView,
+  type ChoiceSource,
+  type SceneView,
+  type UiBoxSource,
+} from "./scene.ts";
 import { Overworld, type OverworldShell, type SaveSlice } from "./world/overworld.ts";
 import { Textbox } from "./world/textbox.ts";
+
+/** The full save: the overworld slice plus the party the battle port added. */
+export interface GameSave extends SaveSlice {
+  party: PartyMon[];
+}
 
 export interface GameState {
   readonly kind: string;
@@ -118,30 +134,46 @@ class WarpFadeState implements GameState {
   }
 }
 
-// BATTLE-PORT SEAM: the real battle state machine (damage / crit / status /
-// catch / run / exp staged in the voxel arena) replaces this state in a
-// later task. For the overworld slice a wild encounter opens a textbox and
-// pops back on A/B.
-class StubBattleState implements GameState, UiBoxSource {
-  readonly kind = "stubbattle";
-  readonly box: Textbox;
+// The real wild battle (replacing the overworld slice's StubBattle seam):
+// the gen1recomp BattleState port in battle/battle.ts, staged in the voxel
+// arena (battle/staging.ts) and drawn through the GB tile layer
+// (battle/ui.ts). This state owns the battle's lifetime on the stack; the
+// scene reads it through SceneView.battleView().
+class BattleGameState implements GameState, BattleSceneView {
+  readonly kind = "battle";
+  readonly battle: WildBattle;
+  readonly staging: BattleStaging | null;
+  readonly ui = new BattleUi();
+  private postFrames = -1;
+
   constructor(
     private game: VoxelmonGame,
     species: string,
     level: number,
   ) {
-    const name = game.data.pokemon[species]?.name ?? species;
-    void level; // the real battle consumes it; the stub only announces
-    this.box = new Textbox(`Wild ${name}\nappeared!`, {
-      player: game.save.player.name,
-      rival: game.save.player.rival,
-    });
+    this.battle = new WildBattle(game.data, game.save, game.battleRng, species, level);
+    // stage where the player stands; nothing moves the player — the camera
+    // goes to the arena (docs/VOXEL.md §4)
+    const ow = game.overworld;
+    this.staging = computeStaging(ow.map, ow.player.cellX, ow.player.cellY, ow.player.surfing);
+    this.battle.enter();
   }
+
   update(): void {
-    this.box.update(this.game.input);
-    if (this.box.closed) {
-      this.game.pop();
+    const b = this.battle;
+    if (b.finished) {
+      // POST_BATTLE_RETURN (home/overworld.asm:351-352): the hold before
+      // EnterMap hands the map back; then pop to the overworld exactly
+      // where the player stood
+      if (this.postFrames < 0) this.postFrames = POST_BATTLE_RETURN;
+      this.postFrames -= 1;
+      if (this.postFrames <= 0) {
+        this.game.pop();
+        if (b.finished === "lose") this.game.blackout();
+      }
+      return;
     }
+    b.update(this.game.input);
   }
 }
 
@@ -149,11 +181,14 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   readonly data: VoxelmonData;
   readonly host: VoxelHost;
   readonly input = new Input();
-  /** Encounter/battle roll stream. Tests may swap it after construction. */
+  /** Encounter roll stream. Tests may swap it after construction. */
   rng: Rng;
   /** NPC wander stream — separate so ambience can't perturb encounters. */
   npcRng: Rng;
-  save!: SaveSlice;
+  /** Battle stream — separate so in-battle rolls (enemy DVs, crits, catch
+   * wobbles) can never perturb the overworld route's determinism. */
+  battleRng: Rng;
+  save!: GameSave;
   overworld!: Overworld;
   private stack: GameState[] = [];
   private scene: Scene;
@@ -165,6 +200,8 @@ export class VoxelmonGame implements OverworldShell, SceneView {
     this.rng = seededRng(seed >>> 0);
     // decorrelated second stream (fixed odd offset keeps seed 0 distinct)
     this.npcRng = seededRng(((seed >>> 0) ^ 0x9e3779b9) >>> 0);
+    // third stream for battles (same decorrelation trick, distinct constant)
+    this.battleRng = seededRng(((seed >>> 0) ^ 0x85ebca6b) >>> 0);
     this.scene = new Scene(host);
   }
 
@@ -184,10 +221,31 @@ export class VoxelmonGame implements OverworldShell, SceneView {
       player: { name: "RED", rival: "BLUE" },
       lastHeal: { map: "PALLET_TOWN", x: 5, y: 6 },
       lastOutdoor: { id: "PALLET_TOWN", x: 5, y: 6 },
+      // DEVIATION (battle slice): the reference new-game party is EMPTY
+      // until Oak's lab hands out a starter (SaveData.lua newGame); the
+      // slice has no lab script yet, so newGame grants SQUIRTLE L5 with
+      // fixed zero DVs (deterministic — no rng draw at boot) so wild
+      // encounters are playable end to end.
+      party: [newMon(this.data, "SQUIRTLE", 5)],
     };
     this.overworld = new Overworld(this);
     this.stack = [new OverworldState(this.overworld)];
     this.overworld.enter("REDS_HOUSE_2F", 3, 6, "down");
+  }
+
+  /**
+   * The blackout path a lost battle takes (pokered HandleBlackOut,
+   * engine/battle/core.asm:1157+: heal the party, special-warp to the last
+   * Pokémon center). v1: full heal + the warp fade to save.lastHeal; the
+   * money halving (ResetStatusAndHalveMoneyOnBlackout) has no money field
+   * to act on in this slice.
+   */
+  blackout(): void {
+    for (const mon of this.save.party) healMon(this.data, mon);
+    const heal = this.save.lastHeal;
+    if (heal) {
+      this.overworld.startWarpTo(heal.map, heal.x, heal.y, "down");
+    }
   }
 
   /** One guest turn per host tick — exactly once. */
@@ -233,8 +291,11 @@ export class VoxelmonGame implements OverworldShell, SceneView {
     this.push(new WarpFadeState(this, frames, midpoint, onDone));
   }
 
+  // OverworldShell keeps the seam's method name (overworld.ts is another
+  // task's file); since the battle port it constructs the REAL wild battle
+  // (BattleState.newWild in the reference).
   pushStubBattle(species: string, level: number): void {
-    this.push(new StubBattleState(this, species, level));
+    this.push(new BattleGameState(this, species, level));
   }
 
   // SceneView -----------------------------------------------------------
@@ -250,5 +311,13 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   uiChoice(): ChoiceSource | null {
     const top = this.stack[this.stack.length - 1];
     return top?.kind === "choice" ? (top as ChoiceState) : null;
+  }
+
+  battleView(): BattleSceneView | null {
+    for (let i = this.stack.length - 1; i >= 0; i--) {
+      const s = this.stack[i];
+      if (s.kind === "battle") return s as BattleGameState;
+    }
+    return null;
   }
 }
