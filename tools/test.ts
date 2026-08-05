@@ -68,6 +68,19 @@ const SUITE: readonly Stage[] = [
     ],
   },
   {
+    // ROM-fed stages skip themselves with a printed reason when the ROM /
+    // reference checkouts are absent (apps/voxelmon/SCHEMA.md); the contract
+    // drift guard and fixture-based rules always run.
+    name: "voxel",
+    tests: [
+      "tests/voxel-contract.test.ts",
+      "tests/voxel-rules.test.ts",
+      "tests/voxel-import.test.ts",
+      "tests/voxel-world.test.ts",
+      "tests/voxel-cook.test.ts",
+    ],
+  },
+  {
     name: "unit (wasm host)",
     browser: true,
     tests: [
