@@ -119,10 +119,11 @@ fn cli_hashes_shots_and_assert() {
 
     let args = |assert: bool| crate::Args {
         pak: pak_path.clone(),
-        trace: trace_path.clone(),
+        trace: Some(trace_path.clone()),
         shots: Some(shots_dir.clone()),
         hashes: Some(hashes_path.clone()),
         assert,
+        validate: false,
     };
     assert_eq!(crate::run(&args(false)), Ok(true), "record run succeeds");
     let png = std::fs::read(shots_dir.join("boot.png")).expect("shot written");

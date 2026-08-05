@@ -4,7 +4,11 @@
 //!
 //! ```text
 //! pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert]
+//! pocketvoxel-sim <pak> --validate
 //! ```
+//!
+//! `--validate` loads the pak through the full reader (every range check)
+//! and prints a one-line summary — the cook test's smoke gate.
 //!
 //! Without `--assert`, hashes print to stdout (and write to `--hashes` when
 //! given) as `<name> <hex>` lines — the committed golden format
@@ -27,15 +31,16 @@ use pocketvoxel_core::pak::{self, AlignedBlob};
 
 struct Args {
     pak: PathBuf,
-    trace: PathBuf,
+    trace: Option<PathBuf>,
     shots: Option<PathBuf>,
     hashes: Option<PathBuf>,
     assert: bool,
+    validate: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert]"
+        "usage: pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert]\n       pocketvoxel-sim <pak> --validate"
     );
     std::process::exit(2);
 }
@@ -46,6 +51,7 @@ fn parse_args() -> Args {
     let mut shots = None;
     let mut hashes = None;
     let mut assert = false;
+    let mut validate = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -53,13 +59,15 @@ fn parse_args() -> Args {
             "--shots" => shots = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--hashes" => hashes = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--assert" => assert = true,
+            "--validate" => validate = true,
             _ if pak.is_none() && !arg.starts_with('-') => pak = Some(PathBuf::from(arg)),
             _ => usage(),
         }
     }
-    let (Some(pak), Some(trace)) = (pak, trace) else {
+    let Some(pak) = pak else { usage() };
+    if !validate && trace.is_none() {
         usage()
-    };
+    }
     if assert && hashes.is_none() {
         eprintln!("--assert needs --hashes <file> to compare against");
         std::process::exit(2);
@@ -70,6 +78,7 @@ fn parse_args() -> Args {
         shots,
         hashes,
         assert,
+        validate,
     }
 }
 
@@ -96,10 +105,28 @@ fn run(args: &Args) -> Result<bool, String> {
     // ones; a Vec<u8> from the filesystem carries no alignment guarantee.
     let blob = AlignedBlob::from_bytes(&raw);
     let pak = pak::read(blob.bytes()).map_err(|e| format!("{}: {e}", args.pak.display()))?;
+
+    if args.validate {
+        println!(
+            "valid: {} maps, {} chunks, {} verts, {} indices, {} atlases, {} palettes, {} stamps, {} glyphs, {} game bytes",
+            pak.maps.len(),
+            pak.chunks.len(),
+            pak.verts.len(),
+            pak.indices.len(),
+            pak.atlases.len(),
+            pak.palettes.len(),
+            pak.stamps.len(),
+            pak.charmap.len(),
+            pak.game.len(),
+        );
+        return Ok(true);
+    }
+
     let cache = raster::AtlasCache::new(&pak);
 
-    let text = std::fs::read_to_string(&args.trace)
-        .map_err(|e| format!("{}: {e}", args.trace.display()))?;
+    let trace_path = args.trace.as_ref().unwrap();
+    let text = std::fs::read_to_string(trace_path)
+        .map_err(|e| format!("{}: {e}", trace_path.display()))?;
     let entries = trace::parse(&text)?;
 
     if let Some(dir) = &args.shots {
