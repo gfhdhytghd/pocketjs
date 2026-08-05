@@ -454,6 +454,13 @@ impl Renderer {
         // Every textured pass alpha-tests at 0x80, the raster's texel cutoff.
         sys::sceGuEnable(GuState::AlphaTest);
         sys::sceGuDisable(GuState::Blend);
+        // NO back-face culling. Tried on device: it wins ~40% of the frame
+        // (66 ms -> 40 ms outdoors) but visibly eats faces that should stay
+        // — the cooked streams do not share one winding (column tops,
+        // gables, water and grass slabs are each emitted in their own
+        // order), so a single sceGuFrontFace cannot be right for all of
+        // them. The honest fix is geometric: drop fully-occluded faces at
+        // COOK time, where each face's neighbours are known.
         self.bind(pak, m.page, m.frame, true);
 
         // Splice this mesh's u16 index range through the pool (pak indices

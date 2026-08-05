@@ -26,6 +26,7 @@ commands:
   check     import-if-missing + cook + sim + rasterize vs the hash goldens
   record    like check, but (re)write tests/goldens/voxel/story.hashes
   shots     like check, but write PNG frames to dist/voxelmon/shots/ (local)
+  wav       render the chip synth to dist/voxelmon/audio/*.wav (local)
   psp       gen+cook+trace + bundle game.js + cargo psp -> EBOOT.PBP
             (extra args pass to cargo psp, e.g. --release, --features capture)
   run       psp, then launch the EBOOT in PPSSPP
@@ -302,6 +303,9 @@ async function main(): Promise<number> {
       return await launchPpsspp(cargoArgs.includes("--release") ? "release" : "debug");
     }
     return 0;
+  }
+  if (command === "wav") {
+    return await run(["bun", "apps/voxelmon/game/audio/wav.ts", ...process.argv.slice(3)]);
   }
   if (command === "cook") {
     return await run(["bun", "apps/voxelmon/cook/cli.ts", ...process.argv.slice(3)]);

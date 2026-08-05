@@ -7,7 +7,7 @@
 // palettes -> GAME + CMAP -> dist/voxelmon/voxelmon.vxpak. Prints per-stage
 // stats. Skips (exit 1, printed reason) when gen/ is absent.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
@@ -149,12 +149,21 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   };
   const gameJson = buildGamedata(gen, atlas);
   const glyphs = buildCharmap(gen);
+  // The chip synth's input rides in its own AUDI section: the importer's
+  // audio.json + programs.bin, spliced verbatim (the guest is the only
+  // parser). Absent for a dataset imported before the audio stage existed —
+  // AUDI is then written empty and the game runs silent.
+  const audioJsonPath = join(genDir, "audio.json");
+  const audioProgramPath = join(genDir, "programs.bin");
+  const hasAudio = existsSync(audioJsonPath) && existsSync(audioProgramPath);
   const { bytes, stats } = writePak({
     palettes: buildPalettes(gen),
     pages,
     maps: packedMaps,
     glyphs,
     gameJson,
+    audioJson: hasAudio ? new Uint8Array(readFileSync(audioJsonPath)) : undefined,
+    audioPrograms: hasAudio ? new Uint8Array(readFileSync(audioProgramPath)) : undefined,
     emotePage,
   });
 

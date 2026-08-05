@@ -10,7 +10,9 @@
 // the frame a script/box closes non-actionable for the world below) ->
 // presentation emit -> frameDone.
 
-import { WildBattle } from "./battle/battle.ts";
+import { fromSection, type AudioBanks } from "./audio/banks.ts";
+import { AudioDirector } from "./audio/music.ts";
+import { WildBattle, type BattleResult } from "./battle/battle.ts";
 import { healMon, newMon, type PartyMon } from "./battle/mon.ts";
 import { computeStaging, type BattleStaging } from "./battle/staging.ts";
 import { BattleUi } from "./battle/ui.ts";
@@ -28,6 +30,15 @@ import {
 } from "./scene.ts";
 import { Overworld, type OverworldShell, type SaveSlice } from "./world/overworld.ts";
 import { Textbox } from "./world/textbox.ts";
+
+/**
+ * The chip synth's output rate. Every AUDIO_RATES value divides 44.1 kHz
+ * exactly, so any host resamples with cheap integer math
+ * (contracts/spec/audio.ts); the guest's per-tick synthesis cost is linear
+ * in it, and 11.025 kHz keeps every GB channel's fundamental (the highest
+ * note the pitch table reaches is ~2 kHz) inside Nyquist.
+ */
+const AUDIO_RATE = 11025;
 
 /** The full save: the overworld slice plus the party the battle port added. */
 export interface GameSave extends SaveSlice {
@@ -73,7 +84,14 @@ class TextBoxState implements GameState, UiBoxSource {
       }
       return;
     }
+    const wasWaiting = this.box.waiting;
+    const wasDone = this.box.done;
     this.box.update(this.game.input);
+    // TextBox.lua:269 and :284 — A/B both close a finished box and advance a
+    // waiting one, and each plays the Press_AB beep.
+    if ((wasDone && this.box.closed) || (wasWaiting && !this.box.waiting)) {
+      this.game.audio.playSfx("Press_AB");
+    }
     if (this.choice && this.box.done) {
       if (!this.choicePushed) {
         this.choicePushed = true;
@@ -101,11 +119,13 @@ class ChoiceState implements GameState, ChoiceSource {
       this.yes = !this.yes;
     }
     if (input.wasPressed("a")) {
+      this.game.audio.playSfx("Press_AB"); // ChoiceBox.lua:53
       this.game.pop(); // this choice
       this.game.pop(); // the text box under it (ChoiceBox pops both)
       this.cb(this.yes);
     } else if (input.wasPressed("b")) {
       // B answers NO (pokered HandleYesNoMenu's B path)
+      this.game.audio.playSfx("Press_AB"); // ChoiceBox.lua:59
       this.game.pop();
       this.game.pop();
       this.cb(false);
@@ -190,9 +210,16 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   battleRng: Rng;
   save!: GameSave;
   overworld!: Overworld;
+  /** Music, SFX and cries. Silent until setAudio() hands it the pak banks. */
+  audio = new AudioDirector(null);
   private stack: GameState[] = [];
   private scene: Scene;
   tickIndex = 0;
+  // audio policy observation (the reference calls Music/Sound from the sites
+  // themselves; the port watches the same state transitions from one place)
+  private audioMap: string | null = null;
+  private audioBattle = false;
+  private audioResult: BattleResult | null = null;
 
   constructor(data: VoxelmonData, host: VoxelHost, seed = 1) {
     this.data = data;
@@ -203,6 +230,53 @@ export class VoxelmonGame implements OverworldShell, SceneView {
     // third stream for battles (same decorrelation trick, distinct constant)
     this.battleRng = seededRng(((seed >>> 0) ^ 0x85ebca6b) >>> 0);
     this.scene = new Scene(host);
+  }
+
+  /**
+   * Install the chip synth's program banks. Emits the `audiodata` op on
+   * EVERY host, so the recorded trace matches what a device run replays;
+   * pass `banks` on the Bun transport (gen/audio.json + programs.bin), or
+   * null to take the pak's AUDIO section from the op's answer.
+   */
+  setAudio(banks: AudioBanks | null, rate = AUDIO_RATE): void {
+    const bytes = this.host.audiodata();
+    this.audio = new AudioDirector(banks ?? fromSection(bytes), { rate });
+  }
+
+  /**
+   * The audio policy, ported from the reference's call sites: map themes on
+   * map entry (Music.lua:339 playMap), the battle theme and the wild mon's
+   * cry on encounter (BattleState.lua:1458, :1496-1498), the victory jingle
+   * the moment the win is decided (Music.lua:370), and the map theme back
+   * when the battle closes (:407 restoreMap).
+   */
+  private driveAudio(): void {
+    const bv = this.battleView();
+    if (bv) {
+      if (!this.audioBattle) {
+        this.audioBattle = true;
+        this.audioResult = null;
+        this.audio.playBattle("wild");
+        this.audio.playCry(bv.battle.enemy.mon.species);
+      } else if (bv.battle.result && bv.battle.result !== this.audioResult) {
+        this.audioResult = bv.battle.result;
+        // Music.playVictory only has a jingle for a won fight; a run or a
+        // catch keeps the battle theme until the state pops.
+        if (bv.battle.result === "win") this.audio.playVictory("wild");
+      }
+      return;
+    }
+    if (this.audioBattle) {
+      this.audioBattle = false;
+      this.audioResult = null;
+      this.audio.restore();
+      return;
+    }
+    const mapId = this.overworld.map.id;
+    if (mapId !== this.audioMap) {
+      this.audioMap = mapId;
+      this.audio.startMap(mapId);
+    }
   }
 
   /**
@@ -255,6 +329,8 @@ export class VoxelmonGame implements OverworldShell, SceneView {
     const top = this.stack[this.stack.length - 1];
     top?.update();
     this.scene.emit(this);
+    this.driveAudio();
+    this.audio.tick();
     this.host.frameDone(this.tickIndex, buttons);
     this.tickIndex += 1;
   }

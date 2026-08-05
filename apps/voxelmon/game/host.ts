@@ -10,6 +10,9 @@ export interface VoxelHost {
   // system
   /** The pak GAME section (boot, cold). Null off-device: Bun loads gen/. */
   gamedata(): ArrayBuffer | null;
+  /** The pak AUDIO section — the chip synth's banks + manifest (boot, cold).
+   *  Null off-device (Bun loads gen/) and on a pak cooked without audio. */
+  audiodata(): ArrayBuffer | null;
   stats(): ArrayBuffer | null;
   reset(): void;
   // world
@@ -77,6 +80,10 @@ export class RecorderHost implements VoxelHost {
 
   gamedata(): ArrayBuffer | null {
     this.op(VOX_OP.gamedata);
+    return null;
+  }
+  audiodata(): ArrayBuffer | null {
+    this.op(VOX_OP.audiodata);
     return null;
   }
   stats(): ArrayBuffer | null {

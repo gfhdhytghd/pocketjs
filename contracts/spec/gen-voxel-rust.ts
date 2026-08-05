@@ -72,6 +72,7 @@ import {
   VOX_BTN,
   VOX_OP,
   VXPK_ALIGN,
+  VXPK_AUDIO_HEADER_SIZE,
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
@@ -307,6 +308,8 @@ export function generateVoxelRust(): string {
   put(`pub const VXPK_HEADER_SIZE: usize = ${VXPK_HEADER_SIZE};`);
   put(`pub const VXPK_ENTRY_SIZE: usize = ${VXPK_ENTRY_SIZE};`);
   put(`pub const VXPK_ALIGN: usize = ${VXPK_ALIGN};`);
+  put("/// The AUDI payload's own header (json_len, program_len, two pad words).");
+  put(`pub const VXPK_AUDIO_HEADER_SIZE: usize = ${VXPK_AUDIO_HEADER_SIZE};`);
   put("");
   constMod(put, "tag", "u32", VXPK_TAG, ["Section tags (4CC, LE u32)."]);
   constMod(put, "atlas_kind", "u16", ATLAS_KIND, ["Atlas page kinds."]);

@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { VOX_BTN, VOX_OP } from "../contracts/spec/voxel-spec.ts";
+import { fromGenDir as loadAudioBanks } from "../apps/voxelmon/game/audio/banks.ts";
 import { loadRuntimeData, REQUIRED_MODULES, type VoxelmonData } from "../apps/voxelmon/game/data.ts";
 import { seqRng } from "../apps/voxelmon/game/rng.ts";
 import { ENCOUNTER_BUCKETS } from "../apps/voxelmon/game/rules/encounter.ts";
@@ -536,6 +537,9 @@ const STORY_SEED = 17;
 async function runStoryInProcess(): Promise<RecorderHost> {
   const host = new RecorderHost();
   const game = new VoxelmonGame(romData!, host, STORY_SEED);
+  // sim/cli.ts installs the audio banks before newGame; the `audiodata` op it
+  // emits is part of the trace, so this run has to do the same to compare.
+  game.setAudio(await loadAudioBanks(genDir));
   game.newGame();
   const tapeText = await Bun.file(join(root, "apps/voxelmon/tapes/story.tape")).text();
   const tape = new TapePlayer(parseTape(tapeText));

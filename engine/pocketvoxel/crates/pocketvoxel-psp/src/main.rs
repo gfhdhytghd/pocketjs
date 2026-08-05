@@ -157,6 +157,14 @@ unsafe fn load_pak_blob() -> Option<&'static [u8]> {
 }
 
 unsafe fn run() {
+    // Partition size BEFORE anything allocates: PSPLINK's ldstart path does
+    // not apply the PBP's MEMSIZE, so a dev session can get the 24 MB user
+    // partition where an XMB launch gets ~56 MB. Knowing which is which is
+    // the difference between "the guest is too fat" and "this session is".
+    psp::dprintln!(
+        "[voxelmon] boot: max free {} KB",
+        sys::sceKernelMaxFreeMemSize() / 1024
+    );
     // ---- Pak FIRST: its dedicated kernel block must exist before the
     // arena's lazy init (first Rust allocation) sizes the arena over the
     // remaining partition — see load_pak_blob.
@@ -193,6 +201,9 @@ unsafe fn run() {
     // The GAME section borrows from the leaked (never-freed) blob, so the
     // 'static it carries is honest.
     voxel::init(pak.game);
+    // The chip synth's banks (pak AUDI section) reach the guest through the
+    // `audiodata` op; a pak without one leaves the director silent.
+    voxel::set_audio(pak.audio);
 
     // ---- QuickJS ----
     let rt = pocketjs_psp::qjs_alloc::new_runtime();
@@ -205,6 +216,10 @@ unsafe fn run() {
     }
     let global = JS_GetGlobalObject(ctx);
     voxel::register(ctx, global);
+    // globalThis.audio — the PocketJS audio module (credit-based PCM). This
+    // surface is mounted on its own, not through ffi::register (that mounts
+    // the `ui` surface this EBOOT does not use).
+    pocketjs_psp::ffi::register_audio(ctx, global);
 
     let res = JS_Eval(
         ctx,

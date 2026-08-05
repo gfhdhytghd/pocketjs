@@ -78,6 +78,7 @@ const SUITE: readonly Stage[] = [
       "tests/voxel-import.test.ts",
       "tests/voxel-world.test.ts",
       "tests/voxel-cook.test.ts",
+      "tests/voxel-audio.test.ts",
     ],
   },
   {

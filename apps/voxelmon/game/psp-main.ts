@@ -13,6 +13,7 @@
 // gamedata.json — the GAME section verbatim), so a Bun run records exactly
 // what this entry replays on device.
 
+import { fromSection } from "./audio/banks.ts";
 import { fromObject } from "./data.ts";
 import { VoxelmonGame } from "./game.ts";
 import type { VoxelHost } from "./host.ts";
@@ -24,6 +25,7 @@ const SEED = 17;
 /** The native surface pocketvoxel-psp registers before evaling this file. */
 interface VoxelNative {
   gamedata(): string;
+  audiodata(): ArrayBuffer | undefined;
   stats(): void;
   reset(): void;
   mapShow(slot: number, mapId: number, ox: number, oy: number): void;
@@ -68,6 +70,11 @@ class QuickJsHost implements VoxelHost {
     // The boot path below reads the GAME string directly; the game never
     // crosses for data again after construction.
     return null;
+  }
+  audiodata(): ArrayBuffer | null {
+    // One cold read at boot, like gamedata(); undefined = a pak without
+    // audio, which the director takes as "run silent".
+    return native.audiodata ? (native.audiodata() ?? null) : null;
   }
   stats(): ArrayBuffer | null {
     native.stats();
@@ -150,8 +157,19 @@ class QuickJsHost implements VoxelHost {
 }
 
 // ---- boot: one cold parse, then the guest owns the game ----
+const host = new QuickJsHost();
 const source = JSON.parse(native.gamedata()) as Record<string, unknown>;
-const game = new VoxelmonGame(fromObject(source), new QuickJsHost(), SEED);
+const game = new VoxelmonGame(fromObject(source), host, SEED);
+// The chip synth's banks ride in the pak's AUDI section, read once through
+// the `audiodata` op; a pak without one leaves the director silent and the
+// rest of the game unchanged.
+// TEMPORARILY OFF on device: the guest-side chip synth runs inside the
+// tick, and its real cost on QuickJS/MIPS has never been measured (the Bun
+// figure is 35-52 us/tick; the interpreter is 50-100x slower). Enabling it
+// visibly stuttered the frame on hardware, so the director stays silent
+// until the per-tick synthesis cost is measured and budgeted.
+game.setAudio(null);
+void fromSection;
 game.newGame();
 
 (globalThis as unknown as { frame: (buttons: number) => void }).frame = (

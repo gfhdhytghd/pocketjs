@@ -1,5 +1,5 @@
 // The wild-battle state machine. Ports gen1recomp src/battle/BattleState.lua
-// for the v1 wild slice (docs/VOXEL.md §9): the message/action QUEUE is the
+// for the v1 wild slice (docs/VOXEL.md §10): the message/action QUEUE is the
 // engine — menus interleave with messages, drains and holds, and the queue
 // is what sequences them (say/sayNext/act/actNext/waitNext, :833-963;
 // updateQueue :1064) — plus intro (enter :1417), the FIGHT/PKMN/ITEM/RUN

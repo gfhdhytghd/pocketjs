@@ -218,6 +218,7 @@ pub mod op {
     pub const GAMEDATA: u32 = 1;
     pub const STATS: u32 = 2;
     pub const RESET: u32 = 3;
+    pub const AUDIODATA: u32 = 17;
     pub const MAP_SHOW: u32 = 10;
     pub const MAP_HIDE: u32 = 11;
     pub const CAM: u32 = 12;
@@ -257,10 +258,12 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 1;
+pub const VXPK_VERSION: u16 = 2;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
+/// The AUDI payload's own header (json_len, program_len, two pad words).
+pub const VXPK_AUDIO_HEADER_SIZE: usize = 16;
 
 /// Section tags (4CC, LE u32).
 pub mod tag {
@@ -271,6 +274,7 @@ pub mod tag {
     pub const STAMPS: u32 = 1347245139;
     pub const CHARMAP: u32 = 1346456899;
     pub const GAME: u32 = 1162690887;
+    pub const AUDIO: u32 = 1229215041;
 }
 
 /// Atlas page kinds.

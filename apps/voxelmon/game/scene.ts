@@ -105,7 +105,7 @@ export class Scene {
     const host = this.host;
     if (!this.started) {
       this.started = true;
-      // pitch rung 2 at boot (docs/VOXEL.md §9 scope; PITCH_RUNGS[2] = 35°)
+      // pitch rung 2 at boot (docs/VOXEL.md §10 scope; PITCH_RUNGS[2] = 35°)
       host.pitch(2);
     }
     this.emitMaps(view);

@@ -264,6 +264,12 @@ export const EMOTE = {
 //     gamedata() -> ArrayBuffer            the pak GAME section (boot, cold)
 //     stats() -> ArrayBuffer               frame counters (debug)
 //     reset()                              drop scene state to boot
+//     audiodata() -> ArrayBuffer | null    the pak AUDIO section (boot, cold):
+//                                          the chip synth's program banks +
+//                                          their manifest. Null where the pak
+//                                          carries no audio — the guest then
+//                                          runs silent. Same one-cold-read
+//                                          discipline as gamedata()
 //   world
 //     mapShow(slot, mapId, ox, oy)         slot 0 current, 1..4 neighbours;
 //                                          ox/oy = seam offset in world px
@@ -306,6 +312,7 @@ export const VOX_OP = {
   gamedata: 1,
   stats: 2,
   reset: 3,
+  audiodata: 17,
 
   mapShow: 10,
   mapHide: 11,
@@ -370,10 +377,13 @@ export const EVENT_CAP = 64;
 // never indexes unchecked.
 
 export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
-export const VXPK_VERSION = 1;
+/** 2 since the required section set gained AUDI (the chip synth's banks). */
+export const VXPK_VERSION = 2;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
+/** The AUDI payload's own header (json_len, program_len, two pad words). */
+export const VXPK_AUDIO_HEADER_SIZE = 16;
 
 /** Section tags (4CC, LE u32). */
 export const VXPK_TAG = {
@@ -406,6 +416,16 @@ export const VXPK_TAG = {
   charmap: 0x50414d43, // 'CMAP'
   /** The gameplay dataset the guest parses at boot (JSON bytes). */
   game: 0x454d4147, // 'GAME'
+  /**
+   * The chip synth's input, returned verbatim by the `audiodata` op:
+   *   0  u32 json_len       audio.json (UTF-8), the header/song tables
+   *   4  u32 program_len    programs.bin, the concatenated ROM sound banks
+   *   8  u32 pad = 0 | 12 u32 pad = 0
+   *   16 json bytes, then 16-aligned, program bytes
+   * Both halves may be empty (a pak cooked without audio); the guest then
+   * runs silent. See apps/voxelmon/game/audio/banks.ts for the reader.
+   */
+  audio: 0x49445541, // 'AUDI'
 } as const;
 
 /** Atlas page kinds. */

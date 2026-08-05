@@ -14,8 +14,8 @@
 //! The spec pins the container and the section tags; the payload byte
 //! layouts are pinned HERE and mirrored byte-for-byte by [`builder`] (the TS
 //! cooker is written against the same shapes). All sections are required and
-//! appear in ascending numeric tag order: META, GAME, CHNK, VPAL, CMAP,
-//! STMP, ATLS.
+//! appear in ascending numeric tag order: META, GAME, AUDI, CHNK, VPAL,
+//! CMAP, STMP, ATLS.
 //!
 //! ```text
 //! META  (table count = 1), 32 bytes:
@@ -90,6 +90,18 @@
 //!   strictly ascending by code_point (binary-searchable), no duplicates.
 //!
 //! GAME  (table count = 1): raw JSON bytes, borrowed zero-copy; may be empty.
+//!
+//! AUDI  (table count = 1), the chip synth's input, borrowed zero-copy:
+//!   0  u32 json_len       audio.json (UTF-8): header/song/sfx/cry tables
+//!   4  u32 program_len    programs.bin: the ROM sound banks, concatenated
+//!                         in `bankOrder`, 0x4000 bytes each
+//!   8  u32 pad = 0 | 12 u32 pad = 0
+//!   16 json bytes
+//!   .. 16-aligned, program bytes
+//!   Both halves may be zero-length (a pak cooked without audio); the guest
+//!   then runs silent. The core never parses either half — it hands the
+//!   whole payload to the guest through the `audiodata` op, the same
+//!   one-cold-read discipline GAME has.
 //! ```
 
 use alloc::vec::Vec;
@@ -257,6 +269,10 @@ pub struct Pak<'a> {
     pub charmap: Vec<(u16, u16)>,
     /// The GAME section: gameplay JSON the guest parses at boot.
     pub game: &'a [u8],
+    /// The AUDI section verbatim: the chip synth's manifest + program banks,
+    /// handed to the guest by the `audiodata` op. Empty when the pak carries
+    /// no audio.
+    pub audio: &'a [u8],
 }
 
 impl<'a> Pak<'a> {
@@ -442,7 +458,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     if total_len != data.len() {
         return Err("header length disagrees with the blob (truncated or padded)");
     }
-    const TAGS: [u32; 7] = [
+    const TAGS: [u32; 8] = [
         spec::tag::META,
         spec::tag::GAME,
         spec::tag::CHUNKS,
@@ -450,8 +466,9 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
         spec::tag::CHARMAP,
         spec::tag::STAMPS,
         spec::tag::ATLAS,
+        spec::tag::AUDIO,
     ];
-    // All seven sections required, ascending tag order (spec: "sections
+    // All eight sections required, ascending tag order (spec: "sections
     // appear in tag order"), ascending non-overlapping payloads.
     if section_count != TAGS.len() {
         return Err("wrong section count");
@@ -459,7 +476,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     let table_end = VXPK_HEADER_SIZE + section_count * VXPK_ENTRY_SIZE;
     let mut expected = TAGS;
     expected.sort_unstable();
-    let mut sections = [(0usize, 0usize, 0u32); 7]; // (offset, length, count) in TAGS order
+    let mut sections = [(0usize, 0usize, 0u32); 8]; // (offset, length, count) in TAGS order
     let mut prev_end = table_end;
     for (i, &want) in expected.iter().enumerate() {
         let tag = r.u32v()?;
@@ -516,6 +533,33 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     let game = payload(1);
     if sections[1].2 != 1 {
         return Err("GAME table count must be 1");
+    }
+
+    // --- AUDI -------------------------------------------------------------
+    // Handed to the guest verbatim; the core only checks that the payload's
+    // own header agrees with its length, so a truncated blob is caught here
+    // and not inside QuickJS.
+    let audio = payload(7);
+    if sections[7].2 != 1 {
+        return Err("AUDI table count must be 1");
+    }
+    if !audio.is_empty() {
+        if audio.len() < spec::VXPK_AUDIO_HEADER_SIZE {
+            return Err("AUDI payload is shorter than its header");
+        }
+        let mut r = Rd::new(audio);
+        let json_len = r.u32v()? as usize;
+        let program_len = r.u32v()? as usize;
+        if r.u32v()? != 0 || r.u32v()? != 0 {
+            return Err("AUDI reserved words are not zero");
+        }
+        let programs_off = (spec::VXPK_AUDIO_HEADER_SIZE + json_len).div_ceil(VXPK_ALIGN) * VXPK_ALIGN;
+        let end = programs_off
+            .checked_add(program_len)
+            .ok_or("AUDI range overflow")?;
+        if end > audio.len() {
+            return Err("AUDI halves do not fit in the payload");
+        }
     }
 
     // --- VPAL -------------------------------------------------------------
@@ -710,6 +754,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
         stamps,
         charmap,
         game,
+        audio,
     })
 }
 
@@ -813,6 +858,7 @@ pub(crate) mod tests {
         b.glyph('A' as u16, 3);
         b.glyph('B' as u16, 4);
         b.game(br#"{"hello":1}"#);
+        b.audio(br#"{"bankOrder":[2]}"#, &[0xaa; 40]);
         b.finish()
     }
 
@@ -837,6 +883,20 @@ pub(crate) mod tests {
         assert_eq!(pak.glyph('A' as u16), Some(3));
         assert_eq!(pak.glyph('Z' as u16), None);
         assert_eq!(pak.game, br#"{"hello":1}"#);
+        // AUDI: the header states both halves and they fit; the core hands
+        // the payload on verbatim (the guest is the only parser).
+        let json_len = u32::from_le_bytes(pak.audio[0..4].try_into().unwrap()) as usize;
+        let program_len = u32::from_le_bytes(pak.audio[4..8].try_into().unwrap()) as usize;
+        assert_eq!(json_len, br#"{"bankOrder":[2]}"#.len());
+        assert_eq!(program_len, 40);
+        assert_eq!(
+            &pak.audio[spec::VXPK_AUDIO_HEADER_SIZE..spec::VXPK_AUDIO_HEADER_SIZE + json_len],
+            br#"{"bankOrder":[2]}"#
+        );
+        let programs_off = (spec::VXPK_AUDIO_HEADER_SIZE + json_len).div_ceil(VXPK_ALIGN) * VXPK_ALIGN;
+        assert!(pak.audio[programs_off..programs_off + program_len]
+            .iter()
+            .all(|&b| b == 0xaa));
         // Unswizzle inverts the builder's swizzle.
         let frame = pak.atlases[0].frame(0);
         assert_eq!(unswizzle(16, 16, frame).unwrap(), vec![1u8; 256]);

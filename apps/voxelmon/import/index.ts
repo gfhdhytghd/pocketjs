@@ -1,7 +1,7 @@
 // The importer entry: SHA-1 gate, then the extraction stages in the
-// gen1recomp RomExtractor.lua run() order (minus battle_anims/icons/audio,
-// deferred), writing dist/voxelmon/gen/*.json + gfx.bin/gfx.json per
-// apps/voxelmon/SCHEMA.md.
+// gen1recomp RomExtractor.lua run() order (minus battle_anims/icons, still
+// deferred), writing dist/voxelmon/gen/*.json + gfx.bin/gfx.json +
+// programs.bin per apps/voxelmon/SCHEMA.md.
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import { GfxBin } from "./gfx.ts";
 import { loadManifest } from "./manifest.ts";
 import { Rom } from "./rom.ts";
 import { writeJson } from "./writer.ts";
+import { extractAudio } from "./stages/audio.ts";
 import { extractEncounters } from "./stages/encounters.ts";
 import { extractField } from "./stages/field.ts";
 import { extractFont } from "./stages/font.ts";
@@ -72,6 +73,14 @@ export async function runImport(env: VoxelEnv): Promise<void> {
       },
     ],
     ["field", () => writeJson(genDir, "field", extractField(ctx))],
+    [
+      "audio",
+      () => {
+        const { json, programs } = extractAudio(ctx);
+        writeJson(genDir, "audio", json);
+        writeFileSync(join(genDir, "programs.bin"), programs);
+      },
+    ],
     [
       "gfx",
       () => {

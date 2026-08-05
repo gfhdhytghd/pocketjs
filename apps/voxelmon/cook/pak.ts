@@ -5,14 +5,16 @@
 // VPAL u16 count + 1024B palettes, ATLS u16 count + 16B headers +
 // 16-aligned swizzled blobs, CHNK header + 12B map dirs + 64B chunk records
 // + 16-aligned vert/index pools, STMP 16B records into the CHNK pools, CMAP
-// ascending u16 pairs, GAME raw JSON; section table in ascending numeric
-// tag order, 16-aligned ascending payloads, total_len patched last.
+// ascending u16 pairs, GAME raw JSON, AUDI 16B header + JSON + 16-aligned
+// program banks; section table in ascending numeric tag order, 16-aligned
+// ascending payloads, total_len patched last.
 
 import {
   VERTEX_STRIDE,
   VIEW_H,
   VIEW_W,
   VXPK_ALIGN,
+  VXPK_AUDIO_HEADER_SIZE,
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
@@ -102,6 +104,9 @@ export interface PakInput {
   /** (code_point, ui_tile), strictly ascending by code point. */
   glyphs: [number, number][];
   gameJson: Uint8Array;
+  /** The AUDI halves; omit (or leave empty) for a pak without audio. */
+  audioJson?: Uint8Array;
+  audioPrograms?: Uint8Array;
   emotePage: number | null;
 }
 
@@ -293,10 +298,27 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
     cmap.u16(tile);
   }
 
+  // --- AUDI ---
+  const audioJson = input.audioJson ?? new Uint8Array(0);
+  const audioPrograms = input.audioPrograms ?? new Uint8Array(0);
+  const audi = new ByteWriter();
+  if (audioJson.length > 0 || audioPrograms.length > 0) {
+    audi.u32(audioJson.length);
+    audi.u32(audioPrograms.length);
+    audi.u32(0);
+    audi.u32(0);
+    audi.bytes(audioJson);
+    audi.padTo(
+      Math.ceil((VXPK_AUDIO_HEADER_SIZE + audioJson.length) / VXPK_ALIGN) * VXPK_ALIGN,
+    );
+    audi.bytes(audioPrograms);
+  }
+
   // --- container: ascending tag order, 16-aligned payloads ---
   const sections: [number, string, Uint8Array, number][] = [
     [VXPK_TAG.meta, "META", meta.out(), 1],
     [VXPK_TAG.game, "GAME", input.gameJson, 1],
+    [VXPK_TAG.audio, "AUDI", audi.out(), 1],
     [VXPK_TAG.chunks, "CHNK", chnk.out(), input.maps.length],
     [VXPK_TAG.palette, "VPAL", vpal.out(), input.palettes.length],
     [VXPK_TAG.charmap, "CMAP", cmap.out(), input.glyphs.length],

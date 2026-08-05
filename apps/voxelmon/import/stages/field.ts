@@ -7,7 +7,7 @@
 // source line. The Lua extractor additionally attaches tradeArt paths
 // (RomExtractor.lua:2058); tools/build_rom_data.py — which built the
 // reference — does not, and Pocket Voxel never plays the trade cinematic
-// (link play is out of scope, docs/VOXEL.md §9), so tradeArt is left out.
+// (link play is out of scope, docs/VOXEL.md §10), so tradeArt is left out.
 
 import { check } from "../ctx.ts";
 import type { Ctx } from "../ctx.ts";

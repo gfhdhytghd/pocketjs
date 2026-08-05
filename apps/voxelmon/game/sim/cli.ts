@@ -9,6 +9,7 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { fromGenDir as loadAudioBanks } from "../audio/banks.ts";
 import { loadRuntimeData } from "../data.ts";
 import { VoxelmonGame } from "../game.ts";
 import { RecorderHost } from "../host.ts";
@@ -37,6 +38,10 @@ const data = await loadRuntimeData(genDir);
 
 const host = new RecorderHost();
 const game = new VoxelmonGame(data, host, seed);
+// Same banks the pak's AUDIO section carries, over the gen/ transport — the
+// headless run drives the identical policy path (and records the identical
+// `audiodata` op). Bun mounts no audio module, so nothing is synthesized.
+game.setAudio(await loadAudioBanks(genDir));
 game.newGame();
 const tape = new TapePlayer(commands);
 

@@ -69,6 +69,8 @@ pub struct PakBuilder {
     stamp_maps: Vec<(u32, Vec<(i16, i16, MeshRange)>)>,
     glyphs: Vec<(u16, u16)>,
     game: Vec<u8>,
+    audio_json: Vec<u8>,
+    audio_programs: Vec<u8>,
     emote_page: u32,
 }
 
@@ -83,6 +85,8 @@ impl PakBuilder {
             stamp_maps: Vec::new(),
             glyphs: Vec::new(),
             game: Vec::new(),
+            audio_json: Vec::new(),
+            audio_programs: Vec::new(),
             emote_page: EMOTE_PAGE_NONE,
         }
     }
@@ -164,6 +168,14 @@ impl PakBuilder {
 
     pub fn game(&mut self, json: &[u8]) {
         self.game = json.to_vec();
+    }
+
+    /// The AUDI halves: the synth manifest (JSON) and the concatenated ROM
+    /// sound banks. Leave both unset for a pak without audio — AUDI is then
+    /// written empty and the guest runs silent.
+    pub fn audio(&mut self, json: &[u8], programs: &[u8]) {
+        self.audio_json = json.to_vec();
+        self.audio_programs = programs.to_vec();
     }
 
     pub fn finish(mut self) -> Vec<u8> {
@@ -314,10 +326,25 @@ impl PakBuilder {
             cmap.extend_from_slice(&tile.to_le_bytes());
         }
 
+        // --- AUDI: 16-byte header, JSON, 16-aligned program banks ---
+        let mut audi = Vec::new();
+        if !self.audio_json.is_empty() || !self.audio_programs.is_empty() {
+            audi.extend_from_slice(&(self.audio_json.len() as u32).to_le_bytes());
+            audi.extend_from_slice(&(self.audio_programs.len() as u32).to_le_bytes());
+            audi.extend_from_slice(&0u32.to_le_bytes());
+            audi.extend_from_slice(&0u32.to_le_bytes());
+            audi.extend_from_slice(&self.audio_json);
+            let programs_off =
+                (spec::VXPK_AUDIO_HEADER_SIZE + self.audio_json.len()).div_ceil(VXPK_ALIGN) * VXPK_ALIGN;
+            audi.resize(programs_off, 0);
+            audi.extend_from_slice(&self.audio_programs);
+        }
+
         // --- container: ascending tag order, 16-aligned payloads ---
         let mut sections = [
             (spec::tag::META, meta, 1u32),
             (spec::tag::GAME, self.game.clone(), 1),
+            (spec::tag::AUDIO, audi, 1),
             (spec::tag::CHUNKS, chnk, self.maps.len() as u32),
             (spec::tag::PALETTE, vpal, self.palettes.len() as u32),
             (spec::tag::CHARMAP, cmap, self.glyphs.len() as u32),

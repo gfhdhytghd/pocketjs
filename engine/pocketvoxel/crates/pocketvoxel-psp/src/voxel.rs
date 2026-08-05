@@ -9,27 +9,51 @@
 //! Single-threaded host (the QuickJS worker) — `static mut` matches the
 //! established hosts/psp style.
 
+use core::ffi::c_void;
+
 use libquickjs_sys::*;
 use pocketjs_psp::ffi::{add_fn, arg_i32};
 use pocketvoxel_core::scene::Scene;
 use pocketvoxel_core::spec::op;
 
 // Symbols the vendored libquickjs-sys omits (provided by the linked QuickJS
-// C library — the established local-extern pattern, strike.rs).
+// C library — the established local-extern pattern, strike.rs / hosts/psp
+// main.rs's JS_NewArrayBuffer). size_t stays usize (MIPS o32).
 extern "C" {
     fn JS_NewStringLen(ctx: *mut JSContext, s: *const u8, len: usize) -> JSValue;
+    fn JS_NewArrayBuffer(
+        ctx: *mut JSContext,
+        buf: *mut u8,
+        len: usize,
+        free_func: Option<unsafe extern "C" fn(*mut JSRuntime, *mut c_void, *mut c_void)>,
+        opaque: *mut c_void,
+        is_shared: i32,
+    ) -> JSValue;
 }
 
 /// The retained scene every op mutates and the frame loop draws.
 static mut SCENE: Option<Scene> = None;
 /// The pak's GAME section (JSON, zero-copy over the leaked pak buffer).
 static mut GAME: &[u8] = &[];
+/// The pak's AUDI section (zero-copy, same buffer). Empty until [`set_audio`]
+/// runs, and an empty section is a pak without audio: `audiodata()` then
+/// answers undefined and the guest's audio director runs silent.
+static mut AUDIO: &[u8] = &[];
 
 /// # Safety
 /// Call once on the worker thread before `register`/`scene`.
 pub unsafe fn init(game: &'static [u8]) {
     SCENE = Some(Scene::new());
     GAME = game;
+}
+
+/// Hand the pak's AUDI section to the `audiodata` op. Call next to [`init`],
+/// with `pak.audio`; skipping it leaves the game silent but otherwise intact.
+///
+/// # Safety
+/// Same as [`init`]: once, on the worker thread, before `register`.
+pub unsafe fn set_audio(audio: &'static [u8]) {
+    AUDIO = audio;
 }
 
 /// # Safety
@@ -101,6 +125,30 @@ unsafe extern "C" fn js_gamedata(
     JS_NewStringLen(ctx, GAME.as_ptr(), GAME.len())
 }
 
+/// `audiodata()`: the pak's AUDI section as an ArrayBuffer, zero-copy over
+/// the leaked pak buffer (free_func = None — the pak outlives the realm).
+/// One cold read at boot, exactly like `gamedata()`; undefined when the pak
+/// carries no audio (the guest treats any falsy answer as "run silent").
+unsafe extern "C" fn js_audiodata(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    _argc: i32,
+    _argv: *mut JSValue,
+) -> JSValue {
+    scene().op(op::AUDIODATA, &[], None);
+    if AUDIO.is_empty() {
+        return JS_UNDEFINED;
+    }
+    JS_NewArrayBuffer(
+        ctx,
+        AUDIO.as_ptr() as *mut u8,
+        AUDIO.len(),
+        None,
+        core::ptr::null_mut(),
+        0,
+    )
+}
+
 /// `stats()`: dispatch for the counter, no return payload on this host
 /// (debug-only; the guest's QuickJsHost returns null regardless).
 unsafe extern "C" fn js_stats(
@@ -143,6 +191,7 @@ unsafe extern "C" fn js_ui_text(
 pub unsafe fn register(ctx: *mut JSContext, global: JSValue) {
     let obj = JS_NewObject(ctx);
     add_fn(ctx, obj, b"gamedata\0", js_gamedata, 0);
+    add_fn(ctx, obj, b"audiodata\0", js_audiodata, 0);
     add_fn(ctx, obj, b"stats\0", js_stats, 0);
     add_fn(ctx, obj, b"reset\0", js_reset, 0);
     add_fn(ctx, obj, b"mapShow\0", js_map_show, 4);

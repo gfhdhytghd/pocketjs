@@ -56,6 +56,32 @@ export interface PokemonAssetSpec {
   backLabel?: string;
 }
 
+/** A song / sfx / cry / drum program header, as the manifest stores it. */
+export interface ProgramHeaderSpec {
+  bank: number;
+  address: number;
+  engine: number;
+}
+
+/** rom_manifest.json's `audio` block (RomExtractor.lua:2065 extractAudio). */
+export interface AudioSpec {
+  /** Absent for Red/Blue; the importer then uses DEFAULT_PROGRAM_BANKS. */
+  programBanks?: number[];
+  /** The 3-byte-per-species cry modifier table. */
+  cryData: { bank: number; address: number };
+  cryHeaders: Record<string, ProgramHeaderSpec>;
+  musicHeaders: Record<string, ProgramHeaderSpec>;
+  sfxHeaders: Record<string, ProgramHeaderSpec>;
+  /** Engine id -> drum id -> its noise program. */
+  noiseHeaders: Record<string, Record<string, ProgramHeaderSpec>>;
+  /** Engine id -> where its wave-instrument table sits. */
+  waveBanks: Record<string, { bank: number; address: number }>;
+  /** Map id -> song label. */
+  mapSongs: Record<string, string>;
+  /** wild/trainer/gym/final + the *Win victory jingles. */
+  battle: Record<string, string>;
+}
+
 export interface Manifest {
   format: number;
   romSha1: string;
@@ -103,6 +129,7 @@ export interface Manifest {
     emotionBubbles?: { bubbles: { name: string }[] };
     [key: string]: unknown;
   };
+  audio: AudioSpec;
 }
 
 export async function loadManifest(path: string): Promise<Manifest> {

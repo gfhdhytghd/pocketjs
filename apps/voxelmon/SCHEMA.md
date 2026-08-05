@@ -31,7 +31,7 @@ record shapes as the Lua tables** so parity diffing is mechanical:
 `constants.json, tilesets.json, maps.json, font.json, sprites.json,
 moves.json, items.json, type_chart.json, palettes.json, pokemon.json,
 trainers.json, encounters.json, text.json, text_pointers.json,
-trainer_headers.json, field.json`
+trainer_headers.json, field.json, audio.json`
 
 Normalization rules (Lua → JSON):
 
@@ -56,13 +56,49 @@ Keys mirror the upstream `assets/generated/` relative paths (without
 extension). `tools/voxel.ts shots --gen` can dump any entry to a local PNG
 for eyeballing; PNGs never land in `gen/`.
 
+Sound is two files. `gen/programs.bin` is the ROM's sound banks ($02, $08,
+$1F for Red) concatenated in `bankOrder`, **0x4000 bytes each** — the windows
+the channel-program interpreter reads through. `gen/audio.json` is the
+manifest's audio block plus what the importer resolves from the ROM:
+
+```json
+{ "bankOrder": [2, 8, 31], "programFile": "programs.bin", "runtime": true,
+  "songs":  { "Music_PalletTown": { "bank": 2, "address": 16969, "engine": 1 }, ... },
+  "sfx":    { "Press_AB": { "bank": 2, "address": 16816, "engine": 1 }, ... },
+  "cries":  { "PIDGEY": { "header": {...}, "pitch": 0, "length": 0 }, ... },
+  "mapSongs": { "PALLET_TOWN": "Music_PalletTown", ... },
+  "battle":   { "wild": "Music_WildBattle", "wildWin": "Music_DefeatedWildMon", ... },
+  "waveBanks": { "1": { "bank": 2, "address": 17267 }, ... },
+  "noiseHeaders": { "1": { "1": {...}, ... }, ... } }
+```
+
+`cries` is keyed by INTERNAL species slot, so it carries 154 entries — the
+151 Pokedex species plus `FOSSIL_KABUTOPS`, `FOSSIL_AERODACTYL` and
+`MON_GHOST`, which have cries but no dex entry. MISSINGNO/UNUSED rows are
+read (the index must advance) and dropped.
+
 ## Parity
 
-`tools/voxel.ts parity` deep-compares `gen/*.json` against the reference
-`$VOXELMON_G1R/data/generated/*.lua` (dumped to JSON through a LuaJIT
+`tools/voxel.ts parity` deep-compares the 16 datasets that have a reference
+counterpart against `$VOXELMON_G1R/data/generated/*.lua`. `audio.json` is
+excluded: the reference extractor that built `data/generated/` produces no
+`audio.lua` (only the Lua runtime's own extractor writes one), so there is
+nothing to diff it against. Its ground truths are pinned by
+`tests/voxel-audio.test.ts` instead. The comparison (dumped to JSON through a LuaJIT
 one-shot, `apps/voxelmon/import/lua-dump.lua`, applying the same
 normalization). Field-for-field equality is the bar; the diff prints the
 first N mismatching paths.
+
+## `audiodata` — the chip synth's input at boot
+
+The cooker splices `audio.json` and `programs.bin` into the pak's own AUDI
+section (`contracts/spec/voxel-spec.ts` §VXPK_TAG.audio): a 16-byte header
+(`u32 json_len | u32 program_len | two pad words`), the JSON, then the
+program banks at the next 16-byte boundary. The guest calls
+`voxel.audiodata()` once at boot, parses the JSON half, and windows the
+program half by `bankOrder`; the core never looks inside either. In Bun the
+same two files load straight from `gen/` — one loader, two transports, like
+`gamedata`.
 
 ## `gamedata` — what the guest parses at boot
 

@@ -62,15 +62,17 @@ engine/pocketvoxel/crates/
                       (standalone, hosts/psp toolchain pins)
 apps/voxelmon/
   import/             ROM importer (TS): manifest-driven decode of tilesets,
-                      maps, sprites, species, moves, text, encounters, pics.
+                      maps, sprites, species, moves, text, encounters, pics,
+                      sound programs.
   cook/               voxelizer + atlas packer + VXPK writer (TS).
   game/               the gameplay port (TS): world, script VM, text, menus,
-                      battle. Runs in Bun headless and in QuickJS on device.
+                      battle, audio. Runs in Bun headless and in QuickJS on
+                      device.
   tapes/              intent tapes (walk/press/wait — never frame counts).
 contracts/spec/voxel-spec.ts     the surface, single source of truth
 contracts/spec/gen-voxel-rust.ts → engine/pocketvoxel/.../spec.rs (drift-guarded)
 tools/voxel.ts                   import | cook | sim | check | record | shots
-                                 | psp | run | parity
+                                 | wav | psp | run | parity
 docs/VOXEL.md                    this file
 tests/voxel-*.test.ts            contract drift + importer parity + gameplay
 tests/goldens/voxel/             frame HASHES only
@@ -130,7 +132,15 @@ drift guard — the `mon-spec.ts` discipline unchanged. Op groups:
   the camera goes to the arena, exactly as upstream.
 - **system** — `gamedata()` (returns the pak's GAME section to the guest at
   boot: one cold JSON parse, then the guest never crosses for data again),
+  `audiodata()` (the pak's AUDI section, the chip synth's banks + manifest;
+  same one-cold-read discipline, undefined on a pak without audio),
   `stats()` (frame counters), `reset()`.
+
+Audio itself does **not** ride this surface. It is the PocketJS `audio`
+module (`contracts/spec/audio.ts`, capability `audio.pcm`) in its own op
+space: the guest synthesizes PCM and writes it under credit, and a host that
+mounts no `globalThis.audio` runs the identical tick silently. `audiodata`
+is only how the ROM's channel programs reach the guest.
 
 Events are the standard packed batch wire (`u16 kind | u16 a | i32 b | i32 c
 | i32 d`) with **no kinds defined yet** — the core currently states no fact
@@ -163,7 +173,8 @@ instead of every session on the handheld:
    a texel write; day tint is a CLUT rewrite, the GB's own trick;
 5. write `dist/voxelmon/voxelmon.vxpak` (MONPAK-style container: magic,
    section table, 16-byte alignment, validated zero-copy reader in the core)
-   including the GAME section the guest reads at boot.
+   including the GAME section the guest reads at boot and the AUDI section
+   carrying `audio.json` + `programs.bin` verbatim.
 
 ## 6. What renders on PSP, and what deliberately does not
 
@@ -220,7 +231,54 @@ only clock; tile animation and menu cursors derive from it.
    recorded input under PPSSPP and must agree with the rasterizer — the
    Pocket Mon `--emit-psp` pattern.
 
-## 8. Budgets
+## 8. Audio
+
+Sound is the ROM's own **channel programs** — short bytecode streams the GB's
+sound driver interprets a frame at a time — run offline by a TypeScript
+interpreter (`game/audio/synth.ts`, a port of gen1recomp's `ChipSynth.lua`)
+that renders straight to PCM. There is no register-level emulation: the
+interpreter tracks each channel's note, envelope, duty, vibrato, slide, sweep
+and noise LFSR itself, and the four channels sum, divide by four and clamp.
+
+The pieces:
+
+- `game/audio/banks.ts` — the three sound banks ($02/$08/$1F, 0x4000 bytes
+  each) plus the manifest naming the programs inside them. Two transports,
+  one loader (the `data.ts` discipline): Bun reads `gen/audio.json` +
+  `gen/programs.bin`, the device takes the pak's AUDI section from the
+  `audiodata` op.
+- `game/audio/synth.ts` — the interpreter and renderer. Pure, deterministic,
+  no host imports; the same header renders byte-identical PCM every time.
+- `game/audio/music.ts` — the policy (a port of `Music.lua` + `Sound.lua`)
+  and the pump. **One** stream: music, effects and cries mix guest-side, the
+  way a fanfare takes the music's channels on hardware.
+
+The pump obeys the audio module's frame contract: per tick it writes
+`audioFramesForTick(rate, tick)` frames plus whatever it takes to reach a
+100 ms lead, capped at three ticks' worth so one tick can never blow the
+frame budget, and it mirrors its free-frame credit rather than querying. The
+tap opens only after the first write lands, so a track change never opens on
+an empty ring.
+
+The synth runs at **11.025 kHz** stereo (`AUDIO_RATE` in `game.ts`) — every
+`AUDIO_RATES` value divides 44.1 kHz exactly, so the host resamples with
+integer math, and the highest note the ROM's pitch table reaches (~2 kHz)
+sits well inside Nyquist. The cost of a tick is linear in the rate.
+
+What plays where, straight from the reference's own call sites: the map's
+theme on map entry (`Music.lua:339`), the wild-battle theme and the enemy's
+cry on an encounter (`BattleState.lua:1458`, `:1496`), the victory theme the
+moment the win is decided (`:370`), the map theme again when the battle
+closes (`:407`), and the `Press_AB` beep on a textbox advance or close
+(`TextBox.lua:269`, `:284`).
+
+A host that mounts no `globalThis.audio` — the Bun sim, the goldens, any
+console without the `audio.pcm` capability — runs the identical tick with
+nothing synthesized. `bun tools/voxel.ts wav` renders any song, sfx or cry
+to `dist/voxelmon/audio/*.wav` with its peak and RMS printed, so "it renders"
+and "it is audible" stay two different claims.
+
+## 9. Budgets
 
 16.7 ms/frame at 60 Hz. Guest JS ≤ 2 ms typical (measured OpenStrike idle is
 1.4 ms with a far chattier HUD); chunk splice + draw well under the GE's
@@ -231,7 +289,7 @@ stream from the pak into one reused aligned buffer, the OpenStrike map-swap
 pattern. VRAM: 512×272 double-buffered 8888 + 16-bit Z ≈ 1.39 MB; textures
 sample swizzled from main RAM.
 
-## 9. Scope ladder
+## 10. Scope ladder
 
 v1 (this tree, delivered): Red only. Import (16 datasets at field-level
 parity with the reference extractor) + cook (42/42 non-desk building
@@ -243,16 +301,16 @@ rules; the early-route effect set; unknown effects degrade via the
 reference's own fallbacks) staged in the voxel arena with the classic GB
 battle screen composited over it. One tape drives Bun, the Rust rasterizer
 (committed hash goldens: 11 story + 4 battle marks) and the PSP capture
-EBOOT.
+EBOOT. Sound is the ROM's own channel programs, interpreted and rendered to
+PCM guest-side (`game/audio/`): map themes, the wild-battle and victory
+themes, the textbox beep and species cries.
 
 Later rungs, in dependency order: pak slimming for the PSP-1000's 24 MB
 (stamp instancing over the tree-wall boxes; per-map streaming); the arena
 clearance walk (needs cook-time heights in gamedata) and the authored arena
 table; the full script verb set and story flags; trainer battles + AI
 layers; the desk-set templates, stairs, and detected props; battle move
-animations; the box system, marts, and the start menu; audio through the
-`audio` module (the chip synth is a channel-program interpreter — the
-importer already reserves the program banks); Blue/Yellow manifests;
+animations; the box system, marts, and the start menu; Blue/Yellow manifests;
 first/third person; link play never.
 
 Stadium battle models are **permanently out of scope** — they require an N64
