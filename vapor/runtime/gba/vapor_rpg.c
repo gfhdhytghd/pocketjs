@@ -12,6 +12,10 @@
 #define REG_BG1CNT REG16(0x0400000a)
 #define REG_BG1HOFS REG16(0x04000014)
 #define REG_BG1VOFS REG16(0x04000016)
+#define REG_WIN0H REG16(0x04000040)
+#define REG_WIN0V REG16(0x04000044)
+#define REG_WININ REG16(0x04000048)
+#define REG_WINOUT REG16(0x0400004a)
 
 #define PAL_BG ((volatile u16 *)0x05000000)
 #define PAL_OBJ ((volatile u16 *)0x05000200)
@@ -24,19 +28,28 @@
 #define RPG_BG_BANK 15
 #define RPG_ENTRY(tile) ((u16)((tile) | (RPG_BG_BANK << 12)))
 #define RPG_OBJ_PRIORITY (1 << 10)
+#define RPG_WORLD_CELL_PX 16
+#define RPG_VIEW_W 15
+#define RPG_VIEW_H 10
+#define RPG_FOCUS_X 7
+#define RPG_FOCUS_Y 4
 
 enum {
-  TILE_BLANK,
-  TILE_GRASS_A,
-  TILE_GRASS_B,
-  TILE_PATH_A,
-  TILE_PATH_B,
-  TILE_WALL,
-  TILE_WATER_A,
-  TILE_WATER_B,
-  TILE_TREE,
-  TILE_FLOWER,
-  TILE_BOX_FILL,
+  WORLD_BLANK,
+  WORLD_GRASS_A,
+  WORLD_GRASS_B,
+  WORLD_PATH_A,
+  WORLD_PATH_B,
+  WORLD_WALL,
+  WORLD_WATER_A,
+  WORLD_WATER_B,
+  WORLD_TREE,
+  WORLD_FLOWER,
+  WORLD_TILE_COUNT
+};
+
+enum {
+  TILE_BOX_FILL = VP_RPG_UI_TILE_BASE,
   TILE_BOX_TOP,
   TILE_BOX_BOTTOM,
   TILE_BOX_LEFT,
@@ -55,6 +68,8 @@ enum {
 
 typedef char vp_rpg_bg_tile_count_must_match[
     TILE_COUNT == VP_RPG_BG_TILE_COUNT ? 1 : -1];
+typedef char vp_rpg_world_tile_count_must_match[
+    WORLD_TILE_COUNT == VP_RPG_WORLD_TILE_FRAME_COUNT ? 1 : -1];
 
 static u16 rpg_bg_shadow[32 * 32];
 static u16 rpg_oam_shadow[128 * 4];
@@ -93,21 +108,21 @@ static void hide_objects(void) {
   rpg_oam_dirty = 1;
 }
 
-static void show_object(u8 slot, s16 x, s16 y, u8 tile, u8 palette) {
+static void show_object_32(u8 slot, s16 x, s16 y, u16 tile, u8 palette) {
   u16 at = (u16)slot * 4;
   rpg_oam_shadow[at] = (u16)(y & 0x00ff); /* square, regular OBJ */
-  rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0x4000); /* 16x16 */
-  rpg_oam_shadow[at + 2] = (u16)(tile | RPG_OBJ_PRIORITY |
+  rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0x8000); /* 32x32 */
+  rpg_oam_shadow[at + 2] = (u16)((tile & 0x03ff) | RPG_OBJ_PRIORITY |
                                     ((u16)palette << 12));
   rpg_oam_shadow[at + 3] = 0;
   rpg_oam_dirty = 1;
 }
 
-static void show_object_32(u8 slot, s16 x, s16 y, u8 tile, u8 palette) {
+static void show_object_64(u8 slot, s16 x, s16 y, u16 tile, u8 palette) {
   u16 at = (u16)slot * 4;
   rpg_oam_shadow[at] = (u16)(y & 0x00ff); /* square, regular OBJ */
-  rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0x8000); /* 32x32 */
-  rpg_oam_shadow[at + 2] = (u16)(tile | RPG_OBJ_PRIORITY |
+  rpg_oam_shadow[at + 1] = (u16)((x & 0x01ff) | 0xc000); /* 64x64 */
+  rpg_oam_shadow[at + 2] = (u16)((tile & 0x03ff) | RPG_OBJ_PRIORITY |
                                     ((u16)palette << 12));
   rpg_oam_shadow[at + 3] = 0;
   rpg_oam_dirty = 1;
@@ -125,14 +140,22 @@ static void map_cell(u8 x, u8 y, u8 tile) {
     rpg_bg_shadow[(u16)y * 32 + x] = RPG_ENTRY(tile);
 }
 
+static void map_world_cell(u8 x, u8 y, u8 frame) {
+  u8 tile = (u8)(frame * VP_RPG_WORLD_TILE_FRAME_TILES);
+  map_cell(x, y, tile);
+  map_cell((u8)(x + 1), y, (u8)(tile + 1));
+  map_cell(x, (u8)(y + 1), (u8)(tile + 2));
+  map_cell((u8)(x + 1), (u8)(y + 1), (u8)(tile + 3));
+}
+
 static u8 world_tile(u8 ch, u8 x, u8 y) {
-  if (ch == '#') return TILE_WALL;
+  if (ch == '#') return WORLD_WALL;
   if (ch == '=' || ch == ':' || ch == 'p')
-    return ((x + y) & 1) ? TILE_PATH_A : TILE_PATH_B;
-  if (ch == '~') return ((x + y) & 1) ? TILE_WATER_A : TILE_WATER_B;
-  if (ch == 'T' || ch == 't') return TILE_TREE;
-  if (ch == '*') return TILE_FLOWER;
-  return ((x + y) & 1) ? TILE_GRASS_A : TILE_GRASS_B;
+    return ((x + y) & 1) ? WORLD_PATH_A : WORLD_PATH_B;
+  if (ch == '~') return ((x + y) & 1) ? WORLD_WATER_A : WORLD_WATER_B;
+  if (ch == 'T' || ch == 't') return WORLD_TREE;
+  if (ch == '*') return WORLD_FLOWER;
+  return ((x + y) & 1) ? WORLD_GRASS_A : WORLD_GRASS_B;
 }
 
 static void line_text(u8 row, u8 x, const char *text) {
@@ -176,40 +199,81 @@ static void draw_box(u8 left, u8 top, u8 right, u8 bottom) {
   }
 }
 
+static s32 camera_axis(s32 player, s32 map_size, s32 view_size,
+                       s32 focus) {
+  s32 camera;
+  s32 maximum;
+  if (map_size <= view_size) return 0;
+  maximum = map_size - view_size;
+  camera = player - focus;
+  if (camera < 0) return 0;
+  if (camera > maximum) return maximum;
+  return camera;
+}
+
 static void draw_world(const vp_rpg_map *map, s32 player_x, s32 player_y,
                        u8 facing, s32 quest, u8 hud) {
   u8 x, y, ox, oy, slot;
-  u16 at;
-  map_fill(TILE_BLANK);
+  s32 cam_x, cam_y, world_y, end_y;
+  map_fill(0);
   hide_objects();
   if (!map || !map->tiles || !map->width || !map->height) return;
-  ox = map->width < 30 ? (u8)((30 - map->width) >> 1) : 0;
-  oy = map->height < 20 ? (u8)((20 - map->height) >> 1) : 0;
-  for (y = 0; y < map->height && (u8)(oy + y) < 20; y++) {
-    for (x = 0; x < map->width && (u8)(ox + x) < 30; x++) {
+  cam_x = camera_axis(player_x, map->width, RPG_VIEW_W, RPG_FOCUS_X);
+  cam_y = camera_axis(player_y, map->height, RPG_VIEW_H, RPG_FOCUS_Y);
+  ox = map->width < RPG_VIEW_W ? (u8)((RPG_VIEW_W - map->width) >> 1) : 0;
+  oy = map->height < RPG_VIEW_H ? (u8)((RPG_VIEW_H - map->height) >> 1) : 0;
+  for (y = (u8)cam_y; y < map->height; y++) {
+    u8 screen_y = (u8)(oy + y - cam_y);
+    if (screen_y >= RPG_VIEW_H) break;
+    for (x = (u8)cam_x; x < map->width; x++) {
+      u8 screen_x = (u8)(ox + x - cam_x);
+      u16 at;
+      if (screen_x >= RPG_VIEW_W) break;
       at = (u16)y * map->width + x;
-      map_cell((u8)(ox + x), (u8)(oy + y),
-               world_tile(map->tiles[at], x, y));
+      map_world_cell((u8)(screen_x * 2), (u8)(screen_y * 2),
+                     world_tile(map->tiles[at], x, y));
     }
   }
-  slot = 1;
-  for (y = 0; y < map->height && slot < 127; y++) {
-    for (x = 0; x < map->width && slot < 127; x++) {
-      u8 ch = map->tiles[(u16)y * map->width + x];
+  slot = 0;
+  end_y = cam_y + RPG_VIEW_H - oy;
+  if (end_y > map->height) end_y = map->height;
+  for (world_y = end_y; world_y > cam_y && slot < 127;) {
+    s16 screen_y;
+    world_y--;
+    screen_y = (s16)(oy + world_y - cam_y);
+    if (player_x >= 0 && player_x < map->width &&
+        player_y >= 0 && player_y < map->height &&
+        player_y == world_y && player_x >= cam_x &&
+        player_x < cam_x + RPG_VIEW_W - ox) {
+      u16 hero_tile = facing < 4
+          ? (u16)(facing * VP_RPG_WORLD_ACTOR_FRAME_TILES)
+          : 0;
+      s16 screen_x = (s16)(ox + player_x - cam_x);
+      show_object_32(slot++, (s16)(screen_x * RPG_WORLD_CELL_PX - 8),
+                     (s16)(screen_y * RPG_WORLD_CELL_PX - 16),
+                     hero_tile, 0);
+    }
+    for (x = (u8)cam_x; x < map->width && slot < 127; x++) {
+      s16 screen_x = (s16)(ox + x - cam_x);
+      u8 ch;
+      if (screen_x >= RPG_VIEW_W) break;
+      ch = map->tiles[(u16)world_y * map->width + x];
       if (ch == 'N') {
-        show_object(slot++, (s16)((ox + x) * 8 - 4),
-                    (s16)((oy + y) * 8 - 8), 16, 1);
+        s16 actor_x = (s16)(screen_x * RPG_WORLD_CELL_PX - 8);
+        if (player_y == world_y && player_x + 1 == x) actor_x += 4;
+        else if (player_y == world_y && player_x - 1 == x) actor_x -= 4;
+        show_object_32(slot++, actor_x,
+                       (s16)(screen_y * RPG_WORLD_CELL_PX - 16),
+                       VP_RPG_WORLD_ELDER_TILE, 1);
       } else if (ch == 'S' && quest == 1) {
-        show_object(slot++, (s16)((ox + x) * 8 - 4),
-                    (s16)((oy + y) * 8 - 8), 20, 2);
+        s16 actor_x = (s16)(screen_x * RPG_WORLD_CELL_PX - 8);
+        if (player_y == world_y && player_x + 1 == x) actor_x += 4;
+        else if (player_y == world_y && player_x - 1 == x) actor_x -= 4;
+        show_object_32(slot++, actor_x,
+                       (s16)(screen_y * RPG_WORLD_CELL_PX - 16),
+                       VP_RPG_WORLD_SLIME_TILE, 2);
       }
     }
-  }
-  if (player_x >= 0 && player_y >= 0 && player_x < map->width &&
-      player_y < map->height) {
-    u8 hero_tile = facing < 4 ? (u8)(facing * 4) : 0;
-    show_object(0, (s16)((ox + player_x) * 8 - 4),
-                (s16)((oy + player_y) * 8 - 8), hero_tile, 0);
   }
   if (hud) {
     for (x = 0; x < 30; x++) map_cell(x, 0, TILE_HUD);
@@ -255,17 +319,17 @@ static void draw_battle(s32 hero_hp, s32 enemy_hp, s32 cursor) {
   rpg_bg_dirty = 1;
   full = hp_tiles(enemy_hp, 18);
   for (x = 0; x < 10; x++)
-    map_cell((u8)(18 + x), 4, x < full ? TILE_HP_FULL : TILE_HP_EMPTY);
+    map_cell((u8)(2 + x), 4, x < full ? TILE_HP_FULL : TILE_HP_EMPTY);
   full = hp_tiles(hero_hp, 30);
   for (x = 0; x < 10; x++)
-    map_cell((u8)(2 + x), 13, x < full ? TILE_HP_FULL : TILE_HP_EMPTY);
+    map_cell((u8)(18 + x), 13, x < full ? TILE_HP_FULL : TILE_HP_EMPTY);
   draw_box(2, 14, 27, 19);
-  show_object_32(0, 32, 56, VP_RPG_BATTLE_HERO_TILE, 0);
-  show_object_32(1, 176, 40, VP_RPG_BATTLE_SLIME_TILE, 2);
-  line_text(1, 17, "WILD SLIME");
-  line_hp(2, 18, enemy_hp, 18);
-  line_text(10, 2, "HERO");
-  line_hp(11, 2, hero_hp, 30);
+  show_object_64(0, 8, 40, VP_RPG_BATTLE_HERO_TILE, 0);
+  show_object_64(1, 168, 16, VP_RPG_BATTLE_SLIME_TILE, 2);
+  line_text(1, 2, "WILD SLIME");
+  line_hp(2, 2, enemy_hp, 18);
+  line_text(10, 18, "HERO");
+  line_hp(11, 18, hero_hp, 30);
   line_choice(15, 4, "ATTACK", cursor == 0);
   line_choice(17, 4, "HEAL", cursor == 1);
 }
@@ -303,7 +367,7 @@ void vp_rpg_video_init(void) {
     RPG_BG_VRAM[i] = vp_rpg_bg_tiles[i];
   for (i = 0; i < VP_RPG_OBJ_TILE_COUNT * 16; i++)
     RPG_OBJ_VRAM[i] = vp_rpg_obj_tiles[i];
-  map_fill(TILE_BLANK);
+  map_fill(0);
   hide_objects();
   REG_BG1CNT = (u16)(2 | (2 << 2) | (9 << 8));
   REG_BG1HOFS = 0;
@@ -318,12 +382,22 @@ void vp_rpg_render(const vp_rpg_map *map, u8 mode, s32 player_x,
                    s32 battle_cursor) {
   if (!rpg_ready) return;
   vp_row_clear(0, VP_GRID_H);
-  if (mode == 1)
+  if (mode == 1) {
+    /* Keep enlarged OBJ heads visible above the dialog, but clip their lower
+     * pixels at its y=88 edge so arbitrary maps cannot draw actors over UI. */
+    REG_WIN0H = (u16)((0 << 8) | 240);
+    REG_WIN0V = (u16)((88 << 8) | 160);
+    REG_WININ = 0x0003;  /* inside: BG0 text + BG1 box, no OBJ */
+    REG_WINOUT = 0x0013; /* outside: BG0 + BG1 + OBJ */
+    REG_DISPCNT = 0x3340; /* mode 0, 1D OBJ, BG0/BG1/OBJ + WIN0 */
     draw_dialog(map, player_x, player_y, facing, quest, dialog, choice);
-  else if (mode == 2)
+  } else if (mode == 2) {
+    REG_DISPCNT = 0x1340;
     draw_battle(hero_hp, enemy_hp, battle_cursor);
-  else
+  } else {
+    REG_DISPCNT = 0x1340;
     draw_world(map, player_x, player_y, facing, quest, 1);
+  }
 }
 
 void vp_rpg_video_commit(void) {

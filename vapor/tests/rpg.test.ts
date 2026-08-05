@@ -21,6 +21,7 @@ let source = "";
 let app: CompiledApp;
 let runReads: Record<string, string | number>;
 let holdReads: Record<string, string | number>;
+let cameraReads: Record<string, string | number>;
 let repeatBoundaryX: number[];
 
 function press(button: number): string {
@@ -52,6 +53,11 @@ function generatedWords(name: string): number[] {
 
 function littleEndianHex(words: number[]): string {
   return words.map((word) => `${(word & 0xff).toString(16).padStart(2, "0")}${(word >> 8).toString(16).padStart(2, "0")}`).join("");
+}
+
+function littleEndianU16(hex: string, byteOffset: number): number {
+  const at = byteOffset * 2;
+  return Number.parseInt(`${hex.slice(at + 2, at + 4)}${hex.slice(at, at + 2)}`, 16);
 }
 
 async function countPpmColors(path: string): Promise<number> {
@@ -94,8 +100,8 @@ beforeAll(async () => {
   lines.push(`S ${worldShot}`);
   lines.push("D world_bg1 0x06004800 2048");
   lines.push("D world_oam 0x07000000 24");
-  lines.push("D asset_bg_tiles 0x06008000 768");
-  lines.push("D asset_obj_tiles 0x06010000 1792");
+  lines.push("D asset_bg_tiles 0x06008000 1728");
+  lines.push("D asset_obj_tiles 0x06010000 7168");
   lines.push("D asset_bg_palette 0x050001e0 32");
   lines.push("D asset_obj_palettes 0x05000200 96");
 
@@ -109,6 +115,7 @@ beforeAll(async () => {
   lines.push(press(Button.Right), press(Button.Down), press(Button.Right), press(Button.A));
   readState(lines, "offer", ["mode", "playerX", "playerY", "facing", "quest", "dialog", "choice"]);
   lines.push(`S ${dialogShot}`);
+  lines.push("R dialog_dispcnt 0x04000000 2");
 
   // Exercise NO with a long hold: repeats are world-only, so the two-choice
   // dialog must not toggle back and forth. Close, talk again, then accept YES.
@@ -127,6 +134,7 @@ beforeAll(async () => {
   lines.push(`S ${battleShot}`);
   lines.push("D battle_bg1 0x06004800 2048");
   lines.push("D battle_oam 0x07000000 24");
+  lines.push("R battle_dispcnt 0x04000000 2");
 
   // HEAL once after another long hold; battle selection also ignores repeats.
   // Then ATTACK three times. Victory is a reactive dialog state.
@@ -175,6 +183,28 @@ beforeAll(async () => {
   };
   expect(holdParsed.ok).toBe(true);
   holdReads = holdParsed.reads;
+
+  // Drop below the solid Slime, then walk far enough east to put the hero on
+  // the camera focus column. The logical map state remains global while BG1
+  // and OAM become a 15x10 window.
+  const cameraScenario = join(OUT, "rpg-camera-tape.txt");
+  const cameraLines = ["A 8", press(Button.Down), press(Button.Down)];
+  for (let i = 0; i < 12; i++) cameraLines.push(press(Button.Right));
+  cameraLines.push(
+    `R player_x 0x${stateAddress("playerX").toString(16)} 4`,
+    "D bg1 0x06004800 2048",
+    "D oam 0x07000000 16",
+    "R trips 0x0200000c 1",
+    "",
+  );
+  await Bun.write(cameraScenario, cameraLines.join("\n"));
+  const cameraOutput = await $`${RUNNER} ${ROM} ${cameraScenario}`.text();
+  const cameraParsed = JSON.parse(cameraOutput) as {
+    ok: boolean;
+    reads: Record<string, string | number>;
+  };
+  expect(cameraParsed.ok).toBe(true);
+  cameraReads = cameraParsed.reads;
 
   // Host video scheduling means setKeys() and the runtime input loop do not
   // share a frame boundary. Adjacent holds pin the first two observed repeats.
@@ -231,7 +261,7 @@ describe("Pocket Vapor RPG host", () => {
     expect(app.graph).toContain("mode (num)");
     expect(app.graph).toContain("questActive:");
     expect(app.plan).toContain("RPG host RAM: 3076 B");
-    expect(app.plan).toContain("RPG art: 24 BG tiles + 6 world and 2 battle OBJ frames, 4 palette banks; 2688 B ROM");
+    expect(app.plan).toContain("RPG art: 54 BG tiles + 6 32x32 world and 2 64x64 battle OBJ frames, 4 palette banks; 9024 B ROM");
   });
 
   test("pixel RPG host is explicitly GBA-only", () => {
@@ -267,6 +297,15 @@ describe("native GBA RPG play tape", () => {
 
   test("libmGBA pacing crosses the first two held-movement repeat boundaries", () => {
     expect(repeatBoundaryX).toEqual([3, 4, 4, 5]);
+  });
+
+  test("the 15x10 camera follows the player and culls off-window NPCs", () => {
+    expect(cameraReads.player_x).toBe(14);
+    const oam = cameraReads.oam as string;
+    expect(littleEndianU16(oam, 2) & 0x01ff).toBe(104);
+    expect(littleEndianU16(oam, 8) & 0x0200).toBe(0x0200);
+    expect(cameraReads.bg1).not.toBe(runReads.world_bg1);
+    expect(cameraReads.trips).toBe(0);
   });
 
   test("collision turns without moving and A opens the elder offer", () => {
@@ -321,6 +360,23 @@ describe("native GBA RPG play tape", () => {
     for (const path of paths) expect(await countPpmColors(path)).toBeGreaterThanOrEqual(8);
     expect(runReads.world_bg1).not.toBe(runReads.battle_bg1);
     expect(runReads.world_oam).not.toBe(runReads.battle_oam);
+  });
+
+  test("world metatiles and enlarged OBJ sizes reach native GBA OAM", () => {
+    const world = runReads.world_oam as string;
+    const battle = runReads.battle_oam as string;
+    const worldAttr1 = [littleEndianU16(world, 2), littleEndianU16(world, 10)];
+    const battleAttr1 = [littleEndianU16(battle, 2), littleEndianU16(battle, 10)];
+    expect(worldAttr1.map((attr) => attr & 0xc000)).toEqual([0x8000, 0x8000]);
+    expect(battleAttr1.map((attr) => attr & 0xc000)).toEqual([0xc000, 0xc000]);
+    // At boot the lower elder is OAM slot zero and the hero is slot one.
+    // Their two-cell X distance is now 32 screen pixels, proving the 16px grid.
+    expect([(worldAttr1[0] & 0x01ff), (worldAttr1[1] & 0x01ff)]).toEqual([56, 24]);
+  });
+
+  test("the dialog hardware window clips enlarged actors behind screen-space UI", () => {
+    expect(runReads.dialog_dispcnt).toBe(0x3340);
+    expect(runReads.battle_dispcnt).toBe(0x1340);
   });
 
   test("generated 4bpp art and palettes arrive in the exact GBA VRAM banks", () => {

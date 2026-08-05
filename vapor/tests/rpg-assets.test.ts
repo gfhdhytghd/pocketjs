@@ -1,11 +1,13 @@
 // Deterministic art-pipeline checks for the PixelLab-backed GBA RPG assets.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import { describe, expect, test } from "bun:test";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { buildBackground } from "../scripts/rpg-assets.ts";
 
 const ROOT = join(import.meta.dir, "..", "examples", "rpg", "assets");
 const SOURCE = join(ROOT, "source");
@@ -18,9 +20,15 @@ const BG = [
   "74,82,99", "156,165,173", "24,74,148", "57,148,231", "33,82,41", "41,165,66",
   "255,214,66", "33,49,99", "239,222,148", "255,82,82",
 ];
-const HERO = ["24,24,33", "255,173,99", "66,132,255", "255,123,74"];
-const ELDER = ["24,24,33", "255,173,99", "148,148,148", "255,255,255"];
-const SLIME = ["24,24,33", "0,173,173", "0,90,90", "255,255,255"];
+const HERO = [
+  "24,41,74", "198,107,66", "255,173,99", "33,82,173", "66,132,255",
+  "132,181,255", "181,66,49", "255,123,74", "239,222,148",
+];
+const ELDER = [
+  "24,41,74", "198,107,66", "255,173,99", "74,82,99", "115,123,140",
+  "156,165,173", "198,214,222", "255,255,255", "66,132,255",
+];
+const SLIME = ["24,41,74", "0,90,90", "0,173,173", "57,214,198", "148,247,222", "255,255,255"];
 
 async function rgba(path: string): Promise<{ width: number; height: number; data: Uint8ClampedArray }> {
   const image = await loadImage(path);
@@ -43,8 +51,8 @@ describe("Vapor Quest GBA art pipeline", () => {
     await $`bun ${SCRIPT} check`.quiet();
     expect(generatedWordCount("vp_rpg_bg_palette")).toBe(16);
     expect(generatedWordCount("vp_rpg_obj_palettes")).toBe(48);
-    expect(generatedWordCount("vp_rpg_bg_tiles")).toBe(24 * 16);
-    expect(generatedWordCount("vp_rpg_obj_tiles")).toBe(56 * 16);
+    expect(generatedWordCount("vp_rpg_bg_tiles")).toBe(54 * 16);
+    expect(generatedWordCount("vp_rpg_obj_tiles")).toBe(224 * 16);
   });
 
   test("generation provenance is complete and contains no credential", () => {
@@ -66,9 +74,9 @@ describe("Vapor Quest GBA art pipeline", () => {
     }
   });
 
-  test("the background sheet is exactly 24 opaque 8x8 tiles in one fixed bank", async () => {
+  test("the background sheet combines ten 16x16 world cells with fourteen 8x8 UI tiles", async () => {
     const image = await rgba(join(FINAL, "background.png"));
-    expect([image.width, image.height]).toEqual([64, 24]);
+    expect([image.width, image.height]).toEqual([160, 24]);
     const allowed = new Set(BG);
     for (let at = 0; at < image.data.length; at += 4) {
       expect(image.data[at + 3]).toBe(255);
@@ -76,9 +84,60 @@ describe("Vapor Quest GBA art pipeline", () => {
     }
   });
 
-  test("six actor frames share a foot line and stay inside their OBJ banks", async () => {
+  test("each reviewed PixelLab terrain source materially changes the final atlas", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vapor-rpg-terrain-"));
+    const files = ["grass.png", "path.png", "wall.png", "water.png", "tree.png", "flower.png"];
+    try {
+      for (const file of files) copyFileSync(join(SOURCE, file), join(directory, file));
+      const baseline = await buildBackground(directory);
+      expect(createHash("sha256").update((await buildBackground(directory)).png).digest("hex"))
+        .toBe(createHash("sha256").update(baseline.png).digest("hex"));
+      for (const file of ["grass.png", "path.png", "wall.png", "water.png"]) {
+        const path = join(directory, file);
+        const original = readFileSync(path);
+        const image = await loadImage(original);
+        const canvas = createCanvas(16, 16);
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        for (let y = 4; y < 8; y++) {
+          for (let x = 4; x < 8; x++) {
+            context.fillStyle = (x + y) % 2 === 0 ? "#000000" : "#ffffff";
+            context.fillRect(x, y, 1, 1);
+          }
+        }
+        writeFileSync(path, canvas.toBuffer("image/png"));
+        const changed = await buildBackground(directory);
+        expect(createHash("sha256").update(changed.png).digest("hex"), file)
+          .not.toBe(createHash("sha256").update(baseline.png).digest("hex"));
+        writeFileSync(path, original);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("the review palette guide pads unused OBJ slots exactly like GBA RAM", async () => {
+    const image = await rgba(join(FINAL, "palette-guide.png"));
+    expect([image.width, image.height]).toEqual([64, 64]);
+    const lengths = [16, 10, 10, 7];
+    for (let row = 0; row < lengths.length; row++) {
+      for (let index = lengths[row]; index < 16; index++) {
+        const at = ((row * 16 + 8) * image.width + index * 4 + 1) * 4;
+        expect([...image.data.slice(at, at + 4)]).toEqual([0, 0, 0, 255]);
+      }
+    }
+    const header = readFileSync(HEADER, "utf8");
+    const match = header.match(/static const u16 vp_rpg_obj_palettes\[48\] = \{([\s\S]*?)\n\};/);
+    if (!match) throw new Error("missing generated OBJ palette");
+    const words = [...match[1].matchAll(/0x([0-9a-f]{4})/g)].map((entry) => Number.parseInt(entry[1], 16));
+    for (const [base, used] of [[0, 10], [16, 10], [32, 7]] as const) {
+      expect(words.slice(base + used, base + 16)).toEqual(Array(16 - used).fill(0));
+    }
+  });
+
+  test("six detailed 32x32 actor frames share a foot line and stay inside their OBJ banks", async () => {
     const image = await rgba(join(FINAL, "actors.png"));
-    expect([image.width, image.height]).toEqual([96, 16]);
+    expect([image.width, image.height]).toEqual([192, 32]);
     const frameHashes: string[] = [];
     const frameColors: Set<string>[] = [];
     for (let frame = 0; frame < 6; frame++) {
@@ -87,48 +146,49 @@ describe("Vapor Quest GBA art pipeline", () => {
       let visible = 0;
       let grounded = false;
       const bytes: number[] = [];
-      for (let y = 0; y < 16; y++) {
-        for (let x = 0; x < 16; x++) {
-          const at = (y * 96 + frame * 16 + x) * 4;
+      for (let y = 0; y < 32; y++) {
+        for (let x = 0; x < 32; x++) {
+          const at = (y * 192 + frame * 32 + x) * 4;
           const alpha = image.data[at + 3];
           expect(alpha === 0 || alpha === 255).toBe(true);
           bytes.push(image.data[at], image.data[at + 1], image.data[at + 2], alpha);
           if (alpha === 0) continue;
           visible++;
-          if (y === 15) grounded = true;
+          if (y === 31) grounded = true;
           const color = `${image.data[at]},${image.data[at + 1]},${image.data[at + 2]}`;
           colors.add(color);
           expect(allowed.has(color)).toBe(true);
         }
       }
-      expect(visible).toBeGreaterThanOrEqual(frame === 5 ? 20 : 30);
+      expect(visible).toBeGreaterThanOrEqual(frame === 5 ? 220 : 280);
       expect(grounded).toBe(true);
+      expect(colors.size).toBeGreaterThanOrEqual(frame === 5 ? 5 : 6);
       frameHashes.push(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
       frameColors.push(colors);
     }
     expect(new Set(frameHashes.slice(0, 4)).size).toBe(4);
-    expect(frameColors[5]).toEqual(new Set(SLIME));
+    expect(frameColors[5].has("255,255,255")).toBe(true);
   });
 
-  test("battle reuses the same actors and palettes at a readable 32x32 scale", async () => {
+  test("battle reuses the same actors and palettes at a readable 64x64 scale", async () => {
     const image = await rgba(join(FINAL, "battle-actors.png"));
-    expect([image.width, image.height]).toEqual([64, 32]);
+    expect([image.width, image.height]).toEqual([128, 64]);
     for (let frame = 0; frame < 2; frame++) {
       const allowed = new Set(frame === 0 ? HERO : SLIME);
       let visible = 0;
       let grounded = false;
-      for (let y = 0; y < 32; y++) {
-        for (let x = 0; x < 32; x++) {
-          const at = (y * 64 + frame * 32 + x) * 4;
+      for (let y = 0; y < 64; y++) {
+        for (let x = 0; x < 64; x++) {
+          const at = (y * 128 + frame * 64 + x) * 4;
           const alpha = image.data[at + 3];
           expect(alpha === 0 || alpha === 255).toBe(true);
           if (alpha === 0) continue;
           visible++;
-          if (y === 31) grounded = true;
+          if (y === 63) grounded = true;
           expect(allowed.has(`${image.data[at]},${image.data[at + 1]},${image.data[at + 2]}`)).toBe(true);
         }
       }
-      expect(visible).toBeGreaterThan(100);
+      expect(visible).toBeGreaterThan(frame === 0 ? 1000 : 900);
       expect(grounded).toBe(true);
     }
   });

@@ -190,10 +190,14 @@ a second gameplay language or VM:
 - One stateless `<RpgScreen .../>` receives that complete reactive state. On
   GBA the compiler lowers it to the fixed tile/sprite RPG renderer rather
   than shipping Vue or JavaScript in the ROM.
+- The world uses 16×16 logical metatiles with a clamped 15×10 following
+  camera, detailed 32×32 world actors, and 64×64 battle portraits. HUD,
+  dialogue, font, and command UI remain on the native 8×8 screen grid.
 
 The demo's ten reactive refs occupy 40 bytes. The fixed GBA host adds 3,076
 bytes of BG1 tilemap and OAM shadow buffers so all VRAM commits stay inside
 vblank; map, collision, event, dialogue, tile and sprite assets remain in ROM.
+The fixed four-bank art payload is 9,024 bytes.
 
 The demo is one complete loop: start at `(2,2)`, walk next to the solid
 Elder, face them and press A, choose whether to accept the quest, walk onto

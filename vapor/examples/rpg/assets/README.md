@@ -2,16 +2,22 @@
 
 This folder is the reviewed visual source for the GBA RPG POC. PixelLab creates
 the source PNGs; the offline asset compiler fixes their dimensions, transparent
-anchors and GBA palettes before emitting the two sheets in `final/` and
+anchors and GBA palettes before emitting the reviewed sheets in `final/` and
 `vapor/runtime/gba/vapor_rpg_assets.generated.h`.
 
 ## Art bible
 
-- Bright field, deep-navy information layer, compact chibi silhouettes.
+- Bright field, deep-navy information layer, expressive close-up chibi silhouettes.
 - Native hard pixels, no antialiasing, gradients, dithering or partial alpha.
-- Lighting always comes from the top left; visible outlines use `#181821`.
-- BG cells are 8x8. World OBJ frames are 16x16 with a shared y=15 foot
-  line; battle reuses the same source art as readable 32x32 frames.
+- Lighting always comes from the top left; visible outlines use `#18294a`.
+- Logical world cells are 16x16 metatiles, so the 240x160 screen shows a
+  camera-followed 15x10 slice of the map. UI pieces remain screen-space 8x8.
+- World OBJ frames are 32x32 with a shared y=31 foot line. Battle derives
+  readable 64x64 close-up frames from the same reviewed PixelLab sources.
+- The SLIME gameplay role uses a compact teal tentacled puddle-ooze silhouette;
+  its short pseudopods, two white eyes and broad ground contact are intentional.
+- Generated terrain luminance clusters remain the base texture; deterministic
+  material ramps and sparse accents make them legible in one fixed 4bpp bank.
 - World/UI, hero, elder and slime each have one fixed 4bpp palette bank.
 - Flowers remain low-contrast walkable decoration; walls, water and trees read
   as barriers. UI texture remains quieter and higher contrast than the world.
@@ -38,8 +44,9 @@ bun run vapor:rpg:assets:build
 bun run vapor:rpg:assets:check
 ```
 
-Do not hand-edit the generated header. Review the two 1x PNG sheets and the
-world, dialog and battle mGBA captures after changing any source image.
+Do not hand-edit the generated header. Review `background.png`, `actors.png`,
+`battle-actors.png`, the palette guide, and the world/dialog/battle mGBA
+captures after changing any source image.
 
 Use `--only=style`, `--only=world`, `--only=tree`, `--only=flower`,
 `--only=characters`, `--only=hero`, `--only=elder` or `--only=slime` with

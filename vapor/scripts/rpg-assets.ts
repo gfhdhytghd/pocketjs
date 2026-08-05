@@ -22,6 +22,11 @@ const HEADER = join(import.meta.dir, "..", "runtime", "gba", "vapor_rpg_assets.g
 const MANIFEST = join(ROOT, "generation.json");
 const API = "https://api.pixellab.ai/v2";
 
+const WORLD_TILE_SIZE = 16;
+const WORLD_TILE_COLUMNS = 10;
+const WORLD_ACTOR_SIZE = 32;
+const BATTLE_ACTOR_SIZE = 64;
+
 type Rgb = readonly [number, number, number];
 type Palette = readonly Rgb[];
 type ImageDataLike = { data: Uint8ClampedArray; width: number; height: number };
@@ -34,28 +39,40 @@ const BG: Palette = [
 ] as const;
 
 const HERO: Palette = [
-  [0x00, 0x00, 0x00], [0x18, 0x18, 0x21], [0xff, 0xad, 0x63], [0x42, 0x84, 0xff],
-  [0xff, 0x7b, 0x4a],
+  [0x00, 0x00, 0x00], [0x18, 0x29, 0x4a], [0xc6, 0x6b, 0x42], [0xff, 0xad, 0x63],
+  [0x21, 0x52, 0xad], [0x42, 0x84, 0xff], [0x84, 0xb5, 0xff], [0xb5, 0x42, 0x31],
+  [0xff, 0x7b, 0x4a], [0xef, 0xde, 0x94],
 ] as const;
 const ELDER: Palette = [
-  [0x00, 0x00, 0x00], [0x18, 0x18, 0x21], [0xff, 0xad, 0x63], [0x94, 0x94, 0x94],
-  [0xff, 0xff, 0xff],
+  [0x00, 0x00, 0x00], [0x18, 0x29, 0x4a], [0xc6, 0x6b, 0x42], [0xff, 0xad, 0x63],
+  [0x4a, 0x52, 0x63], [0x73, 0x7b, 0x8c], [0x9c, 0xa5, 0xad], [0xc6, 0xd6, 0xde],
+  [0xff, 0xff, 0xff], [0x42, 0x84, 0xff],
 ] as const;
 const SLIME: Palette = [
-  [0x00, 0x00, 0x00], [0x18, 0x18, 0x21], [0x00, 0xad, 0xad], [0x00, 0x5a, 0x5a],
-  [0xff, 0xff, 0xff],
+  [0x00, 0x00, 0x00], [0x18, 0x29, 0x4a], [0x00, 0x5a, 0x5a], [0x00, 0xad, 0xad],
+  [0x39, 0xd6, 0xc6], [0x94, 0xf7, 0xde], [0xff, 0xff, 0xff],
 ] as const;
 
-const TILE_NAMES = [
+const STYLE_PALETTE: Palette = [
+  [0x18, 0x29, 0x4a], [0x21, 0x31, 0x63], [0x21, 0x7b, 0x42], [0x42, 0xc6, 0x5a],
+  [0x84, 0x5a, 0x29], [0xc6, 0x9c, 0x52], [0x18, 0x4a, 0x94], [0x39, 0x94, 0xe7],
+  [0xc6, 0x6b, 0x42], [0xff, 0xad, 0x63], [0x42, 0x84, 0xff], [0xff, 0x7b, 0x4a],
+  [0x73, 0x7b, 0x8c], [0xff, 0xff, 0xff], [0x00, 0xad, 0xad], [0x94, 0xf7, 0xde],
+] as const;
+
+const WORLD_TILE_NAMES = [
   "blank", "grass-a", "grass-b", "path-a", "path-b", "wall", "water-a", "water-b",
-  "tree", "flower", "box-fill", "box-top", "box-bottom", "box-left", "box-right", "box-tl",
-  "box-tr", "box-bl", "box-br", "battle-sky", "battle-ground", "hp-empty", "hp-full", "hud",
+  "tree", "flower",
+] as const;
+const UI_TILE_NAMES = [
+  "box-fill", "box-top", "box-bottom", "box-left", "box-right", "box-tl", "box-tr", "box-bl",
+  "box-br", "battle-sky", "battle-ground", "hp-empty", "hp-full", "hud",
 ] as const;
 const ACTOR_NAMES = ["hero-south", "hero-north", "hero-west", "hero-east", "elder", "slime"] as const;
 
 const STYLE = [
   "Original cheerful early-2000s handheld cartridge RPG pixel art.",
-  "High top-down world view, compact chibi characters, crisp hard-edged native pixels.",
+  "High top-down world view, expressive 32-pixel chibi characters, crisp hard-edged native pixels.",
   "One-pixel selective deep-navy outlines, flat clusters, fixed top-left lighting.",
   "Readable silhouettes and restrained surface texture; no imitation of any existing game.",
 ].join(" ");
@@ -67,40 +84,47 @@ const TERRAIN_STYLE = [
   "No characters, items, icons, perspective, canvas border or imitation of an existing game.",
 ].join(" ");
 
+const MONSTER_STYLE = [
+  "Original cheerful early-2000s handheld cartridge RPG monster pixel art.",
+  "High top-down view, crisp hard-edged native pixels, flat color clusters and fixed top-left lighting.",
+  "One-pixel selective deep-navy outline, readable non-humanoid silhouette, no imitation of any existing game.",
+].join(" ");
+
 const EXCLUSIONS = [
   "antialiasing", "blur", "gradients", "dithering", "soft shadows", "bloom", "photorealism",
   "painterly texture", "isometric view", "perspective", "text", "letters", "numbers", "labels",
-  "watermark", "logo", "mockup", "enlarged preview",
+  "watermark", "logo", "mockup", "enlarged preview", "multiple characters", "duplicate subject",
+  "sprite sheet", "contact sheet", "lineup", "alternate poses",
 ].join(", ");
 
 const GENERATION = {
-  version: 1,
+  version: 2,
   provider: "PixelLab",
   apiBase: API,
-  artDirection: "Vapor Quest: bright field, deep-navy information layer, one-pixel silhouettes",
+  artDirection: "Vapor Quest close-up: 16px world cells, 32px actors, deep-navy information layer",
   assets: {
     styleAnchor: {
-      endpoint: "/create-image-bitforge",
-      seed: 22051,
-      size: { width: 96, height: 64 },
-      prompt: `${STYLE} A tiny forest village clearing: grass, a tan footpath, blue stream, gray stone wall, leafy tree, one blue-tunic adventurer, one white-haired elder, and one teal slime. Compose it as a clean asset style board, with no text or UI.`,
+      endpoint: "/create-image-pixen",
+      seed: 23050,
+      size: { width: 64, height: 64 },
+      prompt: `${STYLE} Exactly one single south-facing full-body blue-tunic adventurer with short brown hair and a warm orange scarf, centered in a neutral standing pose on transparent background. Blue clothing must be the largest color area. This is a canonical style reference, not a sprite sheet: one subject, one pose, no duplicate, no alternate view, no scenery, text or UI.`,
     },
     terrainSets: [
       {
         name: "field",
         endpoint: "/tilesets",
-        seed: 22061,
-        lower: `${TERRAIN_STYLE} Seamless bright green meadow grass, quiet walkable ground, only two or three tiny dark grass clusters, no objects or border.`,
-        upper: `${TERRAIN_STYLE} Seamless warm tan compacted village footpath, quiet walkable ground, only two or three tiny brown stone marks, no grass edge or border.`,
+        seed: 23061,
+        lower: `${TERRAIN_STYLE} Native 16x16 seamless bright green meadow grass, quiet walkable ground, four or five deliberate dark grass blades, no objects or border.`,
+        upper: `${TERRAIN_STYLE} Native 16x16 seamless warm tan compacted village footpath, quiet walkable ground, a few readable brown pebbles, no grass edge or border.`,
         lowerFile: "grass.png",
         upperFile: "path.png",
       },
       {
         name: "barriers",
         endpoint: "/tilesets",
-        seed: 22062,
-        lower: `${TERRAIN_STYLE} Seamless deep blue stream water, clearly impassable, two restrained horizontal ripple marks, quiet even field, no shore or border.`,
-        upper: `${TERRAIN_STYLE} Seamless gray stone barrier, clearly solid and impassable, chunky rectangular stones, dark mortar and bright top-left edges, no grass or border.`,
+        seed: 23062,
+        lower: `${TERRAIN_STYLE} Native 16x16 seamless deep blue stream water, clearly impassable, three crisp horizontal ripple clusters, quiet even field, no shore or border.`,
+        upper: `${TERRAIN_STYLE} Native 16x16 seamless gray stone barrier, clearly solid and impassable, chunky rectangular stones, dark mortar and bright top-left edges, no grass or border.`,
         lowerFile: "water.png",
         upperFile: "wall.png",
       },
@@ -109,38 +133,38 @@ const GENERATION = {
       {
         name: "tree",
         endpoint: "/map-objects",
-        seed: 22069,
-        prompt: `${STYLE} One centered top-down deciduous tree map object on transparent background. A single compact, solid, filled round dome canopy occupies most of the image and must never form a hollow ring, split crown, doorway or arch. Dense leaves read as impassable, with dark lower-right foliage, bright top-left leaf clusters and exactly one short centered trunk. No grass tile and no cast shadow.`,
+        seed: 23069,
+        prompt: `${STYLE} One centered top-down deciduous tree map object designed to fill one 16x16 world cell after reduction. A single compact, solid, filled round dome canopy occupies most of the image and must never form a hollow ring, split crown, doorway or arch. Dense leaves read as impassable, with dark lower-right foliage, bright top-left leaf clusters and exactly one short centered trunk. No grass tile and no cast shadow.`,
       },
       {
         name: "flower",
         endpoint: "/map-objects",
-        seed: 22066,
-        prompt: `${STYLE} One tiny gold-and-cream meadow flower map object on transparent background. Low-profile walkable decoration, delicate stem, no enclosing outline, no ground tile and no cast shadow.`,
+        seed: 23066,
+        prompt: `${STYLE} One readable gold-and-cream meadow flower cluster designed for one 16x16 world cell after reduction. Low-profile walkable decoration, three small blossoms and delicate green stems, no enclosing outline, no ground tile and no cast shadow.`,
       },
     ],
     heroSouth: {
       endpoint: "/create-image-bitforge",
-      seed: 22053,
-      size: { width: 32, height: 32 },
-      prompt: `${STYLE} One south-facing 32x32 source sprite designed to reduce cleanly to a 16x16 GBA character. Full-body compact chibi adventurer with a readable head, torso, two arms and two separated feet. Blue tunic is the largest color block, warm orange-red scarf is the identity accent, warm skin, deep-navy outline. Centered, feet at the bottom, strong silhouette, no weapon, no detached pixels.`,
+      seed: 23063,
+      size: { width: 64, height: 64 },
+      prompt: `${STYLE} Exactly one south-facing native 64x64 source sprite designed to retain facial, clothing and limb detail in a 32x32 GBA character. Full-body chibi adventurer with a readable head, short brown hair, torso, two arms, gloves, boots and two separated feet. Blue tunic and darker blue trousers are the largest color blocks; warm orange-red scarf is the identity accent; warm skin and selective deep-navy outline. Centered, feet at the bottom, strong silhouette, no weapon, no detached pixels, no duplicate, no alternate pose, no sprite sheet.`,
     },
     heroRotations: {
       endpoint: "/create-character-v3",
-      seed: 22054,
-      prompt: "The same compact blue-tunic adventurer with orange-red scarf, rotated consistently for a high top-down RPG; preserve head height, shoulder width, palette, outline and foot anchor in every direction.",
+      seed: 23054,
+      prompt: "The same expressive blue-tunic adventurer with short brown hair, orange-red scarf, gloves and boots, rotated consistently for a high top-down RPG; preserve face, head height, shoulder width, clothing blocks, palette, outline and foot anchor in every direction.",
     },
     elder: {
-      endpoint: "/create-image-bitforge",
-      seed: 22055,
-      size: { width: 32, height: 32 },
-      prompt: `${STYLE} One south-facing 32x32 source sprite designed to reduce cleanly to a 16x16 GBA character. Full-body chibi village elder with white hair, short white beard, broad gray robe, warm skin, deep-navy outline, two arms and a grounded hem. Same height, head ratio, lighting and foot anchor as the blue-tunic adventurer. No staff, centered, no detached pixels.`,
+      endpoint: "/create-image-pixen",
+      seed: 23060,
+      size: { width: 64, height: 64 },
+      prompt: `${STYLE} Exactly one south-facing native 64x64 source sprite designed to retain facial, hair and robe detail in a 32x32 GBA character. Full-body chibi village elder with swept white hair, eyebrows, short white beard, broad layered gray robe, blue sash, warm skin, deep-navy outline, two visible arms and a grounded hem. Same height, head ratio, lighting and foot anchor as the blue-tunic adventurer. No staff, centered, no skeleton or ghost appearance, no detached pixels, no duplicate, no alternate pose, no sprite sheet.`,
     },
     slime: {
-      endpoint: "/create-image-bitforge",
-      seed: 22056,
-      size: { width: 32, height: 32 },
-      prompt: `${STYLE} One 32x32 source sprite designed to reduce cleanly to a 16x16 GBA monster. A low, wide, rounded slime whose body is at least ninety percent bright teal and dark teal, with a deep-navy outline and broad grounded base. White is allowed only for exactly two tiny separated eye highlights; never make the body, face or outline white. Cute but clearly an enemy, no limbs, no floating parts.`,
+      endpoint: "/map-objects",
+      seed: 23065,
+      size: { width: 64, height: 64 },
+      prompt: `${MONSTER_STYLE} Exactly one native 64x64 source sprite designed to retain face, highlight and volume detail in a 32x32 GBA monster. A compact teal tentacled puddle ooze with a rounded central body and several short grounded pseudopods. Its amorphous body is at least ninety percent a four-step teal ramp, with a deep-navy outline, broad grounded base, two tiny white eyes and a small dark mouth. Cute but clearly an enemy, wider than tall, with no humanoid torso, clothing, hands or feet, no floating parts, centered at the bottom, no duplicate, no alternate pose, no sprite sheet.`,
     },
   },
 } as const;
@@ -174,7 +198,9 @@ function paletteGuidePng(): Buffer {
   const ctx = canvas.getContext("2d");
   for (const [row, palette] of [BG, HERO, ELDER, SLIME].entries()) {
     for (let i = 0; i < 16; i++) {
-      const color = palette[Math.min(i, palette.length - 1)];
+      // Match the generated GBA palette banks: unused OBJ entries are zero,
+      // not repetitions of the last authored color.
+      const color = palette[i] ?? ([0, 0, 0] as const);
       ctx.fillStyle = hex(color);
       ctx.fillRect(i * 4, row * 16, 4, 16);
     }
@@ -217,32 +243,51 @@ function imageBytes(image: { base64: string }): Buffer {
   return Buffer.from(encoded, "base64");
 }
 
+async function generatePixen(
+  file: string,
+  spec: { prompt: string; seed: number; size: { width: number; height: number } },
+  palette: Palette,
+): Promise<{ hash: string }> {
+  console.log(`PixelLab: generating ${file}`);
+  const response = await pixelLab<{ image: { base64: string } }>("/create-image-pixen", {
+    description: `${spec.prompt} Use this fixed color language: ${paletteText(palette)}. Avoid ${EXCLUSIONS}.`,
+    image_size: spec.size,
+    outline: "selective outline",
+    detail: "medium detail",
+    view: "high top-down",
+    direction: "south",
+    no_background: true,
+    background_removal_task: "remove_simple_background",
+    seed: spec.seed,
+  });
+  const bytes = imageBytes(response.image);
+  writeFileSync(join(SOURCE, file), bytes);
+  return { hash: sha256(bytes) };
+}
+
 async function generateBitforge(
   file: string,
   spec: { prompt: string; seed: number; size: { width: number; height: number } },
   palette: Palette,
-  styleImage?: Buffer,
-  transparent = false,
+  styleImage: Buffer,
 ): Promise<{ hash: string }> {
   console.log(`PixelLab: generating ${file}`);
-  const styleReference = styleImage
-    ? await resizePng(styleImage, spec.size.width, spec.size.height)
-    : undefined;
+  const styleReference = await resizePng(styleImage, spec.size.width, spec.size.height);
   const response = await pixelLab<{ image: { base64: string } }>("/create-image-bitforge", {
     description: `${spec.prompt} Use only these palette colors: ${paletteText(palette)}.`,
     negative_description: EXCLUSIONS,
     image_size: spec.size,
-    text_guidance_scale: 10,
-    style_strength: styleImage ? 45 : 0,
-    outline: "lineless",
+    text_guidance_scale: 12,
+    style_strength: 35,
+    outline: "selective outline",
     shading: "basic shading",
     detail: "medium detail",
     view: "high top-down",
-    direction: transparent ? "south" : undefined,
-    no_background: transparent,
-    coverage_percentage: transparent ? 76 : 100,
+    direction: "south",
+    no_background: true,
+    coverage_percentage: 84,
     color_image: base64Image(palettePng(palette)),
-    style_image: styleReference ? base64Image(styleReference) : undefined,
+    style_image: base64Image(styleReference),
     seed: spec.seed,
   });
   const bytes = imageBytes(response.image);
@@ -268,6 +313,8 @@ async function generateHeroRotations(reference: Buffer): Promise<{
     name: "Vapor Quest Hero",
     seed: spec.seed,
     no_background: true,
+    outline: "selective outline",
+    detail: "medium detail",
   });
 
   for (;;) {
@@ -390,6 +437,41 @@ async function generateMapObject(spec: typeof GENERATION.assets.mapObjects[numbe
   return { backgroundJobId: created.background_job_id, objectId: created.object_id, hash: sha256(bytes) };
 }
 
+async function generateMapSprite(
+  file: string,
+  spec: { prompt: string; seed: number; size: { width: number; height: number } },
+  palette: Palette,
+): Promise<Record<string, string>> {
+  console.log(`PixelLab: generating ${file}`);
+  const created = await pixelLab<{ background_job_id: string; object_id: string }>("/map-objects", {
+    description: `${spec.prompt} Use only these palette colors: ${paletteText(palette)}.`,
+    image_size: spec.size,
+    view: "high top-down",
+    outline: "selective outline",
+    shading: "basic shading",
+    detail: "medium detail",
+    text_guidance_scale: 12,
+    color_image: base64Image(await resizePng(palettePng(palette), spec.size.width, spec.size.height)),
+    seed: spec.seed,
+  });
+  await waitForJob(created.background_job_id, file);
+  const detail = await fetch(`${API}/map-objects/${created.object_id}`, {
+    headers: { Authorization: `Bearer ${process.env.PIXELLAB_API_KEY}` },
+  });
+  if (!detail.ok) throw new Error(`PixelLab ${file} fetch failed (${detail.status})`);
+  const object = await detail.json() as { download_url?: string | null };
+  if (!object.download_url) throw new Error(`PixelLab ${file} has no download URL`);
+  const download = await fetch(object.download_url);
+  if (!download.ok) throw new Error(`PixelLab ${file} download failed (${download.status})`);
+  const bytes = Buffer.from(await download.arrayBuffer());
+  writeFileSync(join(SOURCE, file), bytes);
+  return {
+    backgroundJobId: created.background_job_id,
+    objectId: created.object_id,
+    hash: sha256(bytes),
+  };
+}
+
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -409,11 +491,7 @@ async function generate(force: boolean): Promise<void> {
     only === "all" || only === group || files.some((file) => !existsSync(join(SOURCE, file)));
 
   if (selected("style", ["style-anchor.png"]) && (force || !existsSync(join(SOURCE, "style-anchor.png")))) {
-    records.styleAnchor = await generateBitforge(
-      "style-anchor.png",
-      GENERATION.assets.styleAnchor,
-      BG,
-    );
+    records.styleAnchor = await generatePixen("style-anchor.png", GENERATION.assets.styleAnchor, STYLE_PALETTE);
   }
   const anchor = readFileSync(join(SOURCE, "style-anchor.png"));
   const worldFiles = [
@@ -453,9 +531,7 @@ async function generate(force: boolean): Promise<void> {
   if (charactersSelected) {
     const forceHero = force && (only === "all" || only === "characters" || only === "hero");
     if (forceHero || !existsSync(join(SOURCE, "hero-south-reference.png"))) {
-      records.heroSouth = await generateBitforge(
-        "hero-south-reference.png", GENERATION.assets.heroSouth, HERO, anchor, true,
-      );
+      records.heroSouth = await generateBitforge("hero-south-reference.png", GENERATION.assets.heroSouth, HERO, anchor);
     }
     const rotationsMissing = ["hero-south.png", "hero-north.png", "hero-west.png", "hero-east.png"]
       .some((file) => !existsSync(join(SOURCE, file)));
@@ -464,11 +540,11 @@ async function generate(force: boolean): Promise<void> {
     }
     const forceElder = force && (only === "all" || only === "characters" || only === "elder");
     if (forceElder || !existsSync(join(SOURCE, "elder.png"))) {
-      records.elder = await generateBitforge("elder.png", GENERATION.assets.elder, ELDER, anchor, true);
+      records.elder = await generatePixen("elder.png", GENERATION.assets.elder, ELDER);
     }
     const forceSlime = force && (only === "all" || only === "characters" || only === "slime");
     if (forceSlime || !existsSync(join(SOURCE, "slime.png"))) {
-      records.slime = await generateBitforge("slime.png", GENERATION.assets.slime, SLIME, undefined, true);
+      records.slime = await generateMapSprite("slime.png", GENERATION.assets.slime, SLIME);
     }
   }
   delete records.backgroundAtlas;
@@ -491,6 +567,38 @@ function nearestColor(r: number, g: number, b: number, palette: Palette, start =
     }
   }
   return best;
+}
+
+/**
+ * Preserve a generated terrain tile's pixel clusters while translating its
+ * arbitrary colors into a small semantic GBA ramp. The input luminance range
+ * determines the authored texture; the ramp only fixes material identity.
+ */
+export function projectTerrain(
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  shadow: number,
+  base: number,
+  highlight: number,
+  shadowCount: number,
+  highlightCount: number,
+): Uint8Array {
+  if (rgba.length !== width * height * 4) throw new Error("terrain RGBA dimensions do not match");
+  if (shadowCount < 0 || highlightCount < 0 || shadowCount + highlightCount > width * height) {
+    throw new Error("terrain projection counts exceed the source tile");
+  }
+  const ranked = Array.from({ length: width * height }, (_, index) => ({
+    index,
+    // Integer Rec. 709-style weights plus an index tie-break make the same
+    // reviewed PNG produce byte-identical art on every build host.
+    luminance: rgba[index * 4] * 54 + rgba[index * 4 + 1] * 183 + rgba[index * 4 + 2] * 19,
+  })).sort((a, b) => a.luminance - b.luminance || a.index - b.index);
+  const result = new Uint8Array(width * height);
+  result.fill(base);
+  for (let i = 0; i < shadowCount; i++) result[ranked[i].index] = shadow;
+  for (let i = 0; i < highlightCount; i++) result[ranked[ranked.length - 1 - i].index] = highlight;
+  return result;
 }
 
 function indicesFromContext(ctx: SKRSContext2D, width: number, height: number, palette: Palette, transparent: boolean): Uint8Array {
@@ -527,28 +635,31 @@ async function loadExact(path: string, width: number, height: number) {
   return image;
 }
 
-async function buildBackground(): Promise<{ png: Buffer; pixels: Uint8Array }> {
-  const canvas = createCanvas(64, 24);
+export async function buildBackground(sourceDir = SOURCE): Promise<{ png: Buffer; pixels: Uint8Array }> {
+  const sheetWidth = WORLD_TILE_COLUMNS * WORLD_TILE_SIZE;
+  const sheetHeight = WORLD_TILE_SIZE + 8;
+  const canvas = createCanvas(sheetWidth, sheetHeight);
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = hex(BG[1]);
+  ctx.fillRect(0, 0, sheetWidth, sheetHeight);
   const images = Object.fromEntries(await Promise.all([
-    ...["grass", "path", "wall", "water"].map(async (name) => [name, await loadExact(join(SOURCE, `${name}.png`), 16, 16)]),
-    ...["tree", "flower"].map(async (name) => [name, await loadExact(join(SOURCE, `${name}.png`), 32, 32)]),
+    ...["grass", "path", "wall", "water"].map(async (name) => [name, await loadExact(join(sourceDir, `${name}.png`), 16, 16)]),
+    ...["tree", "flower"].map(async (name) => [name, await loadExact(join(sourceDir, `${name}.png`), 32, 32)]),
   ]));
-  const drawTile = (name: string, tile: number, flip = false) => {
-    const dx = (tile % 8) * 8;
-    const dy = Math.floor(tile / 8) * 8;
+  const drawWorldTile = (name: string, frame: number, flip = false) => {
+    const dx = frame * WORLD_TILE_SIZE;
     ctx.save();
     if (flip) {
-      ctx.translate(dx + 8, dy);
+      ctx.translate(dx + WORLD_TILE_SIZE, 0);
       ctx.scale(-1, 1);
-      ctx.drawImage(images[name], 0, 0, 16, 16, 0, 0, 8, 8);
+      ctx.drawImage(images[name], 0, 0, WORLD_TILE_SIZE, WORLD_TILE_SIZE);
     } else {
-      ctx.drawImage(images[name], 0, 0, 16, 16, dx, dy, 8, 8);
+      ctx.drawImage(images[name], dx, 0, WORLD_TILE_SIZE, WORLD_TILE_SIZE);
     }
     ctx.restore();
   };
-  const drawObject = (name: string, tile: number, maxWidth: number, maxHeight: number) => {
+  const drawObject = (name: string, frame: number, maxWidth: number, maxHeight: number): Set<number> => {
     const image = images[name];
     const scratch = createCanvas(image.width, image.height);
     const scratchCtx = scratch.getContext("2d");
@@ -574,126 +685,173 @@ async function buildBackground(): Promise<{ png: Buffer; pixels: Uint8Array }> {
     const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
     const width = Math.max(1, Math.round(sourceWidth * scale));
     const height = Math.max(1, Math.round(sourceHeight * scale));
-    const ox = (tile % 8) * 8 + Math.floor((8 - width) / 2);
-    const oy = Math.floor(tile / 8) * 8 + 8 - height;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(image, minX, minY, sourceWidth, sourceHeight, ox, oy, width, height);
+    const localX = Math.floor((WORLD_TILE_SIZE - width) / 2);
+    const localY = WORLD_TILE_SIZE - height;
+    const ox = frame * WORLD_TILE_SIZE + localX;
+    const oy = localY;
     ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(image, minX, minY, sourceWidth, sourceHeight, ox, oy, width, height);
+    const mask = new Set<number>();
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const sx = minX + Math.min(sourceWidth - 1, Math.floor(x * sourceWidth / width));
+        const sy = minY + Math.min(sourceHeight - 1, Math.floor(y * sourceHeight / height));
+        if (raw.data[(sy * image.width + sx) * 4 + 3] >= 128) {
+          mask.add((localY + y) * WORLD_TILE_SIZE + localX + x);
+        }
+      }
+    }
+    return mask;
   };
-  drawTile("grass", 1);
-  drawTile("grass", 2, true);
-  drawTile("path", 3);
-  drawTile("path", 4, true);
-  drawTile("wall", 5);
-  drawTile("water", 6);
-  drawTile("water", 7, true);
-  drawTile("grass", 8);
-  drawTile("grass", 9, true);
-  drawObject("tree", 8, 7, 8);
-  drawObject("flower", 9, 5, 6);
-  const indices = indicesFromContext(ctx, 64, 24, BG, false);
+  drawWorldTile("grass", 1);
+  drawWorldTile("grass", 2, true);
+  drawWorldTile("path", 3);
+  drawWorldTile("path", 4, true);
+  drawWorldTile("wall", 5);
+  drawWorldTile("water", 6);
+  drawWorldTile("water", 7, true);
+  drawWorldTile("grass", 8);
+  drawWorldTile("grass", 9, true);
+  const treeMask = drawObject("tree", 8, 15, 16);
+  const flowerMask = drawObject("flower", 9, 10, 11);
+  const indices = indicesFromContext(ctx, sheetWidth, sheetHeight, BG, false);
 
-  // Hardware semantics override generative ambiguity for the non-art blank and
-  // guarantee that all nine dialog pieces tile without seams.
-  const setTile = (tile: number, fill: number, border: "none" | "top" | "bottom" | "left" | "right" | "tl" | "tr" | "bl" | "br") => {
-    const ox = (tile % 8) * 8;
-    const oy = Math.floor(tile / 8) * 8;
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) indices[(oy + y) * 64 + ox + x] = fill;
+  const worldAt = (frame: number, x: number, y: number): number =>
+    y * sheetWidth + frame * WORLD_TILE_SIZE + x;
+  const paintWorld = (frame: number, x: number, y: number, color: number): void => {
+    indices[worldAt(frame, x, y)] = color;
+  };
+
+  // The generated PNGs own the base texture. Translate their luminance
+  // clusters into material-specific ramps, then add only sparse readability
+  // accents below. This keeps PixelLab input materially present in the ROM.
+  const sourceRgba = (ctx.getImageData(0, 0, sheetWidth, WORLD_TILE_SIZE) as ImageDataLike).data;
+  for (const [frame, sourceFrame, shadow, base, highlight, shadowCount, highlightCount] of [
+    [1, 1, 10, 3, 11, 8, 4], [2, 2, 10, 3, 11, 8, 4],
+    [3, 3, 4, 5, 14, 20, 10], [4, 4, 4, 5, 14, 20, 10],
+    [5, 5, 6, 7, 14, 32, 12],
+    [6, 6, 8, 9, 13, 28, 8], [7, 7, 8, 9, 13, 28, 8],
+    // Object frames reuse pristine grass projection; their PixelLab masks are
+    // applied afterwards and cannot perturb the surrounding ground texture.
+    [8, 1, 10, 3, 11, 8, 4], [9, 2, 10, 3, 11, 8, 4],
+  ] as const) {
+    const tile = new Uint8ClampedArray(WORLD_TILE_SIZE * WORLD_TILE_SIZE * 4);
+    for (let y = 0; y < WORLD_TILE_SIZE; y++) {
+      for (let x = 0; x < WORLD_TILE_SIZE; x++) {
+        const sourceAt = (y * sheetWidth + sourceFrame * WORLD_TILE_SIZE + x) * 4;
+        const targetAt = (y * WORLD_TILE_SIZE + x) * 4;
+        tile[targetAt] = sourceRgba[sourceAt];
+        tile[targetAt + 1] = sourceRgba[sourceAt + 1];
+        tile[targetAt + 2] = sourceRgba[sourceAt + 2];
+        tile[targetAt + 3] = sourceRgba[sourceAt + 3];
+      }
+    }
+    const mapped = projectTerrain(
+      tile,
+      WORLD_TILE_SIZE,
+      WORLD_TILE_SIZE,
+      shadow,
+      base,
+      highlight,
+      shadowCount,
+      highlightCount,
+    );
+    for (let y = 0; y < WORLD_TILE_SIZE; y++) {
+      for (let x = 0; x < WORLD_TILE_SIZE; x++) paintWorld(frame, x, y, mapped[y * WORLD_TILE_SIZE + x]);
+    }
+  }
+  for (const [frame, color, marks] of [
+    [1, 2, [[2, 3], [11, 5], [5, 12], [14, 14]]],
+    [2, 2, [[12, 2], [4, 6], [9, 11], [1, 14]]],
+    [3, 4, [[3, 2], [12, 6], [6, 11], [14, 14]]],
+    [4, 4, [[12, 2], [5, 5], [2, 11], [10, 14]]],
+  ] as const) {
+    for (const [x, y] of marks) paintWorld(frame, x, y, color);
+  }
+  for (const [frame, marks] of [
+    [1, [[3, 4], [12, 6], [6, 13]]],
+    [2, [[11, 3], [5, 7], [2, 13]]],
+  ] as const) for (const [x, y] of marks) paintWorld(frame, x, y, 10);
+  for (const [frame, marks] of [
+    [3, [[8, 3], [2, 9], [13, 12]]],
+    [4, [[4, 2], [11, 8], [6, 13]]],
+  ] as const) for (const [x, y] of marks) paintWorld(frame, x, y, 14);
+  for (let x = 0; x < WORLD_TILE_SIZE; x++) {
+    paintWorld(5, x, 5, 6);
+    paintWorld(5, x, 11, 6);
+  }
+  for (let y = 0; y < 5; y++) paintWorld(5, 7, y, 6);
+  for (let y = 6; y < 11; y++) paintWorld(5, 3, y, 6);
+  for (let y = 12; y < 16; y++) paintWorld(5, 12, y, 6);
+  paintWorld(5, 1, 1, 14);
+  paintWorld(5, 9, 7, 14);
+  paintWorld(5, 14, 13, 14);
+  for (const [frame, rows] of [[6, [3, 10]], [7, [6, 13]]] as const) {
+    for (const y of rows) {
+      for (let x = 1; x < 7; x++) paintWorld(frame, x, y, 8);
+      for (let x = 10; x < 15; x++) paintWorld(frame, x, (y + 5) % 16, 8);
+    }
+  }
+  paintWorld(6, 12, 2, 13);
+  paintWorld(6, 4, 12, 13);
+  paintWorld(7, 3, 4, 13);
+  paintWorld(7, 12, 11, 13);
+
+  for (const local of treeMask) {
+    const x = local % WORLD_TILE_SIZE;
+    const y = Math.floor(local / WORLD_TILE_SIZE);
+    const at = worldAt(8, x, y);
+    if (y >= 12 && x >= 6 && x <= 9) indices[at] = y === 12 ? 5 : 4;
+    else indices[at] = ((x * 3 + y * 5) % 11 < 3) ? 11 : 10;
+  }
+  for (const local of flowerMask) {
+    const x = local % WORLD_TILE_SIZE;
+    const y = Math.floor(local / WORLD_TILE_SIZE);
+    indices[worldAt(9, x, y)] = y < 9 ? ((x + y) % 3 ? 12 : 14) : 11;
+  }
+
+  // UI remains a screen-space 8x8 system. These exact pieces guarantee that
+  // dialog borders, HUD and HP bars tile without seams beside 16px world cells.
+  const setUiTile = (tile: number, fill: number, border: "none" | "top" | "bottom" | "left" | "right" | "tl" | "tr" | "bl" | "br") => {
+    const ox = tile * 8;
+    const oy = WORLD_TILE_SIZE;
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) indices[(oy + y) * sheetWidth + ox + x] = fill;
     const edge = 14;
-    if (border === "top" || border === "tl" || border === "tr") for (let x = 0; x < 8; x++) indices[oy * 64 + ox + x] = edge;
-    if (border === "bottom" || border === "bl" || border === "br") for (let x = 0; x < 8; x++) indices[(oy + 7) * 64 + ox + x] = edge;
-    if (border === "left" || border === "tl" || border === "bl") for (let y = 0; y < 8; y++) indices[(oy + y) * 64 + ox] = edge;
-    if (border === "right" || border === "tr" || border === "br") for (let y = 0; y < 8; y++) indices[(oy + y) * 64 + ox + 7] = edge;
+    if (border === "top" || border === "tl" || border === "tr") for (let x = 0; x < 8; x++) indices[oy * sheetWidth + ox + x] = edge;
+    if (border === "bottom" || border === "bl" || border === "br") for (let x = 0; x < 8; x++) indices[(oy + 7) * sheetWidth + ox + x] = edge;
+    if (border === "left" || border === "tl" || border === "bl") for (let y = 0; y < 8; y++) indices[(oy + y) * sheetWidth + ox] = edge;
+    if (border === "right" || border === "tr" || border === "br") for (let y = 0; y < 8; y++) indices[(oy + y) * sheetWidth + ox + 7] = edge;
   };
-  setTile(0, 1, "none");
-  setTile(10, 13, "none");
-  setTile(11, 13, "top");
-  setTile(12, 13, "bottom");
-  setTile(13, 13, "left");
-  setTile(14, 13, "right");
-  setTile(15, 13, "tl");
-  setTile(16, 13, "tr");
-  setTile(17, 13, "bl");
-  setTile(18, 13, "br");
-  setTile(19, 8, "none");
-  setTile(20, 2, "none");
-  setTile(21, 1, "none");
-  setTile(22, 1, "none");
-  setTile(23, 1, "none");
-  const paint = (tile: number, x: number, y: number, color: number) => {
-    const ox = (tile % 8) * 8;
-    const oy = Math.floor(tile / 8) * 8;
-    indices[(oy + y) * 64 + ox + x] = color;
+  setUiTile(0, 13, "none");
+  setUiTile(1, 13, "top");
+  setUiTile(2, 13, "bottom");
+  setUiTile(3, 13, "left");
+  setUiTile(4, 13, "right");
+  setUiTile(5, 13, "tl");
+  setUiTile(6, 13, "tr");
+  setUiTile(7, 13, "bl");
+  setUiTile(8, 13, "br");
+  setUiTile(9, 8, "none");
+  setUiTile(10, 2, "none");
+  setUiTile(11, 1, "none");
+  setUiTile(12, 1, "none");
+  setUiTile(13, 1, "none");
+  const paintUi = (tile: number, x: number, y: number, color: number) => {
+    const ox = tile * 8;
+    const oy = WORLD_TILE_SIZE;
+    indices[(oy + y) * sheetWidth + ox + x] = color;
   };
-  setTile(1, 3, "none");
-  setTile(2, 3, "none");
-  setTile(3, 5, "none");
-  setTile(4, 5, "none");
-  setTile(5, 7, "none");
-  setTile(6, 9, "none");
-  setTile(7, 9, "none");
-  for (const [tile, marks] of [
-    [1, [[1, 2], [6, 6], [2, 7]]],
-    [2, [[5, 1], [2, 5], [6, 7]]],
-  ] as const) {
-    for (const [x, y] of marks) paint(tile, x, y, 2);
-  }
-  for (const [tile, marks] of [
-    [3, [[1, 1], [6, 5], [3, 7]]],
-    [4, [[6, 1], [2, 4], [5, 7]]],
-  ] as const) {
-    for (const [x, y] of marks) paint(tile, x, y, 4);
-  }
-  for (let x = 0; x < 8; x++) {
-    paint(5, x, 3, 6);
-    paint(5, x, 7, 6);
-  }
-  for (let y = 0; y < 3; y++) paint(5, 3, y, 6);
-  for (let y = 4; y < 7; y++) paint(5, 6, y, 6);
-  paint(5, 0, 0, 14);
-  paint(5, 4, 4, 14);
-  for (const [tile, y0] of [[6, 2], [7, 5]] as const) {
-    for (let x = 0; x < 3; x++) paint(tile, x, y0, 8);
-    for (let x = 5; x < 8; x++) paint(tile, x, 7 - y0, 8);
-  }
-  // Preserve the PixelLab tree silhouette while collapsing its source grays
-  // into the shared foliage ramp. The tiny target needs a closed canopy and a
-  // deliberate two-pixel trunk to remain a tree rather than a dark arch.
-  for (let y = 0; y <= 5; y++) {
-    for (let x = 0; x < 8; x++) {
-      const ox = (8 % 8) * 8;
-      const oy = Math.floor(8 / 8) * 8;
-      const at = (oy + y) * 64 + ox + x;
-      if (indices[at] === 1 || indices[at] === 6 || indices[at] === 13) indices[at] = 10;
-      else if (indices[at] === 7 || indices[at] === 14) indices[at] = 11;
-    }
-  }
-  for (let x = 0; x < 8; x++) {
-    if (x !== 3 && x !== 4) {
-      paint(8, x, 6, 3);
-      paint(8, x, 7, 3);
-    }
-  }
-  paint(8, 3, 5, 4);
-  paint(8, 4, 5, 5);
-  paint(8, 3, 6, 4);
-  paint(8, 4, 6, 4);
-  paint(8, 3, 7, 4);
-  paint(8, 4, 7, 4);
-  paint(8, 2, 1, 11);
-  paint(8, 5, 2, 11);
-  paint(8, 1, 3, 11);
   for (let x = 0; x < 8; x++) {
     for (let y = 2; y <= 5; y++) {
-      paint(21, x, y, y === 2 || y === 5 || x === 0 || x === 7 ? 6 : 7);
-      paint(22, x, y, y === 2 || y === 5 || x === 0 || x === 7 ? 10 : 12);
+      paintUi(11, x, y, y === 2 || y === 5 || x === 0 || x === 7 ? 6 : 7);
+      paintUi(12, x, y, y === 2 || y === 5 || x === 0 || x === 7 ? 10 : 12);
     }
-    paint(23, x, 7, 12);
+    paintUi(13, x, 7, 12);
   }
 
-  const finalCanvas = createCanvas(64, 24);
+  const finalCanvas = createCanvas(sheetWidth, sheetHeight);
   const finalCtx = finalCanvas.getContext("2d");
-  drawIndices(finalCtx, indices, 64, 24, BG, 0, 0, false);
+  drawIndices(finalCtx, indices, sheetWidth, sheetHeight, BG, 0, 0, false);
   return { png: finalCanvas.toBuffer("image/png"), pixels: indices };
 }
 
@@ -725,6 +883,9 @@ async function normalizeSprite(
     }
   }
   if (maxX < minX || maxY < minY) throw new Error(`${path} has no opaque actor pixels`);
+  if (minX === 0 || minY === 0 || maxX === image.width - 1 || maxY === image.height - 1) {
+    throw new Error(`${path} actor touches the source canvas edge; reject scene/background leakage`);
+  }
   const sourceWidth = maxX - minX + 1;
   const sourceHeight = maxY - minY + 1;
   const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
@@ -741,8 +902,13 @@ async function normalizeSprite(
 }
 
 function polishSlime(slime: Uint8Array, size: number): void {
+  const dark = 2;
+  const mid = 3;
+  const bright = 4;
+  const pale = 5;
+  const eye = 6;
   for (let i = 0; i < slime.length; i++) {
-    if (slime[i] === 4) slime[i] = 2;
+    if (slime[i] === eye) slime[i] = bright;
   }
   let slimeMinX = size;
   let slimeMinY = size;
@@ -761,11 +927,11 @@ function polishSlime(slime: Uint8Array, size: number): void {
   const slimeWidth = slimeMaxX - slimeMinX + 1;
   const slimeHeight = slimeMaxY - slimeMinY + 1;
   const eyeY = slimeMinY + Math.max(1, Math.floor(slimeHeight * 0.36));
-  slime[eyeY * size + slimeMinX + Math.floor(slimeWidth * 0.34)] = 4;
-  slime[eyeY * size + slimeMinX + Math.floor(slimeWidth * 0.66)] = 4;
+  const leftEye = eyeY * size + slimeMinX + Math.floor(slimeWidth * 0.34);
+  const rightEye = eyeY * size + slimeMinX + Math.floor(slimeWidth * 0.66);
   const tealRows: number[] = [];
   for (let y = 0; y < size; y++) {
-    if (slime.slice(y * size, y * size + size).some((pixel) => pixel === 2 || pixel === 3)) tealRows.push(y);
+    if (slime.slice(y * size, y * size + size).some((pixel) => pixel >= dark && pixel <= pale)) tealRows.push(y);
   }
   const shadeFrom = tealRows.length > 0
     ? Math.floor((tealRows[0] + tealRows[tealRows.length - 1] + 1) / 2)
@@ -773,10 +939,18 @@ function polishSlime(slime: Uint8Array, size: number): void {
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const at = y * size + x;
-      if (y < shadeFrom && slime[at] === 3) slime[at] = 2;
-      if (y >= shadeFrom && slime[at] === 2) slime[at] = 3;
+      if (y < shadeFrom && slime[at] === dark) slime[at] = mid;
+      if (y >= shadeFrom && slime[at] >= bright && slime[at] <= pale) slime[at] = mid;
     }
   }
+  const body = [...slime.keys()].filter((at) => slime[at] >= dark && slime[at] <= pale);
+  if (body.length > 3) {
+    slime[body[0]] = bright;
+    slime[body[Math.floor(body.length / 4)]] = pale;
+    slime[body[body.length - 1]] = dark;
+  }
+  slime[leftEye] = eye;
+  slime[rightEye] = eye;
 }
 
 async function buildActors(): Promise<{
@@ -796,31 +970,33 @@ async function buildActors(): Promise<{
   const pixels: Uint8Array[] = [];
   for (const [file, palette, kind] of specs) {
     pixels.push(await normalizeSprite(
-      join(SOURCE, file), palette, 16, kind === "slime" ? 11 : 10, kind === "slime" ? 9 : 15,
+      join(SOURCE, file), palette, WORLD_ACTOR_SIZE,
+      kind === "slime" ? 28 : 20,
+      kind === "slime" ? 21 : 30,
     ));
   }
-  // The PixelLab slime source intentionally uses a very small cyan ramp.
-  // Reserve the lower body for the fixed dark teal so it stays grounded after
-  // RGB555 quantization and on the dimmer original GBA LCD.
+  // Reassert the reviewed eyes and top-left/lower-right teal shading so the
+  // generated puddle-ooze silhouette survives RGB555 quantization and the
+  // dimmer original GBA LCD without changing its PixelLab-authored outline.
   const slime = pixels[5];
-  polishSlime(slime, 16);
-  const canvas = createCanvas(96, 16);
+  polishSlime(slime, WORLD_ACTOR_SIZE);
+  const canvas = createCanvas(ACTOR_NAMES.length * WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE);
   const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, 96, 16);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (let i = 0; i < pixels.length; i++) {
     const palette = i < 4 ? HERO : i === 4 ? ELDER : SLIME;
-    drawIndices(ctx, pixels[i], 16, 16, palette, i * 16, 0, true);
+    drawIndices(ctx, pixels[i], WORLD_ACTOR_SIZE, WORLD_ACTOR_SIZE, palette, i * WORLD_ACTOR_SIZE, 0, true);
   }
   const battlePixels = [
-    await normalizeSprite(join(SOURCE, "hero-east.png"), HERO, 32, 24, 30),
-    await normalizeSprite(join(SOURCE, "slime.png"), SLIME, 32, 26, 24),
+    await normalizeSprite(join(SOURCE, "hero-east.png"), HERO, BATTLE_ACTOR_SIZE, 48, 60),
+    await normalizeSprite(join(SOURCE, "slime.png"), SLIME, BATTLE_ACTOR_SIZE, 54, 44),
   ];
-  polishSlime(battlePixels[1], 32);
-  const battleCanvas = createCanvas(64, 32);
+  polishSlime(battlePixels[1], BATTLE_ACTOR_SIZE);
+  const battleCanvas = createCanvas(2 * BATTLE_ACTOR_SIZE, BATTLE_ACTOR_SIZE);
   const battleCtx = battleCanvas.getContext("2d");
-  battleCtx.clearRect(0, 0, 64, 32);
-  drawIndices(battleCtx, battlePixels[0], 32, 32, HERO, 0, 0, true);
-  drawIndices(battleCtx, battlePixels[1], 32, 32, SLIME, 32, 0, true);
+  battleCtx.clearRect(0, 0, battleCanvas.width, battleCanvas.height);
+  drawIndices(battleCtx, battlePixels[0], BATTLE_ACTOR_SIZE, BATTLE_ACTOR_SIZE, HERO, 0, 0, true);
+  drawIndices(battleCtx, battlePixels[1], BATTLE_ACTOR_SIZE, BATTLE_ACTOR_SIZE, SLIME, BATTLE_ACTOR_SIZE, 0, true);
   return {
     png: canvas.toBuffer("image/png"),
     pixels,
@@ -850,8 +1026,16 @@ function packTile(pixels: Uint8Array, stride: number, ox: number, oy: number): n
 
 function wordsForBackground(pixels: Uint8Array): number[] {
   const words: number[] = [];
-  for (let tile = 0; tile < TILE_NAMES.length; tile++) {
-    words.push(...packTile(pixels, 64, (tile % 8) * 8, Math.floor(tile / 8) * 8));
+  const stride = WORLD_TILE_COLUMNS * WORLD_TILE_SIZE;
+  for (let frame = 0; frame < WORLD_TILE_NAMES.length; frame++) {
+    for (let ty = 0; ty < 2; ty++) {
+      for (let tx = 0; tx < 2; tx++) {
+        words.push(...packTile(pixels, stride, frame * WORLD_TILE_SIZE + tx * 8, ty * 8));
+      }
+    }
+  }
+  for (let tile = 0; tile < UI_TILE_NAMES.length; tile++) {
+    words.push(...packTile(pixels, stride, tile * 8, WORLD_TILE_SIZE));
   }
   return words;
 }
@@ -859,10 +1043,10 @@ function wordsForBackground(pixels: Uint8Array): number[] {
 function wordsForActors(actors: Uint8Array[], battleActors: Uint8Array[]): number[] {
   const words: number[] = [];
   for (const pixels of actors) {
-    for (let ty = 0; ty < 2; ty++) for (let tx = 0; tx < 2; tx++) words.push(...packTile(pixels, 16, tx * 8, ty * 8));
+    for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx < 4; tx++) words.push(...packTile(pixels, WORLD_ACTOR_SIZE, tx * 8, ty * 8));
   }
   for (const pixels of battleActors) {
-    for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx < 4; tx++) words.push(...packTile(pixels, 32, tx * 8, ty * 8));
+    for (let ty = 0; ty < 8; ty++) for (let tx = 0; tx < 8; tx++) words.push(...packTile(pixels, BATTLE_ACTOR_SIZE, tx * 8, ty * 8));
   }
   return words;
 }
@@ -886,11 +1070,18 @@ function generatedHeader(bgPixels: Uint8Array, actorPixels: Uint8Array[], battle
     "#ifndef VP_RPG_ASSETS_GENERATED_H",
     "#define VP_RPG_ASSETS_GENERATED_H",
     "",
-    `#define VP_RPG_BG_TILE_COUNT ${TILE_NAMES.length}`,
-    `#define VP_RPG_OBJ_SMALL_FRAME_COUNT ${ACTOR_NAMES.length}`,
-    "#define VP_RPG_BATTLE_HERO_TILE (VP_RPG_OBJ_SMALL_FRAME_COUNT * 4)",
-    "#define VP_RPG_BATTLE_SLIME_TILE (VP_RPG_BATTLE_HERO_TILE + 16)",
-    "#define VP_RPG_OBJ_TILE_COUNT (VP_RPG_BATTLE_SLIME_TILE + 16)",
+    `#define VP_RPG_WORLD_TILE_FRAME_COUNT ${WORLD_TILE_NAMES.length}`,
+    "#define VP_RPG_WORLD_TILE_FRAME_TILES 4",
+    `#define VP_RPG_UI_TILE_COUNT ${UI_TILE_NAMES.length}`,
+    "#define VP_RPG_UI_TILE_BASE (VP_RPG_WORLD_TILE_FRAME_COUNT * VP_RPG_WORLD_TILE_FRAME_TILES)",
+    "#define VP_RPG_BG_TILE_COUNT (VP_RPG_UI_TILE_BASE + VP_RPG_UI_TILE_COUNT)",
+    `#define VP_RPG_WORLD_ACTOR_FRAME_COUNT ${ACTOR_NAMES.length}`,
+    "#define VP_RPG_WORLD_ACTOR_FRAME_TILES 16",
+    "#define VP_RPG_WORLD_ELDER_TILE (4 * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
+    "#define VP_RPG_WORLD_SLIME_TILE (5 * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
+    "#define VP_RPG_BATTLE_HERO_TILE (VP_RPG_WORLD_ACTOR_FRAME_COUNT * VP_RPG_WORLD_ACTOR_FRAME_TILES)",
+    "#define VP_RPG_BATTLE_SLIME_TILE (VP_RPG_BATTLE_HERO_TILE + 64)",
+    "#define VP_RPG_OBJ_TILE_COUNT (VP_RPG_BATTLE_SLIME_TILE + 64)",
     "",
     formatWords("vp_rpg_bg_palette", paddedPalette(BG)),
     "",
@@ -906,26 +1097,94 @@ function generatedHeader(bgPixels: Uint8Array, actorPixels: Uint8Array[], battle
 }
 
 function assertAssetSemantics(bg: Uint8Array, actors: Uint8Array[], battleActors: Uint8Array[]): void {
-  if (bg.length !== 64 * 24) throw new Error("background sheet must contain 24 8x8 tiles");
-  if (actors.length !== 6 || actors.some((frame) => frame.length !== 256)) throw new Error("actor sheet must contain six 16x16 frames");
+  const bounds = (frame: Uint8Array, size: number): { width: number; height: number } => {
+    let minX = size;
+    let minY = size;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      if (frame[y * size + x] === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    return { width: maxX - minX + 1, height: maxY - minY + 1 };
+  };
+  const connectedComponents = (frame: Uint8Array, size: number): number => {
+    const visited = new Uint8Array(frame.length);
+    let components = 0;
+    for (let start = 0; start < frame.length; start++) {
+      if (frame[start] === 0 || visited[start]) continue;
+      components++;
+      const stack = [start];
+      visited[start] = 1;
+      while (stack.length > 0) {
+        const at = stack.pop()!;
+        const x = at % size;
+        const y = Math.floor(at / size);
+        for (const next of [x > 0 ? at - 1 : -1, x + 1 < size ? at + 1 : -1, y > 0 ? at - size : -1, y + 1 < size ? at + size : -1]) {
+          if (next >= 0 && frame[next] !== 0 && !visited[next]) {
+            visited[next] = 1;
+            stack.push(next);
+          }
+        }
+      }
+    }
+    return components;
+  };
+  const bottomContactSpans = (frame: Uint8Array, size: number): number => {
+    let spans = 0;
+    let opaque = false;
+    for (let x = 0; x < size; x++) {
+      const next = frame[(size - 1) * size + x] !== 0;
+      if (next && !opaque) spans++;
+      opaque = next;
+    }
+    return spans;
+  };
+  if (bg.length !== WORLD_TILE_COLUMNS * WORLD_TILE_SIZE * (WORLD_TILE_SIZE + 8)) {
+    throw new Error("background preview must contain ten 16x16 world frames and fourteen 8x8 UI tiles");
+  }
+  if (actors.length !== 6 || actors.some((frame) => frame.length !== WORLD_ACTOR_SIZE ** 2)) {
+    throw new Error("actor sheet must contain six 32x32 frames");
+  }
   for (const [index, frame] of actors.entries()) {
     const visible = frame.filter((pixel) => pixel !== 0).length;
-    if (visible < (index === 5 ? 20 : 30)) throw new Error(`${ACTOR_NAMES[index]} silhouette is too sparse (${visible} pixels)`);
-    if (!frame.slice(15 * 16).some((pixel) => pixel !== 0)) throw new Error(`${ACTOR_NAMES[index]} does not touch the shared y=15 foot line`);
+    if (visible < (index === 5 ? 220 : 280)) throw new Error(`${ACTOR_NAMES[index]} silhouette is too sparse (${visible} pixels)`);
+    if (!frame.slice(31 * WORLD_ACTOR_SIZE).some((pixel) => pixel !== 0)) throw new Error(`${ACTOR_NAMES[index]} does not touch the shared y=31 foot line`);
+    const box = bounds(frame, WORLD_ACTOR_SIZE);
+    if (box.width < (index === 5 ? 22 : 18) || box.height < (index === 5 ? 14 : 26)) {
+      throw new Error(`${ACTOR_NAMES[index]} bbox is too small (${box.width}x${box.height})`);
+    }
     const max = index < 4 ? HERO.length - 1 : index === 4 ? ELDER.length - 1 : SLIME.length - 1;
     if (frame.some((pixel) => pixel > max)) throw new Error(`${ACTOR_NAMES[index]} exceeds its OBJ palette`);
+    if (connectedComponents(frame, WORLD_ACTOR_SIZE) !== 1) throw new Error(`${ACTOR_NAMES[index]} must be one connected silhouette`);
+    if (index === 5 && (box.width < box.height || bottomContactSpans(frame, WORLD_ACTOR_SIZE) < 2)) {
+      throw new Error("slime must remain a wide puddle ooze with at least two grounded pseudopod contacts");
+    }
   }
   const heroHashes = actors.slice(0, 4).map((pixels) => sha256(pixels));
   if (new Set(heroHashes).size !== 4) throw new Error("hero directions must be visually distinct");
-  if (!actors[5].some((pixel) => pixel === 2) || !actors[5].some((pixel) => pixel === 3)) throw new Error("slime must retain both teal shades");
-  if (battleActors.length !== 2 || battleActors.some((frame) => frame.length !== 1024)) {
-    throw new Error("battle actor sheet must contain two 32x32 frames");
+  const heroHeights = actors.slice(0, 4).map((frame) => bounds(frame, WORLD_ACTOR_SIZE).height);
+  if (Math.max(...heroHeights) - Math.min(...heroHeights) > 2) throw new Error("hero direction heights drift by more than two pixels");
+  const slimeTeals = new Set(actors[5].filter((pixel) => pixel >= 2 && pixel <= 5));
+  if (slimeTeals.size < 3) throw new Error("slime must retain at least three teal shades");
+  if (actors[5].filter((pixel) => pixel === 6).length !== 2) throw new Error("slime must have exactly two white eye pixels");
+  if (battleActors.length !== 2 || battleActors.some((frame) => frame.length !== BATTLE_ACTOR_SIZE ** 2)) {
+    throw new Error("battle actor sheet must contain two 64x64 frames");
   }
   for (const [index, frame] of battleActors.entries()) {
-    if (frame.filter((pixel) => pixel !== 0).length < 100) throw new Error(`battle actor ${index} silhouette is too sparse`);
-    if (!frame.slice(31 * 32).some((pixel) => pixel !== 0)) throw new Error(`battle actor ${index} does not touch y=31`);
+    if (frame.filter((pixel) => pixel !== 0).length < (index === 0 ? 1000 : 900)) throw new Error(`battle actor ${index} silhouette is too sparse`);
+    if (!frame.slice(63 * BATTLE_ACTOR_SIZE).some((pixel) => pixel !== 0)) throw new Error(`battle actor ${index} does not touch y=63`);
+    const box = bounds(frame, BATTLE_ACTOR_SIZE);
+    if (box.width < (index === 0 ? 38 : 44) || box.height < (index === 0 ? 52 : 30)) {
+      throw new Error(`battle actor ${index} bbox is too small (${box.width}x${box.height})`);
+    }
     const max = index === 0 ? HERO.length - 1 : SLIME.length - 1;
     if (frame.some((pixel) => pixel > max)) throw new Error(`battle actor ${index} exceeds its OBJ palette`);
+    if (connectedComponents(frame, BATTLE_ACTOR_SIZE) !== 1) throw new Error(`battle actor ${index} must be one connected silhouette`);
+    if (index === 1 && box.width < box.height) throw new Error("battle slime must remain wider than it is tall");
   }
 }
 
@@ -949,7 +1208,7 @@ async function build(check: boolean): Promise<void> {
       const bytes = typeof expected === "string" ? Buffer.from(expected) : expected;
       if (!actual.equals(bytes)) throw new Error(`generated asset is stale: ${path}`);
     }
-    console.log(`RPG assets OK: ${TILE_NAMES.length} BG tiles, ${ACTOR_NAMES.length} world actors + 2 battle actors, four fixed 4bpp palettes`);
+    console.log(`RPG assets OK: 54 BG tiles, ${ACTOR_NAMES.length} 32x32 world actors + 2 64x64 battle actors, four fixed 4bpp palettes`);
     return;
   }
   for (const [path, contents] of targets) writeFileSync(path, contents);
@@ -959,8 +1218,10 @@ async function build(check: boolean): Promise<void> {
   console.log(`Built ${HEADER}`);
 }
 
-const command = process.argv[2] ?? "check";
-if (command === "generate") await generate(process.argv.includes("--force"));
-else if (command === "build") await build(false);
-else if (command === "check") await build(true);
-else throw new Error(`usage: bun vapor/scripts/rpg-assets.ts <generate|build|check> [--force]`);
+if (import.meta.main) {
+  const command = process.argv[2] ?? "check";
+  if (command === "generate") await generate(process.argv.includes("--force"));
+  else if (command === "build") await build(false);
+  else if (command === "check") await build(true);
+  else throw new Error(`usage: bun vapor/scripts/rpg-assets.ts <generate|build|check> [--force]`);
+}
