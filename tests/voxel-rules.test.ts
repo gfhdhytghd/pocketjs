@@ -323,7 +323,7 @@ describe("stats", () => {
 
   test("ensure derives box-mon stats once and clamps stored HP", () => {
     const def = data.pokemon.FIXMON_A;
-    const boxed = { level: 5, dvs: {}, hp: 999 };
+    const boxed: Parameters<typeof Stats.ensure>[1] = { level: 5, dvs: {}, hp: 999 };
     const ensured = Stats.ensure(def, boxed);
     expect(ensured.stats?.hp).toBe(19);
     expect(ensured.hp).toBe(19);
@@ -782,7 +782,8 @@ describe("status", () => {
     expect([r.canMove, b.sleepTurns, b.mon.status]).toEqual([false, 1, "SLP"]);
     expect(r.messages).toEqual(["FIXMON\nis fast asleep!"]);
     r = Status.beforeMove(b, poisonedRng);
-    expect([r.canMove, b.mon.status]).toEqual([false, null]);
+    expect(r.canMove).toBe(false);
+    expect(b.mon.status).toBeNull();
     expect(r.messages).toEqual(["FIXMON\nwoke up!"]);
   });
 
@@ -941,7 +942,7 @@ describe("experience", () => {
 
   test("apply grants stat exp, exp, and walks the level curve", () => {
     const mon = freshMon(data, "FIXMON_A", 5, seededRng(1));
-    mon.dvs = {};
+    mon.dvs = {} as typeof mon.dvs;
     mon.stats = Stats.calc(data.pokemon.FIXMON_A, 5, {});
     mon.hp = mon.stats.hp;
     mon.exp = Growth.expForLevel("MEDIUM_SLOW", 5); // 135
@@ -1148,7 +1149,7 @@ describe("content_red facts (ROM-gated)", () => {
       const def = romData!.pokemon[id];
       expect(def.dex).toBe(facts.dex);
       expect(def.types).toEqual(facts.types);
-      expect(Stats.calc(def, 5, {}) as Record<string, number>).toEqual(facts.statsAt5);
+      expect(Stats.calc(def, 5, {}) as unknown as Record<string, number>).toEqual(facts.statsAt5);
     });
   }
 

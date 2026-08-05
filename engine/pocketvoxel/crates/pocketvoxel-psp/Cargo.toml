@@ -1,0 +1,49 @@
+# pocketvoxel-psp — the Pocket Voxel EBOOT: QuickJS gameplay guest + voxel
+# surface + sceGu diorama backend (docs/VOXEL.md §2).
+#
+# STANDALONE LONE-BIN CRATE: cargo-psp requires the binary crate to be
+# outside any workspace (the hosts/psp rule; excluded in engine/Cargo.toml).
+# Build with `bun tools/voxel.ts psp`, which resolves the pinned toolchain
+# from tools/cli/psp-toolchain.json and bakes the game bundle (VOXELMON_JS).
+#
+# The composition, in docs/RUNTIMES.md terms:
+#   pocketjs-psp     the host library — arena allocator trio, QuickJS
+#                    embedding, graphics init, worker-thread boot
+# + pocketvoxel-core the presentation core (scene, cameras, draw list)
+# + pocketvoxel-gu   the GE backend for that draw list
+# + this crate       the `voxel` surface registration, pak file loading,
+#                    and the pipelined frame loop
+#
+# The 21 MB pak is a FILE next to the EBOOT (never include_bytes!) — see
+# main.rs for the PSP-1000 memory note and the MEMSIZE=1 SFO flag.
+#
+# Revisions mirror hosts/psp/Cargo.toml + tools/cli/psp-toolchain.json.
+
+[package]
+name = "pocketvoxel-psp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+psp = { git = "https://github.com/pocket-stack/rust-psp.git", rev = "2cbaf8c9bc72569c76240a1d9743de10731e5f6b", features = ["external-c-heap", "abort-only", "external-global-alloc"] }
+libquickjs-sys = { git = "https://github.com/pocket-stack/quickjs-rs.git", rev = "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b" }
+pocketjs-psp = { path = "../../../../hosts/psp" }
+pocketvoxel-core = { path = "../pocketvoxel-core", default-features = false, features = ["libm"] }
+pocketvoxel-gu = { path = "../pocketvoxel-gu" }
+
+[features]
+# Frame-dump build for tests/e2e/voxel-ppsspp.ts: replays the baked per-tick
+# button stream (VOXEL_CAP_INPUT) and dumps a screenshot at each story mark
+# tick (VOXEL_CAP_MARKS) to ms0:/vox_cap. Never in a normal build.
+capture = []
+
+[[bin]]
+name = "pocketvoxel-psp"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

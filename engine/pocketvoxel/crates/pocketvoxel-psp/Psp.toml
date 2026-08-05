@@ -1,0 +1,5 @@
+# cargo-psp reads this for the PBP metadata. tools/voxel.ts re-packs the
+# PARAM.SFO afterwards with MEMSIZE=1 (cargo-psp has no field for it) so
+# PPSSPP/CFW-slim grant the full 64 MB — the 21 MB pak needs it.
+[psp]
+title = "VOXELMON"

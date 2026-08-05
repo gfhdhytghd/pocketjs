@@ -224,17 +224,27 @@ sample swizzled from main RAM.
 
 ## 9. Scope ladder
 
-v1 (this tree): Red only; import + cook + overworld vertical slice (Pallet →
-Route 1 → Viridian: walk, collide, ledges, grass, warps, doors, signs, NPCs,
-textboxes, start menu shell) on sim and PSP; wild-battle core (damage /
-accuracy / crit / status / catch / run / exp) staged in the voxel arena;
-formulas at parity with citations.
+v1 (this tree, delivered): Red only. Import (16 datasets at field-level
+parity with the reference extractor) + cook (42/42 non-desk building
+templates, carved tree hulls, 8 baked tile-animation frames) + the overworld
+slice — walk, collide, ledges, grass, warps, doors, signs, NPCs, an 8-verb
+script runner, the textbox typewriter — and the wild-battle core (damage /
+accuracy / crit / status / catch / run / exp through the oracle-verified
+rules; the early-route effect set; unknown effects degrade via the
+reference's own fallbacks) staged in the voxel arena with the classic GB
+battle screen composited over it. One tape drives Bun, the Rust rasterizer
+(committed hash goldens: 11 story + 4 battle marks) and the PSP capture
+EBOOT.
 
-Later rungs, in dependency order: the full script verb set and story flags;
-trainer battles + AI layers; the remaining building templates and detected
-props; battle move animations; audio through the `audio` module (the chip
-synth is a channel-program interpreter — the importer already reserves the
-program banks); Blue/Yellow manifests; first/third person; link play never.
+Later rungs, in dependency order: pak slimming for the PSP-1000's 24 MB
+(stamp instancing over the tree-wall boxes; per-map streaming); the arena
+clearance walk (needs cook-time heights in gamedata) and the authored arena
+table; the full script verb set and story flags; trainer battles + AI
+layers; the desk-set templates, stairs, and detected props; battle move
+animations; the box system, marts, and the start menu; audio through the
+`audio` module (the chip synth is a channel-program interpreter — the
+importer already reserves the program banks); Blue/Yellow manifests;
+first/third person; link play never.
 
 Stadium battle models are **permanently out of scope** — they require an N64
 ROM this pipeline does not accept.
