@@ -257,9 +257,13 @@ export const QUALITY = [
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 1,
     // Past this, an eligible chunk's ground is the baked quad (see
-    // MESH_KIND.groundBake). Gated at runtime to the rung-2 rest pitch and
-    // to field play; initial value pending the device pass.
-    groundBakeDist: 64,
+    // MESH_KIND.groundBake). 0 is NOT "bake everything": the half-extent
+    // widening in `within_dist` keeps every chunk that overlaps the view
+    // centre — the ground underfoot — on real geometry, and bakes the rest.
+    // 64 was tried first and barely baked at all (widened, it meant "beyond
+    // ~154 px": device run J cut only 1-3k of the predicted 11-15k
+    // triangles); 0 is the dial that means what the design intended.
+    groundBakeDist: 0,
   },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px

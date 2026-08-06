@@ -25,8 +25,12 @@ import type { ChunkOut, MapGeometry, UvTransform } from "./mesh.ts";
 export const BAKE_TEXELS = 128;
 const STEP = CHUNK_PX / BAKE_TEXELS; // world px per texel
 
-/** Chunks whose terrain rises above this never bake (buildings, cliffs). */
-export const BAKE_MAX_Y = 16;
+/** Chunks whose terrain rises above this never bake. 8 keeps ledges (6 px)
+ * and the water lip bakeable while excluding fences (10), signs (12) and —
+ * the one that showed: the border tree walls, which are 16 px MESHER BOXES
+ * inside the terrain stream (cook/trees.ts wallTiles), and flattened into
+ * leaf-print flooring the moment 16 was the line. */
+export const BAKE_MAX_Y = 8;
 
 const TAN_PITCH = Math.tan((PITCH_RUNGS[2] * Math.PI) / 180);
 

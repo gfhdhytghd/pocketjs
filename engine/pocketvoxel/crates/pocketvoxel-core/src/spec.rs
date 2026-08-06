@@ -129,7 +129,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_hull_dist: -1.0,
         tree_coarse_dist: 96.0,
         chunk_dist: 340.0,
-        ground_bake_dist: 64.0,
+        ground_bake_dist: 0.0,
         pull_depth_bias: true,
     },
     // vita
