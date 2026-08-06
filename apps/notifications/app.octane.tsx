@@ -70,55 +70,56 @@ function NoticeRow(props: NoticeRowProps) {
 
 export default function Notifications() {
   const [items, setItems] = useState<Notice[]>([...INITIAL]);
-  const [dismissingId, setDismissingId] = useState<string | null>(null);
-  const [riseOffsets, setRiseOffsets] = useState<Record<string, number>>({});
   const rowRefs = useRef(new Map<string, NodeMirror>());
-  // Phase timers live in refs: the motion itself is native animate() tweens,
-  // so JS only needs to know when a phase ENDS. Counting in state would
-  // replay the whole root every frame of every dismissal on the PSP.
-  const riseQueued = useRef<string[]>([]);
-  const riseTick = useRef(0);
+  // The dismissal state machine lives in refs: which row is leaving, which
+  // rows are sliding up, how many frames are left. In state, each phase edge
+  // replays the whole root — three replays of ~35 component bodies per
+  // dismissal, ~200 ms each on the PSP — and only one of the three changes
+  // anything, because only `items` reaches the render tree. `risingIds` is
+  // read during that one replay to seed the survivors' offset, so it must be
+  // assigned before setItems.
+  const dismissingId = useRef<string | null>(null);
+  const risingIds = useRef<string[]>([]);
+  const riseFramesLeft = useRef(0);
   const dismissTick = useRef(0);
 
-  const hasRise = () => Object.keys(riseOffsets).length > 0 || riseQueued.current.length > 0;
+  const busy = () =>
+    dismissingId.current !== null || risingIds.current.length > 0 || riseFramesLeft.current > 0;
 
   useFrame(() => {
-    if (riseQueued.current.length > 0) {
-      for (const id of riseQueued.current) {
+    if (risingIds.current.length > 0) {
+      for (const id of risingIds.current) {
         const row = rowRefs.current.get(id);
         if (row) animate(row, "translateY", 0, { dur: 180, easing: "out" });
       }
-      riseQueued.current = [];
-      riseTick.current = 0;
-    } else if (Object.keys(riseOffsets).length > 0) {
-      riseTick.current += 1;
-      if (riseTick.current >= ROW_RISE_FRAMES) {
-        setRiseOffsets({});
-        riseTick.current = 0;
-      }
+      risingIds.current = [];
+      riseFramesLeft.current = ROW_RISE_FRAMES;
+    } else if (riseFramesLeft.current > 0) {
+      riseFramesLeft.current -= 1;
     }
 
-    const id = dismissingId;
+    const id = dismissingId.current;
     if (id === null) return;
     dismissTick.current += 1;
-    if (dismissTick.current >= DISMISS_FRAMES) {
-      const before = items;
-      const removedIndex = before.findIndex((it) => it.id === id);
-      const rising = removedIndex < 0 ? [] : before.slice(removedIndex + 1).map((it) => it.id);
-      if (rising.length > 0) {
-        setRiseOffsets(Object.fromEntries(rising.map((rid) => [rid, ROW_RISE_PX])));
-        riseQueued.current = rising;
-      }
-      rowRefs.current.delete(id);
-      setItems(before.filter((it) => it.id !== id));
-      setDismissingId(null);
-      dismissTick.current = 0;
-    }
+    if (dismissTick.current < DISMISS_FRAMES) return;
+
+    const before = items;
+    const removedIndex = before.findIndex((it) => it.id === id);
+    const rising = removedIndex < 0 ? [] : before.slice(removedIndex + 1).map((it) => it.id);
+    // Set before setItems, because the replay it triggers rebuilds the rows
+    // and reads this to seed their offset. A jump() here would be lost: the
+    // survivors are recreated by that replay, so the node it wrote to is gone
+    // by the time the tween starts.
+    risingIds.current = rising;
+    rowRefs.current.delete(id);
+    setItems(before.filter((it) => it.id !== id));
+    dismissingId.current = null;
+    dismissTick.current = 0;
   });
 
   const dismiss = (id: string, el: NodeMirror | undefined) => {
-    if (dismissingId !== null || hasRise() || !el) return;
-    setDismissingId(id);
+    if (busy() || !el) return;
+    dismissingId.current = id;
     dismissTick.current = 0;
     animate(el, "opacity", 0, { dur: 200, easing: "out" });
     animate(el, "translateX", 24, { dur: 200, easing: "out" });
@@ -140,7 +141,7 @@ export default function Notifications() {
             key={item.id}
             item={item}
             index={i}
-            rise={riseOffsets[item.id] ?? 0}
+            rise={risingIds.current.includes(item.id) ? ROW_RISE_PX : 0}
             onRowRef={(id: string, row: NodeMirror) => {
               rowRefs.current.set(id, row);
             }}

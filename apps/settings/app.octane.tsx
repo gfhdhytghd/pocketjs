@@ -112,10 +112,14 @@ function themeByName(name: ThemeName): ThemeOption {
   return THEMES.find((t) => t.name === name) ?? THEMES[0];
 }
 
+// The switch owns its value outright. Mirroring it up to Settings would cost
+// a whole-root replay per press — octane can only scope a replay to an owner
+// that holds a committed range, and the root component has none — and nothing
+// up there reads it.
 const Toggle = (
-  props: { label: string; value: boolean; themeName: ThemeName; onToggle: () => void },
+  props: { label: string; initial: boolean; themeName: ThemeName },
 ) => {
-  const [current, setCurrent] = useState(props.value);
+  const [current, setCurrent] = useState(props.initial);
   const knob = useRef<NodeMirror | null>(null);
   const initialized = useRef(false);
   const palette = themeByName(props.themeName);
@@ -138,7 +142,6 @@ const Toggle = (
       focusable
       onPress={() => {
         setCurrent(!current);
-        props.onToggle();
       }}
     >
       <Text class={palette.rowLabelCls}>{props.label}</Text>
@@ -236,8 +239,8 @@ const ThemeRow = (
 };
 
 export default function Settings() {
-  const [sfx, setSfx] = useState(true);
-  const [vibration, setVibration] = useState(false);
+  // Only the theme lives up here, and it earns it: every row restyles when it
+  // changes, so that press is a genuine whole-tree render.
   const [theme, setTheme] = useState<ThemeName>("indigo");
   const currentTheme = themeByName(theme);
 
@@ -252,8 +255,8 @@ export default function Settings() {
       </View>
 
       <View class="flex-col gap-2">
-        <Toggle label="SOUND EFFECTS" value={sfx} themeName={theme} onToggle={() => setSfx(!sfx)} />
-        <Toggle label="VIBRATION" value={vibration} themeName={theme} onToggle={() => setVibration(!vibration)} />
+        <Toggle label="SOUND EFFECTS" initial={true} themeName={theme} />
+        <Toggle label="VIBRATION" initial={false} themeName={theme} />
         <Brightness themeName={theme} />
         <ThemeRow value={theme} themeName={theme} onPick={(next: ThemeName) => setTheme(next)} />
       </View>
