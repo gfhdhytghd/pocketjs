@@ -709,11 +709,12 @@ export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
  * 4 grew the chunk record by the two tree levels of detail and META by a
  * flags word; 5 grew the record again by the MIDDLE tree level
  * (`MESH_KIND.treeCoarse`); 6 by the baked-ground quad
- * (`MESH_KIND.groundBake`) and its per-chunk bake page. The shapes are
+ * (`MESH_KIND.groundBake`) and its per-chunk bake page; 7 by the baked
+ * chunk's kept-structure stream (`MESH_KIND.terrainKeep`). The shapes are
  * pinned below and both readers validate them, so an older pak is
  * rejected, never mis-read.
  */
-export const VXPK_VERSION = 6;
+export const VXPK_VERSION = 7;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
@@ -858,12 +859,20 @@ export const MESH_KIND = {
    */
   groundBake: 1,
   /**
+   * A baked chunk's KEPT structures: every terrain quad taller than the
+   * bake line (fences, signs, the border tree walls, buildings), duplicated
+   * out of the full terrain stream at pack time. Drawn WITH the bake quad
+   * in place of `terrain`; the full stream stays untouched for the rungs
+   * (and moments) that draw geometry, so the identity anchor never moves.
+   */
+  terrainKeep: 2,
+  /**
    * Carved round-scenery hulls (trees), the NEAR level of detail. Cooked out
    * of the terrain stream into their own range so the runtime can swap them
    * per chunk; drawn immediately after their own chunk's terrain, which is
    * exactly where they sat inside it.
    */
-  treeHull: 2,
+  treeHull: 3,
   /**
    * The MIDDLE level: the same hulls carved at 2x2-px voxels — ~1/4 the
    * quads, full-resolution art on the faces (UVs interpolate the original
@@ -871,14 +880,14 @@ export const MESH_KIND = {
    * alternatives inside the terrain pass: a chunk draws exactly one, chosen
    * by `treeHullDist`/`treeCoarseDist`.
    */
-  treeCoarse: 3,
+  treeCoarse: 4,
   /** The same cells as plain extruded boxes: the FAR level of detail. */
-  treeBox: 4,
-  water: 5,
-  grass: 6,
-  flower: 7,
+  treeBox: 5,
+  water: 6,
+  grass: 7,
+  flower: 8,
 } as const;
-export const MESH_KINDS = 8;
+export const MESH_KINDS = 9;
 
 /**
  * Bytes per CHNK chunk record: i16 cx | i16 cy | i16 AABB[6] | u16

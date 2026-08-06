@@ -25,11 +25,14 @@ import type { ChunkOut, MapGeometry, UvTransform } from "./mesh.ts";
 export const BAKE_TEXELS = 128;
 const STEP = CHUNK_PX / BAKE_TEXELS; // world px per texel
 
-/** Chunks whose terrain rises above this never bake. 8 keeps ledges (6 px)
- * and the water lip bakeable while excluding fences (10), signs (12) and —
- * the one that showed: the border tree walls, which are 16 px MESHER BOXES
- * inside the terrain stream (cook/trees.ts wallTiles), and flattened into
- * leaf-print flooring the moment 16 was the line. */
+/** The bake line, PER QUAD: terrain quads topping out at or under this are
+ * painted into the canvas (and dropped from a baked chunk's draw); taller
+ * structures — fences (10), signs (12), the border tree walls (16 px MESHER
+ * BOXES in the terrain stream), buildings — stay geometry, duplicated into
+ * `MESH_KIND.terrainKeep`. 8 keeps ledges (6) and the water lip paintable.
+ * A chunk-level line was tried twice: at 16 it flattened tree walls into
+ * leaf-print flooring, at 8 one wall segment disqualified whole chunks and
+ * coverage collapsed to nothing (device run K). */
 export const BAKE_MAX_Y = 8;
 
 const TAN_PITCH = Math.tan((PITCH_RUNGS[2] * Math.PI) / 180);
@@ -68,12 +71,14 @@ export function bakeGround(
 
   for (let ci = 0; ci < chunks.length; ci++) {
     const c = chunks[ci];
-    if (c.aabbMax[1] > BAKE_MAX_Y) continue; // buildings/cliffs keep geometry
     const x0 = c.cx * CHUNK_PX;
     const z0 = c.cy * CHUNK_PX;
     const best: (Sample | undefined)[] = new Array(BAKE_TEXELS * BAKE_TEXELS);
 
     for (const q of quads) {
+      // Only the LOW quads paint (the ones the bake replaces); the tall
+      // structures stay geometry through the keep stream.
+      if (Math.max(...q.c.map((co) => co[1])) > BAKE_MAX_Y) continue;
       // Projected footprint: axis-aligned rect over (x, z - y*tanP).
       let minX = Infinity;
       let maxX = -Infinity;

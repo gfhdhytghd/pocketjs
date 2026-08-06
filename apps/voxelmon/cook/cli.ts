@@ -40,7 +40,7 @@ import {
   ROOT,
 } from "./data.ts";
 import { buildCharmap, buildGamedata, type AtlasIndex } from "./gamedata.ts";
-import { bakeGround, BAKE_TEXELS } from "./groundbake.ts";
+import { bakeGround, BAKE_MAX_Y, BAKE_TEXELS } from "./groundbake.ts";
 import { packMap, runGeometry, type MapGeometry, type UvTransform } from "./mesh.ts";
 import { writePak } from "./pak.ts";
 import { planColour, Redpp, type ColourPlan, type PageOwner } from "./redpp.ts";
@@ -254,6 +254,23 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     const canvases = bakeGround(m.chunks, geo, terrain.page, uvt, transparentIdx, clearIndex);
     for (const [ci, canvas] of canvases) {
       const c = m.chunks[ci];
+      // The KEEP stream: every terrain quad taller than the bake line,
+      // duplicated out of the packed terrain (4 verts per quad — the
+      // packQuads layout). Drawn with the bake in place of the full stream;
+      // the full stream stays untouched for the identity path.
+      const keep: { verts: (typeof c.meshes)[0]["verts"]; indices: number[] } = {
+        verts: [],
+        indices: [],
+      };
+      const t = c.meshes[MESH_KIND.terrain];
+      for (let q = 0; q * 4 < t.verts.length; q++) {
+        const quad = t.verts.slice(q * 4, q * 4 + 4);
+        if (Math.max(...quad.map((v2) => v2.y)) <= BAKE_MAX_Y) continue;
+        const base = keep.verts.length;
+        keep.verts.push(...quad);
+        keep.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      }
+      c.meshes[MESH_KIND.terrainKeep] = keep;
       c.bakePage = pages.length;
       pages.push({
         w: BAKE_TEXELS,

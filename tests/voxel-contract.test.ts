@@ -151,7 +151,8 @@ test("mesh kinds are a dense 0..n range in draw order", () => {
   expect([...ids].sort((a, b) => a - b)).toEqual(ids.map((_, i) => i));
   expect(MESH_KIND.terrain).toBe(0);
   expect(MESH_KIND.groundBake as number).toBe(MESH_KIND.terrain + 1);
-  expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.groundBake + 1);
+  expect(MESH_KIND.terrainKeep as number).toBe(MESH_KIND.groundBake + 1);
+  expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.terrainKeep + 1);
   expect(MESH_KIND.treeCoarse as number).toBe(MESH_KIND.treeHull + 1);
   expect(MESH_KIND.treeBox as number).toBe(MESH_KIND.treeCoarse + 1);
 });

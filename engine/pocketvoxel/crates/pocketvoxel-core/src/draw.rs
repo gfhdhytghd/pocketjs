@@ -547,6 +547,9 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         for v in &visible {
             if baked(v) {
                 push_bake(&mut items, v);
+                // The kept structures — everything taller than the bake
+                // line — draw as geometry on top of the painting.
+                push_mesh(&mut items, v, mesh_kind::TERRAIN_KEEP, 0.0, 0.0);
             } else {
                 push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0, 0.0);
             }
@@ -759,6 +762,7 @@ mod tests {
                 // it chunk by chunk, so they share its rank.
                 k if k == mesh_kind::TERRAIN
                     || k == mesh_kind::GROUND_BAKE
+                    || k == mesh_kind::TERRAIN_KEEP
                     || k == mesh_kind::TREE_HULL
                     || k == mesh_kind::TREE_COARSE
                     || k == mesh_kind::TREE_BOX =>
@@ -957,12 +961,13 @@ mod tests {
             meshes: m,
         };
         let empty = MeshRange::default();
-        // terrain | groundBake | treeHull | treeCoarse | treeBox | water |
-        // grass | flower. The coarse slot ships alongside the others so the
-        // three-level selection is testable; the LOD-less pak leaves all
-        // three empty but the hull.
+        // terrain | groundBake | terrainKeep | treeHull | treeCoarse |
+        // treeBox | water | grass | flower. The coarse slot ships alongside
+        // the others so the three-level selection is testable; the LOD-less
+        // pak leaves all three empty but the hull.
         let near = [
             quad(0, 0, 128, 128),
+            empty,
             empty,
             quad(8, 8, 24, 24),
             if tree_lod { quad(8, 8, 24, 24) } else { empty },
@@ -976,6 +981,7 @@ mod tests {
         let mid = [
             quad(0, -128, 128, 0),
             empty,
+            empty,
             quad(8, -120, 24, -104),
             if tree_lod { quad(8, -120, 24, -104) } else { empty },
             if tree_lod { quad(8, -120, 24, -104) } else { empty },
@@ -985,6 +991,7 @@ mod tests {
         ];
         let far = [
             quad(0, -384, 128, -256),
+            empty,
             empty,
             quad(8, -376, 24, -360),
             if tree_lod { quad(8, -376, 24, -360) } else { empty },

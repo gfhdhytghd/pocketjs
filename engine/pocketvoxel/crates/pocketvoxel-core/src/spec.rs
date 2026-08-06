@@ -387,7 +387,7 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 6;
+pub const VXPK_VERSION: u16 = 7;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
@@ -445,15 +445,16 @@ pub const MAX_VERTS_PER_CHUNK_MESH: usize = 65532;
 pub mod mesh_kind {
     pub const TERRAIN: u16 = 0;
     pub const GROUND_BAKE: u16 = 1;
-    pub const TREE_HULL: u16 = 2;
-    pub const TREE_COARSE: u16 = 3;
-    pub const TREE_BOX: u16 = 4;
-    pub const WATER: u16 = 5;
-    pub const GRASS: u16 = 6;
-    pub const FLOWER: u16 = 7;
+    pub const TERRAIN_KEEP: u16 = 2;
+    pub const TREE_HULL: u16 = 3;
+    pub const TREE_COARSE: u16 = 4;
+    pub const TREE_BOX: u16 = 5;
+    pub const WATER: u16 = 6;
+    pub const GRASS: u16 = 7;
+    pub const FLOWER: u16 = 8;
 }
 
-pub const MESH_KINDS: usize = 8;
+pub const MESH_KINDS: usize = 9;
 /// Bytes per CHNK chunk record: coords + AABB + a range per kind.
-pub const VXPK_CHUNK_RECORD_SIZE: usize = 116;
+pub const VXPK_CHUNK_RECORD_SIZE: usize = 128;
 

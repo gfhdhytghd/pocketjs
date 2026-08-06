@@ -1055,6 +1055,7 @@ pub(crate) mod tests {
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
+                    MeshRange::default(),
                 ],
             }],
         );
@@ -1106,6 +1107,7 @@ pub(crate) mod tests {
                 bake_page: spec::BAKE_PAGE_NONE,
                 meshes: [
                     terrain,
+                    MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
