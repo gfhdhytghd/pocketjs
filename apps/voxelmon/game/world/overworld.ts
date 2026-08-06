@@ -134,6 +134,16 @@ export function computeNeighbors(
 }
 
 export class Overworld implements ScriptWorld {
+  /** The content-boundary test: a map outside the pak's cooked set exists
+   * as DATA (warp targets, connection math) but must never be entered —
+   * the pak has no geometry for it, so warps bump and connections neither
+   * show nor cross. Old gamedata without the list means "everything". */
+  isCooked(mapId: string): boolean {
+    if (mapId === "LAST_MAP") return true; // resolves to a map we came from
+    const list = this.shell.data.cookedMaps;
+    return !list || list.includes(mapId);
+  }
+
   readonly shell: OverworldShell;
   map!: GameMap;
   player!: Player;
@@ -346,6 +356,20 @@ export class Overworld implements ScriptWorld {
         if (this.checkLedgeHop(dir)) return;
         // boulder pushes: outside the slice
       }
+      // Content boundary, standing case: a warp TILE whose destination map
+      // is not in the cooked set must not even be stepped on (the real game
+      // warps the instant you land — with the warp locked, landing would
+      // leave the player standing inside the doorway's geometry, e.g. the
+      // Diglett's Cave mouth on Route 2). Bump instead.
+      {
+        const [tx, ty] = target(this.player.cellX, this.player.cellY, dir);
+        const w = this.map.warpAtCell(tx, ty);
+        if (w && this.map.isWarpTileCell(tx, ty) && !this.isCooked(w.def.destMap)) {
+          this.player.facing = dir;
+          this.player.bumpFrames = this.player.stepFrames;
+          continue;
+        }
+      }
       const result = this.player.tryMove(dir, this.map, this.entities, this.tilePairs);
       // a collision while standing on a warp square fires the warp when
       // the extra check passes (CheckWarpsCollision), only while
@@ -468,6 +492,7 @@ export class Overworld implements ScriptWorld {
   // seam step. pokered's collision check reads the NEIGHBOR strip's tiles,
   // so stepping onto a solid tile of the connected map bumps like a wall.
   crossConnection(dir: Dir, _conn: { map: string; offset: number }): boolean {
+    if (!this.isCooked(_conn.map)) return false; // content boundary: a wall
     const landing = this.connectionLanding(dir);
     if (!landing) return false;
     const { dest, ts, x, y } = landing;
@@ -670,6 +695,11 @@ export class Overworld implements ScriptWorld {
   // Timing WARP_FADE_OUT), the map switch at the midpoint, no fade back in
   // (LoadGBPal restores the palettes in one write).
   startWarpTo(mapId: string, x: number, y: number, facing?: Dir, onDone?: () => void): void {
+    if (!this.isCooked(mapId)) {
+      // The door is locked: a warp into a map the pak has no geometry for
+      // would land the player in an invisible world.
+      return;
+    }
     // ANY transition off an outdoor map remembers the outdoor side, so
     // LAST_MAP exits keep working (CheckIfInOutsideMap includes PLATEAU).
     if (isOutside(this.map.def) && mapId !== this.map.id) {

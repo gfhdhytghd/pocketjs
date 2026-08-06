@@ -239,6 +239,9 @@ export interface GrowthRateRecord {
 }
 
 export interface VoxelmonData {
+  /** Maps whose geometry the pak carries; absent (old gamedata) = all.
+   * Anything else is a locked content boundary (world/overworld.ts). */
+  cookedMaps?: string[];
   pokemon: Record<string, SpeciesDef>;
   moves: Record<string, MoveDef>;
   type_chart: TypeChartData;

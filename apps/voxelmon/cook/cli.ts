@@ -53,6 +53,12 @@ export const DEFAULT_MAPS = [
   "OAKS_LAB",
   "ROUTE_1",
   "VIRIDIAN_CITY",
+  // Viridian's north exit is a REAL connection in the ROM: without this
+  // map the border tree ring paints across the exit path and the player
+  // "stands in the bush" at a dead end. Route 2's own far ends (Pewter,
+  // the gates, Diglett's cave) are the new content boundary, held by the
+  // cookedMaps guards.
+  "ROUTE_2",
   "BLUES_HOUSE",
 ];
 
@@ -204,7 +210,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     uiPage,
     terrainPage,
   };
-  const gameJson = buildGamedata(gen, atlas);
+  const gameJson = buildGamedata(gen, atlas, mapNames);
   const glyphs = buildCharmap(gen);
   // The chip synth's input rides in its own AUDI section: the importer's
   // audio.json + programs.bin, spliced verbatim (the guest is the only

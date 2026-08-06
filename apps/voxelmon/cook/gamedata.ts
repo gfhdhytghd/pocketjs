@@ -145,7 +145,7 @@ export function buildMapPalette(gen: GenData): Record<string, number> {
   return out;
 }
 
-export function buildGamedata(gen: GenData, atlas: AtlasIndex): Uint8Array {
+export function buildGamedata(gen: GenData, atlas: AtlasIndex, cookedMaps: string[]): Uint8Array {
   // pokemon minus pic paths
   const pokemon: Record<string, unknown> = {};
   for (const [id, def] of Object.entries(gen.pokemon)) {
@@ -157,6 +157,11 @@ export function buildGamedata(gen: GenData, atlas: AtlasIndex): Uint8Array {
 
   const game = {
     constants: gen.constants,
+    // The maps whose geometry this pak actually carries. gamedata keeps
+    // EVERY map def (warp targets, connection math), but the guest must
+    // treat anything outside this list as a locked content boundary: warps
+    // bump, connections neither show nor cross (world/overworld.ts).
+    cookedMaps,
     maps: gen.maps,
     tilesets,
     encounters: gen.encounters,

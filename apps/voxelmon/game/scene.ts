@@ -245,6 +245,9 @@ export class Scene {
       { id: ow.map.id, index: ow.map.def.index, ox: 0, oy: 0 },
     ];
     for (const n of computeNeighbors(maps, ow.map.id, 1).slice(0, 4)) {
+      // Un-cooked neighbours stay unseen: the pak has nothing to draw for
+      // them, and the crossing guard (overworld.ts) already walls them off.
+      if (view.data.cookedMaps && !view.data.cookedMaps.includes(n.id)) continue;
       desired.push({ id: n.id, index: maps[n.id].index, ox: n.ox, oy: n.oy });
     }
     for (let slot = 0; slot < 5; slot++) {
