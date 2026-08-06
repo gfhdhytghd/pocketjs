@@ -452,7 +452,15 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     };
     // The bake quad binds the chunk's OWN page (the composited ground
     // image), not the map's terrain page; everything else rides the same
-    // MeshDraw path, world palette included.
+    // MeshDraw path, world palette included. It also RECEDES by one world
+    // px of depth (a negative `pull_bias` through the same biased-VP both
+    // backends share): everything that used to win a razor-thin depth
+    // contest against the ground plane — biased grass, tree feet — now wins
+    // it by a margin fatter than either backend's interpolation drift.
+    // Against 8 px terrain quads the two rasterizers resolved those
+    // contests identically; against the bake's 16 px spans they did not
+    // (measured: ROUTE_1's grass field flipped per-pixel, AE 16k).
+    let bake_bias = -depth_bias(&cam, 1.0);
     let push_bake = |items: &mut Vec<Item>, v: &Visible<'_>| {
         let m = &v.chunk.meshes[mesh_kind::GROUND_BAKE as usize];
         items.push(Item::ChunkMesh {
@@ -468,7 +476,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                 off_x: v.ox,
                 off_y: v.oy,
                 pull: 0.0,
-                pull_bias: 0.0,
+                pull_bias: bake_bias,
                 pal: slot_pal[v.slot as usize],
             },
         });
@@ -699,13 +707,16 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     // 7./8. Grass then flower, with their baked pull biases and the rung's
     // fade distances: ankle-height detail past a few tiles is a texture, not
     // a silhouette, and on ROUTE_1 it is half the frame's triangles.
+    // Grass and flowers draw OVER the baked ground on their own dials (the
+    // v1 bake paints terrain only — see cook/groundbake.ts); `skip_baked`
+    // stays for the painted-detail bake a later rung may cook.
     mesh_pass(
         &mut items,
         mesh_kind::GRASS,
         grass_pull,
         grass_bias,
         dials.grass_dist,
-        true,
+        false,
     );
     mesh_pass(
         &mut items,
@@ -713,7 +724,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         flower_pull,
         flower_bias,
         dials.flower_dist,
-        true,
+        false,
     );
 
     // 9. The GB UI layer.

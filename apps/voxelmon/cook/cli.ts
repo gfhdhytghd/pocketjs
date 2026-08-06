@@ -12,7 +12,9 @@ import { dirname, join } from "node:path";
 
 import {
   ATLAS_KIND,
+  COLOR_PAL_NONE,
   MESH_KIND,
+  VXPK_META_FLAG_GROUND_BAKE,
   VXPK_META_FLAG_TREE_COARSE,
   VXPK_META_FLAG_TREE_LOD,
 } from "../../../contracts/spec/voxel-spec.ts";
@@ -38,7 +40,8 @@ import {
   ROOT,
 } from "./data.ts";
 import { buildCharmap, buildGamedata, type AtlasIndex } from "./gamedata.ts";
-import { packMap, runGeometry, type UvTransform } from "./mesh.ts";
+import { bakeGround, BAKE_TEXELS } from "./groundbake.ts";
+import { packMap, runGeometry, type MapGeometry, type UvTransform } from "./mesh.ts";
 import { writePak } from "./pak.ts";
 import { planColour, Redpp, type ColourPlan, type PageOwner } from "./redpp.ts";
 import { analyseMap } from "./structures.ts";
@@ -173,6 +176,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   // --- mesh ---------------------------------------------------------------
   const buildingStats: BuildingStats = { built: [], claimOnly: [], skipped: [], placements: 0 };
   const mapStats: CookResult["mapStats"] = [];
+  const geos: { geo: MapGeometry; uvt: UvTransform }[] = [];
   const packedMaps = maps.map((map) => {
     const S = analyseMap(gen, map, profile, buildingStats);
     const geo = runGeometry(map, S);
@@ -181,6 +185,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
       pageW: terrain.page.w,
       pageH: terrain.page.h,
     };
+    geos.push({ geo, uvt });
     const { chunks, stamps } = packMap(geo, uvt);
     const verts = chunks.reduce(
       (n, c) => n + c.meshes.reduce((m, mesh) => m + mesh.verts.length, 0),
@@ -228,6 +233,74 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
       })
     : null;
   const palettes = buildPalettes(gen, colour?.palettes ?? []);
+
+  // --- the ground bake (docs/VOXEL.md §4a): per eligible chunk, one page ---
+  // Transparency is judged in the palette the page DRAWS through: the
+  // map's RED++ world palette when it has one, else the terrain kind ramp
+  // (palettes[0] misjudges group*4+shade indices on a RED++ pak).
+  let bakedChunks = 0;
+  packedMaps.forEach((m, mi) => {
+    const { geo, uvt } = geos[mi];
+    const worldPal = colour?.maps.find((cm) => cm.mapId === m.mapId)?.worldPal;
+    const pal = worldPal !== undefined && worldPal !== COLOR_PAL_NONE ? palettes[worldPal] : palettes[0];
+    const transparentIdx = (index: number) => (pal[index] >>> 24) === 0;
+    let clearIndex = 0;
+    for (let i = 0; i < 256; i++) {
+      if ((pal[i] >>> 24) === 0) {
+        clearIndex = i;
+        break;
+      }
+    }
+    const canvases = bakeGround(m.chunks, geo, terrain.page, uvt, transparentIdx, clearIndex);
+    for (const [ci, canvas] of canvases) {
+      const c = m.chunks[ci];
+      c.bakePage = pages.length;
+      pages.push({
+        w: BAKE_TEXELS,
+        h: BAKE_TEXELS,
+        kind: ATLAS_KIND.terrain,
+        frames: [canvas],
+        name: `bake/${m.mapId}/${c.cx},${c.cy}`,
+      });
+      pageOwners.push({ kind: ATLAS_KIND.terrain });
+      const x0 = c.cx * 128;
+      const z0 = c.cy * 128;
+      // An 8x8 grid, not one quad: across a 128 px span the GE's and the
+      // rasterizer's perspective interpolation drift apart by whole texels
+      // (measured: one quad diverged diffusely over the whole baked field,
+      // AE ~16k), while the 16 px spans the rest of the pak is built from
+      // demonstrably agree. 128 triangles a chunk against ~1500 replaced.
+      const N = 8;
+      const verts = [];
+      for (let gz = 0; gz <= N; gz++) {
+        for (let gx = 0; gx <= N; gx++) {
+          verts.push({
+            u: gx / N,
+            v: gz / N,
+            abgr: 0xffffffff,
+            x: x0 + (gx * 128) / N,
+            y: 0,
+            z: z0 + (gz * 128) / N,
+          });
+        }
+      }
+      const indices: number[] = [];
+      for (let gz = 0; gz < N; gz++) {
+        for (let gx = 0; gx < N; gx++) {
+          const b = gz * (N + 1) + gx;
+          indices.push(b, b + 1, b + N + 2, b, b + N + 2, b + N + 1);
+        }
+      }
+      c.meshes[MESH_KIND.groundBake] = { verts, indices };
+      bakedChunks++;
+    }
+  });
+  // Bake pages carry no page palette of their own: their CLUT arrives
+  // through the chunk mesh's world palette (resolve_pal rung 1), so the
+  // VCOL page table just says NONE for each.
+  if (colour) {
+    while (colour.pagePal.length < pages.length) colour.pagePal.push(COLOR_PAL_NONE);
+  }
   // The pak states what it carries: a chunk with a treeBox mesh has BOTH
   // tree levels of detail, so a runtime may pick per chunk. A cook that
   // carved no hulls (VOXEL_TREE_BOXES=1) produces neither tree mesh and
@@ -250,7 +323,8 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     emotePage,
     metaFlags:
       (treeLod ? VXPK_META_FLAG_TREE_LOD : 0) |
-      (treeCoarse ? VXPK_META_FLAG_TREE_COARSE : 0),
+      (treeCoarse ? VXPK_META_FLAG_TREE_COARSE : 0) |
+      (bakedChunks > 0 ? VXPK_META_FLAG_GROUND_BAKE : 0),
     colour: colour
       ? { maps: colour.maps, pagePal: colour.pagePal, flags: colour.flags }
       : undefined,

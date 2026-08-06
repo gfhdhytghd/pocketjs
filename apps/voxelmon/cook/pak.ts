@@ -13,6 +13,7 @@
 import {
   BAKE_PAGE_NONE,
   COLOR_PAL_NONE,
+  MESH_KIND,
   VERTEX_STRIDE,
   VXPK_CHUNK_RECORD_SIZE,
   VIEW_H,
@@ -201,14 +202,28 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
   const chunkRecs: { mapId: number; chunks: ChunkRec[] }[] = [];
   const stampRecs: { mapId: number; stamps: { cx: number; cy: number; mesh: Range }[] }[] = [];
   for (const m of input.maps) {
-    const chunks: ChunkRec[] = m.chunks.map((c) => ({
-      cx: c.cx,
-      cy: c.cy,
-      aabbMin: c.aabbMin,
-      aabbMax: c.aabbMax,
-      bakePage: c.bakePage,
-      meshes: c.meshes.map(appendMesh),
-    }));
+    const chunks: ChunkRec[] = m.chunks.map((c) => {
+      // Append order is NOT record-slot order: the baked-ground quad (slot
+      // 1, a v6 addition) appends LAST, so the carved hulls' vertices still
+      // land immediately after their chunk's terrain vertices in the shared
+      // pool — the suffix invariant the identity rung's quad order rests on
+      // (tests/voxel-cook.test.ts pins it). Ranges are explicit, so slots
+      // need not follow pool order.
+      const meshes: Range[] = new Array(c.meshes.length);
+      for (let k = 0; k < c.meshes.length; k++) {
+        if (k === MESH_KIND.groundBake) continue;
+        meshes[k] = appendMesh(c.meshes[k]);
+      }
+      meshes[MESH_KIND.groundBake] = appendMesh(c.meshes[MESH_KIND.groundBake]);
+      return {
+        cx: c.cx,
+        cy: c.cy,
+        aabbMin: c.aabbMin,
+        aabbMax: c.aabbMax,
+        bakePage: c.bakePage,
+        meshes,
+      };
+    });
     chunkRecs.push({ mapId: m.mapId, chunks });
     if (m.stamps.length > 0) {
       stampRecs.push({
