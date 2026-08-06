@@ -197,6 +197,22 @@ export const CHUNK_DRAW_DIST_PX = 2.5 * WORLD_VIEW_H;
  * is under ten, so this is the largest single dial on the ladder — carved
  * hulls are 53 k of PALLET_TOWN's 97 k triangles at pitch rung 2 and 34 k of
  * ROUTE_1's 80 k, more than grass, flowers and water together.
+ *
+ * `pullDepthBias` (0/1) changes HOW the pulled meshes (grass, flower) get
+ * their camera-ward depth trick, not how many draw. Geometric pull — the
+ * mod's own — displaces every vertex toward the eye along its own ray, which
+ * on the PSP means re-staging every pulled vertex on the CPU each frame:
+ * **measured 65-73 ms of a 100 ms Route-1 seam frame at ~1.15 µs per vertex**
+ * (2026-08-06 autopilot, docs/VOXEL.md §4a). With the dial on, those meshes
+ * draw their cooked vertices IN PLACE and the pull becomes one constant
+ * NDC-depth bias per mesh, folded into the projection matrix
+ * (`draw::depth_bias`) — zero per-vertex work. The bias is computed to equal
+ * the geometric pull's depth shift exactly AT THE CAMERA FOCUS, which is the
+ * player's own cell under the orbit rig and the arena centre under a battle
+ * rig — precisely where grass-over-feet layering is a gameplay contract.
+ * Away from the focus plane the bias drifts from the geometric value
+ * sub-pixel-ward; the top rung keeps the geometric path, so the anchor
+ * stands.
  */
 export const QUALITY = [
   // psp — measured over the story trace: grass+flower cost is flat from 48 px
@@ -219,6 +235,7 @@ export const QUALITY = [
     flowerDist: 96,
     treeHullDist: 128,
     chunkDist: CHUNK_DRAW_DIST_PX,
+    pullDepthBias: 1,
   },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px
@@ -229,6 +246,7 @@ export const QUALITY = [
     flowerDist: 192,
     treeHullDist: 192,
     chunkDist: CHUNK_DRAW_DIST_PX,
+    pullDepthBias: 0,
   },
   // desktop — the identity rung: every mesh unbounded, as before the ladder.
   {
@@ -236,6 +254,7 @@ export const QUALITY = [
     flowerDist: QUALITY_UNBOUNDED,
     treeHullDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
+    pullDepthBias: 0,
   },
 ] as const;
 

@@ -104,6 +104,10 @@ pub struct QualityDials {
     pub tree_hull_dist: f32,
     /// No chunk past this distance is drawn at all (any mesh kind).
     pub chunk_dist: f32,
+    /// Pulled meshes (grass, flower) draw in place with one constant
+    /// NDC-depth bias instead of per-vertex geometric displacement —
+    /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).
+    pub pull_depth_bias: bool,
 }
 
 /// The dial table, indexed by `quality_tier`.
@@ -114,6 +118,7 @@ pub const QUALITY: [QualityDials; 3] = [
         flower_dist: 96.0,
         tree_hull_dist: 128.0,
         chunk_dist: 340.0,
+        pull_depth_bias: true,
     },
     // vita
     QualityDials {
@@ -121,6 +126,7 @@ pub const QUALITY: [QualityDials; 3] = [
         flower_dist: 192.0,
         tree_hull_dist: 192.0,
         chunk_dist: 340.0,
+        pull_depth_bias: false,
     },
     // desktop
     QualityDials {
@@ -128,6 +134,7 @@ pub const QUALITY: [QualityDials; 3] = [
         flower_dist: 1000000000.0,
         tree_hull_dist: 1000000000.0,
         chunk_dist: 340.0,
+        pull_depth_bias: false,
     },
 ];
 

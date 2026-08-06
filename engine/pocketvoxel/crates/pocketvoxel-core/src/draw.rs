@@ -14,7 +14,7 @@
 use alloc::vec::Vec;
 
 use crate::cam::{self, Camera, horizon_row};
-use crate::math::{Vec3, sinf, vec3};
+use crate::math::{Mat4, Vec3, sinf, vec3};
 use crate::pak::{EMOTE_PAGE_NONE, Pak};
 use crate::scene::Scene;
 use crate::spec::{
@@ -125,6 +125,34 @@ pub fn card_pull(a: f32) -> f32 {
     PULL_BASE + (PULL_NUM * cosf(a) - PULL_SUB).max(0.0) / sinf(a).max(PULL_MIN_SIN)
 }
 
+/// The constant NDC-depth bias equal to `pull`'s geometric depth shift AT
+/// THE CAMERA FOCUS (voxel-spec.ts §quality ladder, `pullDepthBias`): the
+/// focus is the player's own cell under the orbit rig and the arena centre
+/// under a battle rig — exactly where grass-over-feet layering is a gameplay
+/// contract, so the two pull modes agree there by construction and drift
+/// only away from the focus plane.
+pub fn depth_bias(cam: &Camera, pull: f32) -> f32 {
+    let ndc_z = |p: Vec3| {
+        let c = cam.vp.transform(p, 1.0);
+        if c.w.abs() > 1e-12 { c.z / c.w } else { 0.0 }
+    };
+    let toward = cam.eye.sub(cam.focus).normalize();
+    ndc_z(cam.focus.add(toward.scale(pull))) - ndc_z(cam.focus)
+}
+
+/// The VP with a constant NDC-z bias folded in — `z_clip += bias * w_clip`,
+/// so every vertex moves by `bias` in NDC depth and nowhere on screen. THE
+/// one formulation: the software rasterizer and the GE backend both
+/// transform a depth-biased mesh through exactly this matrix, which is what
+/// lets the spec talk about one bias instead of two implementations.
+pub fn biased_vp(vp: &Mat4, bias: f32) -> Mat4 {
+    let mut m = *vp;
+    for c in 0..4 {
+        m.m[c * 4 + 2] += bias * m.m[c * 4 + 3];
+    }
+    m
+}
+
 /// One indexed mesh range over the pak's shared pools, ready for a backend.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshDraw {
@@ -147,6 +175,11 @@ pub struct MeshDraw {
     /// (0 for terrain/water; grass and flower meshes carry their bias here
     /// so both backends displace identically).
     pub pull: f32,
+    /// The `pullDepthBias` rung's alternative to `pull`: a constant NDC-z
+    /// bias folded into the VP ([`biased_vp`]) while the vertices draw in
+    /// place. Exactly one of `pull`/`pull_bias` is nonzero on a pulled mesh;
+    /// both are 0 everywhere else.
+    pub pull_bias: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -381,10 +414,24 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let a = cam.a;
     let pull_card = card_pull(a);
     let pull_flower = (pull_card - FLOWER_PULL_SUB_PX * sinf(a)).max(0.0);
+    // The rung's pull MODE (§quality ladder `pullDepthBias`): geometric —
+    // the pull rides every vertex — or one NDC-depth bias per mesh with the
+    // vertices drawn in place. Cards always pull geometrically (4 verts);
+    // the bias is computed to match them exactly at the camera focus.
+    let (grass_pull, grass_bias, flower_pull, flower_bias) = if dials.pull_depth_bias {
+        (
+            0.0,
+            depth_bias(&cam, pull_card),
+            0.0,
+            depth_bias(&cam, pull_flower),
+        )
+    } else {
+        (pull_card, 0.0, pull_flower, 0.0)
+    };
     let anim_frame = |frames: u16| ((scene.tick / TILE_ANIM_DIV) % frames as u32) as u16;
 
     // One chunk mesh of one kind, or nothing when that kind is empty here.
-    let push_mesh = |items: &mut Vec<Item>, v: &Visible<'_>, kind: u16, pull: f32| {
+    let push_mesh = |items: &mut Vec<Item>, v: &Visible<'_>, kind: u16, pull: f32, bias: f32| {
         let m = &v.chunk.meshes[kind as usize];
         if m.index_count == 0 {
             return;
@@ -404,6 +451,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                 off_x: v.ox,
                 off_y: v.oy,
                 pull,
+                pull_bias: bias,
                 pal: slot_pal[v.slot as usize],
             },
         });
@@ -411,7 +459,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
 
     // `dist` is the rung's dial for this mesh kind: the chunk cap already
     // bounded the gather, so a kind-level dial only ever narrows it further.
-    let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32, dist: f32| {
+    let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32, bias: f32, dist: f32| {
         if terrain_page.is_none() {
             return;
         }
@@ -419,7 +467,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
             if !within_dist(v.dist2, v.half, dist) {
                 continue;
             }
-            push_mesh(items, v, kind, pull);
+            push_mesh(items, v, kind, pull, bias);
         }
     };
 
@@ -440,13 +488,13 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let tree_lod = pak.has_tree_lod();
     if terrain_page.is_some() {
         for v in &visible {
-            push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0);
+            push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0, 0.0);
             let tree = if !tree_lod || within_dist(v.dist2, v.half, dials.tree_hull_dist) {
                 mesh_kind::TREE_HULL
             } else {
                 mesh_kind::TREE_BOX
             };
-            push_mesh(&mut items, v, tree, 0.0);
+            push_mesh(&mut items, v, tree, 0.0, 0.0);
         }
         for &(slot, map_id, ox, oy) in &shown_maps {
             let page = slot_page[slot as usize];
@@ -471,6 +519,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                         off_x: ox,
                         off_y: oy,
                         pull: 0.0,
+                        pull_bias: 0.0,
                         pal: slot_pal[slot as usize],
                     },
                 });
@@ -479,7 +528,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     }
 
     // 3. Water.
-    mesh_pass(&mut items, mesh_kind::WATER, 0.0, spec::QUALITY_UNBOUNDED);
+    mesh_pass(&mut items, mesh_kind::WATER, 0.0, 0.0, spec::QUALITY_UNBOUNDED);
 
     // 4. Shadow decals: field entities, then staged battle cards (which
     // darken harder — the cards need grounding).
@@ -579,11 +628,18 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     // 7./8. Grass then flower, with their baked pull biases and the rung's
     // fade distances: ankle-height detail past a few tiles is a texture, not
     // a silhouette, and on ROUTE_1 it is half the frame's triangles.
-    mesh_pass(&mut items, mesh_kind::GRASS, pull_card, dials.grass_dist);
+    mesh_pass(
+        &mut items,
+        mesh_kind::GRASS,
+        grass_pull,
+        grass_bias,
+        dials.grass_dist,
+    );
     mesh_pass(
         &mut items,
         mesh_kind::FLOWER,
-        pull_flower,
+        flower_pull,
+        flower_bias,
         dials.flower_dist,
     );
 

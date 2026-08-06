@@ -199,19 +199,22 @@ The dials, all distances in world px from the view centre to a chunk's own
 centre, widened by the chunk's half-extent — one function, `draw::within_dist`,
 so a dial added later cannot measure differently from these:
 
-| rung | `grassDist` | `flowerDist` | `treeHullDist` | `chunkDist` |
-| --- | --- | --- | --- | --- |
-| `psp` (default) | 96 | 96 | 128 | 340 |
-| `vita` | 192 | 192 | 192 | 340 |
-| `desktop` | unbounded | unbounded | unbounded | 340 |
+| rung | `grassDist` | `flowerDist` | `treeHullDist` | `chunkDist` | `pullDepthBias` |
+| --- | --- | --- | --- | --- | --- |
+| `psp` (default) | 96 | 96 | 128 | 340 | on |
+| `vita` | 192 | 192 | 192 | 340 | off |
+| `desktop` | unbounded | unbounded | unbounded | 340 | off |
 
 `chunkDist` is 2.5 view-heights at **every** rung including the top: it is
 `draw.rs`'s old hard-coded `CULL_DIST` folded in, a pre-existing frame-budget
 cap rather than a new fidelity dial, and widening it at the top would draw
 *more* than the pre-ladder runtime instead of the same.
 
-**Why the grass and flower distances are what they are.** The GE measures
-~1.1 M triangles/s, so 60 fps budgets ≈18 k triangles a frame. The cooker
+**Why the grass and flower distances are what they are.** The end-to-end
+pipeline measured ~1.1 M triangles/s when these dials were set (the figure
+folded in CPU submission costs that have since been removed — the GE alone
+sustains ~1.3 M/s on this content, still fetch-bound, see §6), so 60 fps
+budgets ≈18 k triangles a frame. The cooker
 emits two standing slabs per grass cell and a cutout per flower cell across
 the whole field, and on ROUTE_1 at pitch rung 2 those two meshes are **40 226
 of the frame's 80 428 triangles** — half the frame spent below the ankle.
@@ -288,6 +291,39 @@ once and referenced per cell instead of replicated into the chunk pools. That
 is the same lever for the pak, where the carved hulls are **7.3 MB of the
 18.6 MB of chunk data**. Terrain is the problem after that: 24 784 triangles
 in that frame with nothing left to fade, because terrain is the silhouette.
+
+**Why `pullDepthBias` exists, and what it changes.** The mod's camera-ward
+pull displaces every pulled vertex toward the eye along its own ray — a
+depth trick whose screen position is unchanged by construction. On the PSP
+that displacement has to be re-staged on the CPU each frame (textured
+TRANSFORM_3D draws must use the pak's i16 vertex format, §6), and the
+autopilot telemetry measured that restage at **65–73 ms of a ~100 ms
+Route-1 seam frame — 54–63 k pulled vertices at ~1.15 µs each**, the single
+largest line in the whole frame. With the dial on, grass and flower draw
+their cooked vertices IN PLACE and the pull becomes one constant NDC-depth
+bias per mesh, folded into the projection matrix (`draw::depth_bias` +
+`draw::biased_vp` — the software rasterizer and the GE transform through
+the SAME biased matrix). The bias equals the geometric pull's depth shift
+exactly **at the camera focus** — the player's own cell under the orbit
+rig, the arena centre under a battle rig — which is precisely where
+grass-over-feet layering is a gameplay contract; away from the focus plane
+it drifts sub-pixel-ward. Entity cards keep the geometric pull at every
+rung (four vertices each), and the top rung keeps it for everything, so the
+identity anchor never moves. Shipping this dial re-recorded the psp-rung
+goldens (8 outdoor story marks, 2 battle marks — grass depth quantises
+differently off-focus) with the PPSSPP e2e green at every mark.
+
+**Where the frame went after the 2026-08-06 CPU work** (autopilot phase
+telemetry, story tape, means per 300-tick window): guest JS 16–19 ms, draw
+list build ~0.7 ms, CPU record ~0.5–1 ms, GE (hidden under the guest's
+window, surfacing as sync wait) 0–53 ms, vblank ~5–8 ms. Pallet Town
+102 → 81 ms, the Pallet↔Route-1 seam 129 → 68 ms, Route 1 128 → 54 ms,
+interiors 33 ms; the arena-pressure JS collections that used to hitch
+mid-walk (2 × 175 ms a run) now never fire outside boot, because the
+delta-emit gates stopped allocating (scene.ts — numeric and identity gates
+where per-tick key strings used to be). The frame is now **GE-fetch-bound**
+(§6): the next rungs are the hull carve-resolution dial and far-chunk
+impostors, both geometry diets the ladder was built to hold.
 
 PCM leaves through the PocketJS `audio` module (`contracts/spec/audio.ts`,
 capability `audio.pcm`), not through this surface: the host pumps
@@ -456,6 +492,25 @@ pull-displaced mesh re-stages through the pak's own 20-byte format), and
 sheet missamples into vertical-strip noise; the cooker pads sprite and
 emote pages and the card U normalizes by page width).
 
+A third finding, from the autopilot phase telemetry (2026-08-06 device
+A/B/A over the story tape), is about WHERE the frame's time actually goes:
+**the GE here is fetch-bound, and what it fetches from matters less than
+whether the CPU just wrote it.** Splicing each mesh's index range through
+the frame pool made the GE ~17 ms/frame faster on Pallet Town than drawing
+the same bytes in place from the pak — but a boot-time copy of the whole
+index pool into its own block reproduced NONE of that win (GE time
+identical to in-place), so the splice's advantage was the recency of its
+CPU writes, not the block it lived in, and it cost the CPU ~25 ms of the
+same frame to produce. The shipped backend therefore draws index ranges
+**in place** (the cooker 16-byte-aligns each range, `cook/pak.ts
+appendMesh`, as cheap insurance; `pocketvoxel-gu` splices only ranges an
+older pak left unaligned) and spends no per-frame CPU on geometry at all.
+The consequence worth remembering: with submission costs at ~1 ms, **GE
+time scales with vertex/index bytes fetched per frame, so the next rungs
+down this ladder are geometry diets (hull carve resolution, far-chunk
+impostors), not draw-call or culling tricks** — back-face culling saves
+raster work but the fetches and transforms are already paid by then.
+
 ### What per-tile colour does NOT reproduce in v1
 
 Every item here is a deliberate limit with a stated reason:
@@ -516,7 +571,11 @@ only clock; tile animation and menu cursors derive from it.
    that rung's dials (§4a) and legitimately move when a dial does. The grass
    and flower fade moved 5 of 11 story marks and all 4 battle marks, every one
    of them in the far field; tree LOD then moved 1 story mark
-   (`encounter-seen`) and all 4 battle marks, and nothing else.
+   (`encounter-seen`) and all 4 battle marks, and nothing else; the
+   depth-bias pull (§4a `pullDepthBias`) moved the 8 outdoor story marks and
+   2 battle marks — grass depth quantises differently away from the focus
+   plane — with the grass-over-feet contract verified intact in the psp-rung
+   shots and the PPSSPP e2e green at every mark (worst AE 4963 of 12000).
    `story-max.hashes` / `battle-max.hashes` are the pre-ladder hashes,
    asserted at the top rung and **never re-recorded** — a mismatch there means
    the top rung stopped being the identity, and the fix is the dials, not the

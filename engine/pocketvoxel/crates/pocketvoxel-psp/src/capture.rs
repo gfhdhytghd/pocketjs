@@ -107,6 +107,12 @@ pub fn is_mark(tick: u32) -> bool {
     mark_info(tick).0.is_some()
 }
 
+/// The last checkpoint tick (0 with no marks) — the autopilot build's
+/// "tape is over" signal.
+pub fn last_mark_tick() -> u32 {
+    mark_info(0).2
+}
+
 /// Dump the just-presented framebuffer if `presented_tick` is a checkpoint;
 /// exit the run once the last checkpoint (or the grace window) passes.
 ///

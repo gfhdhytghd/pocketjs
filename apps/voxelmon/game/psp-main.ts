@@ -227,6 +227,23 @@ const game = new VoxelmonGame(fromObject(source), host, SEED);
 game.setAudioFromPak();
 game.newGame();
 
+// Autopilot-only guest profiling: the perf-runbook EBOOT alone registers
+// `voxel.now`/`voxel.perf`; everywhere else the hook stays undefined and
+// tick() pays four dead branches.
+const nat = native as unknown as { now?: () => number; perf?: (s: string) => void };
+if (nat.now && nat.perf) {
+  game.prof = {
+    now: nat.now,
+    line: nat.perf,
+    upd: 0,
+    emit: 0,
+    aud: 0,
+    maps: 0,
+    ents: 0,
+    ui: 0,
+  };
+}
+
 (globalThis as unknown as { frame: (buttons: number) => void }).frame = (
   buttons: number,
 ): void => {

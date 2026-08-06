@@ -25,6 +25,7 @@ import {
   Scene,
   type BattleSceneView,
   type ChoiceSource,
+  type Prof,
   type SceneView,
   type UiBoxSource,
 } from "./scene.ts";
@@ -208,6 +209,12 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   private stack: GameState[] = [];
   private scene: Scene;
   tickIndex = 0;
+  /** Autopilot-only profiling hook (psp-main.ts installs it when the native
+   * surface carries `now`/`perf` — the perf-runbook EBOOT alone). Splits
+   * tick() into update / scene-emit / audio (and emit into its sections,
+   * scene.ts) and reports 300-tick µs sums. Undefined in production and in
+   * the Bun sim; gameplay never reads it. */
+  prof?: Prof;
   // audio policy observation (the reference calls Music/Sound from the sites
   // themselves; the port watches the same state transitions from one place)
   private audioMap: string | null = null;
@@ -331,13 +338,30 @@ export class VoxelmonGame implements OverworldShell, SceneView {
 
   /** One guest turn per host tick — exactly once. */
   tick(buttons: number): void {
+    const p = this.prof;
+    const t0 = p ? p.now() : 0;
     this.input.setButtons(buttons);
     this.input.step();
     const top = this.stack[this.stack.length - 1];
     top?.update();
+    const t1 = p ? p.now() : 0;
     this.scene.emit(this);
+    const t2 = p ? p.now() : 0;
     this.driveAudio();
     this.host.frameDone(this.tickIndex, buttons);
+    if (p) {
+      p.upd += t1 - t0;
+      p.emit += t2 - t1;
+      p.aud += p.now() - t2;
+      if (this.tickIndex % 300 === 299) {
+        p.line(
+          `j${this.tickIndex} upd ${Math.round(p.upd)} emit ${Math.round(p.emit)}` +
+            ` aud ${Math.round(p.aud)} maps ${Math.round(p.maps)}` +
+            ` ents ${Math.round(p.ents)} ui ${Math.round(p.ui)}`,
+        );
+        p.upd = p.emit = p.aud = p.maps = p.ents = p.ui = 0;
+      }
+    }
     this.tickIndex += 1;
   }
 

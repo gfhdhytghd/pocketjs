@@ -1,4 +1,7 @@
 #![no_std]
+// MIPS inline asm (fpu_sqrtf's `sqrt.s`): experimental-arch on nightly,
+// which is what cargo-psp pins anyway — this crate never builds elsewhere.
+#![feature(asm_experimental_arch)]
 
 //! pocketvoxel-gu — the sceGu (PSP GE) backend for the Pocket Voxel diorama.
 //!
@@ -55,6 +58,14 @@ use psp::sys::{
 };
 
 pub use pool::FramePool;
+
+/// Perf-runbook counters (the autopilot EBOOT's phase log reads them; a
+/// normal build leaves them at zero cost — two adds and two clock reads per
+/// PULLED mesh, of which a frame has a few dozen): vertices restaged through
+/// the pull path this frame, and the µs that restaging cost. Single-threaded
+/// GE host, the established static-mut style. Reset by [`Renderer::reset_pool`].
+pub static mut PULL_VERTS: u32 = 0;
+pub static mut PULL_US: u32 = 0;
 
 /// Write a CPU-visible slice back to memory so the GE (which bypasses the
 /// dcache) sees it. Call once on the pak blob after loading it, and after
@@ -173,13 +184,35 @@ fn po2(v: i32) -> i32 {
     p
 }
 
+/// FPU square root. `math::sqrtf` on this target is libm's SOFTWARE sqrt —
+/// hundreds of cycles of integer bit-work — and the pull restage pays it per
+/// grass vertex, tens of thousands of times a Pallet Town frame. The
+/// Allegrex FPU's `sqrt.s` is the same IEEE-754 correctly-rounded single
+/// result (so the sim, whose std sqrt is also correctly rounded, still
+/// agrees bit-for-bit) at ~30 cycles.
+#[inline]
+fn fpu_sqrtf(x: f32) -> f32 {
+    let out: f32;
+    unsafe {
+        core::arch::asm!("sqrt.s {out}, {x}", out = out(freg) out, x = in(freg) x);
+    }
+    out
+}
+
 /// The mod's camera-ward pull: displace toward the eye along the vertex's
 /// own ray — the same projection-invariant depth bias raster.rs applies in
-/// `to_clip` (screen position is unchanged; only depth moves).
+/// `to_clip` (screen position is unchanged; only depth moves). Same
+/// operation ORDER as `Vec3::normalize().scale(pull)` — scale by 1/len,
+/// then by pull — so the result stays bit-identical to the sim's.
 #[inline]
 fn pulled(eye: Vec3, pos: Vec3, pull: f32) -> Vec3 {
-    if pull != 0.0 {
-        pos.add(eye.sub(pos).normalize().scale(pull))
+    if pull == 0.0 {
+        return pos;
+    }
+    let d = eye.sub(pos);
+    let len = fpu_sqrtf(d.dot(d));
+    if len > 1e-12 {
+        pos.add(d.scale(1.0 / len).scale(pull))
     } else {
         pos
     }
@@ -220,6 +253,10 @@ impl Renderer {
     /// Rewind the per-frame pool. ONLY after the frame loop's `sceGuSync`.
     pub fn reset_pool(&mut self) {
         self.pool.reset();
+        unsafe {
+            PULL_VERTS = 0;
+            PULL_US = 0;
+        }
     }
 
     /// Record one DrawList into the open display list. Draw order is the
@@ -277,7 +314,7 @@ impl Renderer {
                     self.sky(colors, *horizon_row);
                 }
                 Item::ChunkMesh { mesh, .. } | Item::StampMesh { mesh, .. } => {
-                    self.mesh(pak, mesh, list.cam.eye);
+                    self.mesh(pak, mesh, list.cam.eye, &list.cam.vp);
                 }
                 Item::ShadowDecal { corners, abgr } => {
                     self.flat_quad(*corners, *abgr, list.cam.eye, 0.0, false);
@@ -449,9 +486,12 @@ impl Renderer {
 
     /// One chunk/stamp mesh. `pull == 0` draws the pak's 20-byte i16 verts
     /// in place (indices spliced through the pool); `pull != 0` (grass,
-    /// flower) applies the eye-ray displacement CPU-side into pool f32
-    /// verts, exactly as raster.rs `to_clip` does per vertex.
-    unsafe fn mesh(&mut self, pak: &Pak, m: &MeshDraw, eye: Vec3) {
+    /// flower at the geometric-pull rungs) applies the eye-ray displacement
+    /// CPU-side into pool verts, exactly as raster.rs `to_clip` does per
+    /// vertex; `pull_bias != 0` (the `pullDepthBias` rung) draws in place
+    /// through the same biased VP the rasterizer uses (`draw::biased_vp`) —
+    /// the depth trick with zero per-vertex work.
+    unsafe fn mesh(&mut self, pak: &Pak, m: &MeshDraw, eye: Vec3, vp: &Mat4) {
         if m.index_count == 0 {
             return;
         }
@@ -470,13 +510,37 @@ impl Renderer {
         // COOK time, where each face's neighbours are known.
         self.bind(pak, m.page, m.frame, true, m.pal);
 
-        // Splice this mesh's u16 index range through the pool (pak indices
-        // are relative to vert_base — GE batch style, validated < vert_count
-        // by the pak reader, so u16 indexing can never leave the mesh).
+        // Index source (pak indices are relative to vert_base — GE batch
+        // style, validated < vert_count by the pak reader, so u16 indexing
+        // can never leave the mesh): IN PLACE when the cook left this
+        // range on a 16-byte boundary, spliced through the pool otherwise
+        // (paks cooked before the alignment).
+        //
+        // In place is a measured choice, not a guess (2026-08-06 autopilot
+        // A/B/A over the story tape): the per-frame splice buys the GE
+        // ~17 ms a Pallet frame — its bytes are CPU-written moments before
+        // the GE reads them — but costs the CPU ~25 ms of that same frame,
+        // and a boot-time copy into a separate block reproduced NEITHER
+        // effect (GE time identical to in place). The GE here is bound by
+        // fetch behaviour, not by which block the bytes live in, so the
+        // zero-CPU path wins on the whole frame.
         let idx = &pak.indices[m.index_base as usize..(m.index_base as usize + m.index_count as usize)];
-        let idx_ptr = self.pool.upload(as_bytes(idx));
+        let idx_ptr = if (m.index_base as usize * 2) % 16 == 0 {
+            idx.as_ptr() as *const u8
+        } else {
+            self.pool.upload(as_bytes(idx))
+        };
 
         if m.pull == 0.0 {
+            // A depth-biased mesh swaps the frame's Projection (which slot
+            // carries the whole VP, see render) for the biased one around
+            // its own draw — same in-place vertex path as terrain.
+            if m.pull_bias != 0.0 {
+                sys::sceGuSetMatrix(
+                    sys::MatrixMode::Projection,
+                    &to_psp_matrix(&pocketvoxel_core::draw::biased_vp(vp, m.pull_bias)),
+                );
+            }
             sys::sceGuSetMatrix(
                 sys::MatrixMode::Model,
                 &to_psp_matrix(&world_model(m.off_x, m.off_y)),
@@ -490,11 +554,15 @@ impl Renderer {
                 verts as *const c_void,
             );
             sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&Mat4::IDENTITY));
+            if m.pull_bias != 0.0 {
+                sys::sceGuSetMatrix(sys::MatrixMode::Projection, &to_psp_matrix(vp));
+            }
         } else {
             // Displaced verts re-stage as i16 through the pool: textured
             // VERTEX_32BITF fetches garbage on the real GE (see card()), so
             // the pull result rounds back into the pak's own vertex format
             // with the seam offsets baked in (model = pure ×32768 scale).
+            let t_pull = sys::sceKernelGetSystemTimeLow();
             let n = m.vert_count as usize;
             let dst = self.pool.alloc(n * core::mem::size_of::<PakVert>()) as *mut PakVert;
             let src = &pak.verts[m.vert_base as usize..m.vert_base as usize + n];
@@ -522,6 +590,9 @@ impl Renderer {
                 dst as *const c_void,
                 (n * core::mem::size_of::<PakVert>()) as u32,
             );
+            PULL_VERTS = PULL_VERTS.wrapping_add(n as u32);
+            PULL_US = PULL_US
+                .wrapping_add(sys::sceKernelGetSystemTimeLow().wrapping_sub(t_pull));
             sys::sceGuSetMatrix(sys::MatrixMode::Model, &to_psp_matrix(&world_model(0, 0)));
             sys::sceGuDrawArray(
                 GuPrimitive::Triangles,

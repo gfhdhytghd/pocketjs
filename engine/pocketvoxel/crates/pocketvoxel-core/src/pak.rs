@@ -1121,6 +1121,7 @@ pub(crate) mod tests {
         assert_eq!(pak.page_pal(0), None);
     }
 
+
     #[test]
     fn corrupt_color_section_errors() {
         let good = colored_pak_bytes();

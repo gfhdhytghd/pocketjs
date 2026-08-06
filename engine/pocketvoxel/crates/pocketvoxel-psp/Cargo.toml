@@ -47,6 +47,14 @@ capture = []
 # the formatting cost is still paid, so a shipped build leaves it out.
 telemetry = []
 
+# The perf runbook build: replays the baked button stream (VOXEL_CAP_INPUT,
+# the capture inputs) through the NORMAL pipelined present — real GE, real
+# audio, real frame pacing — logging every frame's phase split (guest / build
+# / GE sync / vblank / record / kick) to one buffer, flushed to
+# host0:/voxperf.txt when the tape ends. The same tape on every build is what
+# makes two EBOOTs' numbers comparable. Never in a shipped build.
+autopilot = ["telemetry"]
+
 [[bin]]
 name = "pocketvoxel-psp"
 path = "src/main.rs"

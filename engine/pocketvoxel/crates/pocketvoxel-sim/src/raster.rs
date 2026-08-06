@@ -11,7 +11,7 @@
 //! two passes with its inverted 16-bit depth range; the *visible result* is
 //! the contract, not the depth encoding.
 
-use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, modulate_rgb, resolve_pal};
+use pocketvoxel_core::draw::{DrawList, Item, MeshDraw, biased_vp, modulate_rgb, resolve_pal};
 use pocketvoxel_core::math::{Mat4, Vec3, vec3};
 use pocketvoxel_core::pak::{AtlasPage, Pak, unswizzle};
 use pocketvoxel_core::spec::{COLOR_PAL_NONE, TILE_PX, VIEW_H, VIEW_W};
@@ -439,6 +439,14 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                 let Some(tex) = mesh_tex(mesh) else {
                     continue;
                 };
+                // A depth-biased mesh (§quality ladder `pullDepthBias`)
+                // draws its vertices in place through the SAME biased VP the
+                // GE backend folds in — one formulation, `draw::biased_vp`.
+                let mvp = if mesh.pull_bias != 0.0 {
+                    biased_vp(vp, mesh.pull_bias)
+                } else {
+                    *vp
+                };
                 let base = mesh.vert_base as usize;
                 let idx0 = mesh.index_base as usize;
                 for t in 0..(mesh.index_count as usize / 3) {
@@ -446,7 +454,7 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                         let vi = pak.indices[idx0 + t * 3 + k] as usize + base;
                         let pv = &pak.verts[vi];
                         to_clip_opts(
-                            vp,
+                            &mvp,
                             eye,
                             vec3(
                                 pv.x as f32 + mesh.off_x as f32,

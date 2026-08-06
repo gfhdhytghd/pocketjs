@@ -60,6 +60,20 @@ export interface BattleSceneView {
   ui: BattleUi;
 }
 
+/** Autopilot-only profiling hook (game.ts owns and reports it; `emit` adds
+ * its section sums when present — see game.ts `prof`). */
+export interface Prof {
+  now(): number;
+  line(s: string): void;
+  upd: number;
+  emit: number;
+  aud: number;
+  /** emit() section sums, µs: map-slot diff, ents+emote+cam, ui/battle tail. */
+  maps: number;
+  ents: number;
+  ui: number;
+}
+
 /** What the scene reads each tick — game.ts satisfies this. */
 export interface SceneView {
   data: VoxelmonData;
@@ -71,9 +85,17 @@ export interface SceneView {
   /** The active battle, if any — the scene then stages the arena and hands
    * the GB tile layer to the battle ui. */
   battleView(): BattleSceneView | null;
+  /** Autopilot-only profiling hook; undefined in production and in the sim. */
+  prof?: Prof;
 }
 
 interface UiRowCache {
+  /** The ShownLine this row was built from. Its identity pins its text —
+   * textbox.ts assigns `text` once at construction and mutates only
+   * `revealed` — so an identity hit skips the per-tick pad rebuild AND the
+   * `encodeGlyphs` lookup that used to run every frame a box was open. */
+  line: unknown;
+  wasLast: boolean;
   text: string;
   revealed: number;
 }
@@ -81,10 +103,29 @@ interface UiRowCache {
 export class Scene {
   private host: VoxelHost;
   private started = false;
-  private lastCam: string | null = null;
+  // Delta-gate state. The GATES are numeric or identity-based on purpose:
+  // this emit runs under QuickJS on a 333 MHz part, where the earlier
+  // rebuild-a-string-key-per-tick gates measured 15+ ms a frame (2026-08-06
+  // device profile). Every replacement below preserves the exact op-emit
+  // condition — a key was always a pure injective function of the numbers
+  // now compared directly.
+  private lastCamX = Number.NaN;
+  private lastCamY = Number.NaN;
   private lastPalette: number | null = null;
+  /** The GameMap emitMaps last ran against: transitions replace the map
+   * object (overworld.ts), so identity is the change signal, and the
+   * neighbor BFS + slot keys — once ~7 ms EVERY tick — run only then. */
+  private lastMap: unknown = null;
   private mapSlots: (string | null)[] = [null, null, null, null, null];
-  private entLast: (string | null)[] = new Array(ENTS_MAX).fill(null);
+  /** Per-slot ent-op args (6 ints each) + shown flags: the numeric mirror
+   * of the old per-tick `${...}` key strings. `entSeen` is the per-tick
+   * mark for the hide sweep. */
+  private entVals = new Int32Array(ENTS_MAX * 6);
+  private entShown = new Uint8Array(ENTS_MAX);
+  private entSeen = new Uint8Array(ENTS_MAX);
+  /** spriteId -> atlas page: the answer is boot-static, the regex +
+   * toLowerCase that computed it ran per entity per tick. */
+  private sheetCache = new Map<string, number>();
   private lastEmote: { slot: number; kind: number } | null = null;
   private uiOwner: UiBoxSource | null = null;
   private uiRows: UiRowCache[] = [];
@@ -108,19 +149,29 @@ export class Scene {
       // pitch rung 2 at boot (docs/VOXEL.md §10 scope; PITCH_RUNGS[2] = 35°)
       host.pitch(2);
     }
+    const p = view.prof;
+    const t0 = p ? p.now() : 0;
     this.emitMaps(view);
+    const t1 = p ? p.now() : 0;
     this.emitCam(view);
     this.emitEnts(view);
     this.emitEmote(view);
+    const t2 = p ? p.now() : 0;
+    if (p) {
+      p.maps += t1 - t0;
+      p.ents += t2 - t1;
+    }
     const bv = view.battleView();
     if (bv) {
       this.emitBattle(view, bv);
+      if (p) p.ui += p.now() - t2;
       return;
     }
     if (this.battleActive) {
       this.endBattle();
     }
     this.emitUi(view);
+    if (p) p.ui += p.now() - t2;
   }
 
   // battle — arena/card/battleCam on entry, cardHide/arenaEnd on exit; the
@@ -182,6 +233,13 @@ export class Scene {
   // seam offsets (computeNeighbors hops=1; offsets in world px).
   private emitMaps(view: SceneView): void {
     const ow = view.overworld;
+    // Everything below is a pure function of the current GameMap, and a
+    // transition replaces that object — so an identity hit means the exact
+    // keys the body would rebuild are the ones it built last time, and the
+    // slot diff would emit nothing. Re-entering the same map id makes a new
+    // object; the body re-runs and the slot keys still gate the ops.
+    if (ow.map === this.lastMap) return;
+    this.lastMap = ow.map;
     const maps = view.data.maps!;
     const desired: ({ id: string; index: number; ox: number; oy: number } | null)[] = [
       { id: ow.map.id, index: ow.map.def.index, ox: 0, oy: 0 },
@@ -215,14 +273,16 @@ export class Scene {
     // Camera.lua follow at the 160x144 view: centre = (px + 16, py + 8)
     const cx = (p.px + 16) * Q4;
     const cy = (p.py + 8) * Q4;
-    const key = `${cx},${cy}`;
-    if (key !== this.lastCam) {
+    if (cx !== this.lastCamX || cy !== this.lastCamY) {
       this.host.cam(cx, cy);
-      this.lastCam = key;
+      this.lastCamX = cx;
+      this.lastCamY = cy;
     }
   }
 
   private sheetIndex(view: SceneView, spriteId: string): number {
+    const hit = this.sheetCache.get(spriteId);
+    if (hit !== undefined) return hit;
     // The ent op carries the pak's ABSOLUTE atlas page (core page_at):
     // resolve SPRITE_RED -> atlas.sprites["red"] through the cooked page
     // map. The ROM spriteOrder index is NOT a page index — sending it bound
@@ -230,28 +290,50 @@ export class Scene {
     const atlas = (view.data as { atlas?: { sprites?: Record<string, number> } }).atlas;
     const name = spriteId.replace(/^SPRITE_/, "").toLowerCase();
     const page = atlas?.sprites?.[name];
-    return typeof page === "number" ? page : -1; // -1: core skips the card
+    const index = typeof page === "number" ? page : -1; // -1: core skips the card
+    this.sheetCache.set(spriteId, index);
+    return index;
+  }
+
+  /** Emit one ent op iff any of its six (integer) args changed — the exact
+   * condition the old per-tick `${...}` key string tested, minus the six
+   * int→string coercions and the allocation. */
+  private emitSlot(
+    slot: number,
+    sheet: number,
+    frame: number,
+    x: number,
+    y: number,
+    lift: number,
+    flags: number,
+  ): void {
+    const b = slot * 6;
+    const v = this.entVals;
+    this.entSeen[slot] = 1;
+    if (
+      this.entShown[slot] !== 0 &&
+      v[b] === sheet &&
+      v[b + 1] === frame &&
+      v[b + 2] === x &&
+      v[b + 3] === y &&
+      v[b + 4] === lift &&
+      v[b + 5] === flags
+    ) {
+      return;
+    }
+    this.host.ent(slot, sheet, frame, x, y, lift, flags);
+    v[b] = sheet;
+    v[b + 1] = frame;
+    v[b + 2] = x;
+    v[b + 3] = y;
+    v[b + 4] = lift;
+    v[b + 5] = flags;
+    this.entShown[slot] = 1;
   }
 
   private emitEnts(view: SceneView): void {
     const ow = view.overworld;
-    const desired: (string | null)[] = new Array(ENTS_MAX).fill(null);
-    const emitSlot = (
-      slot: number,
-      sheet: number,
-      frame: number,
-      x: number,
-      y: number,
-      lift: number,
-      flags: number,
-    ) => {
-      const key = `${sheet},${frame},${x},${y},${lift},${flags}`;
-      desired[slot] = key;
-      if (this.entLast[slot] !== key) {
-        this.host.ent(slot, sheet, frame, x, y, lift, flags);
-        this.entLast[slot] = key;
-      }
-    };
+    this.entSeen.fill(0);
     // player: slot 0, ghost silhouette + grass-occluded walker
     const p = ow.player;
     {
@@ -264,7 +346,7 @@ export class Scene {
         ((p.facing === "down" || p.facing === "up") && phase === 1 && p.animFlip());
       let flags = ENT_FLAG.ghost | ENT_FLAG.walker;
       if (mirror) flags |= ENT_FLAG.mirror;
-      emitSlot(
+      this.emitSlot(
         0,
         this.sheetIndex(view, "SPRITE_RED"),
         frame,
@@ -274,9 +356,11 @@ export class Scene {
         flags,
       );
     }
-    ow.npcs.forEach((npc, i) => {
+    const npcs = ow.npcs;
+    for (let i = 0; i < npcs.length; i++) {
+      const npc = npcs[i]!;
       const slot = i + 1;
-      if (slot >= ENTS_MAX) return;
+      if (slot >= ENTS_MAX) break;
       const def = view.data.sprites?.[npc.def.sprite];
       const frames = def?.frames ?? 6;
       const phase = npc.walkPhase();
@@ -290,7 +374,7 @@ export class Scene {
           ((npc.facing === "down" || npc.facing === "up") && phase === 1 && npc.stepFlip));
       let flags = def?.walker ? ENT_FLAG.walker : 0;
       if (mirror) flags |= ENT_FLAG.mirror;
-      emitSlot(
+      this.emitSlot(
         slot,
         this.sheetIndex(view, npc.def.sprite),
         frame,
@@ -299,11 +383,11 @@ export class Scene {
         0,
         flags,
       );
-    });
+    }
     for (let slot = 0; slot < ENTS_MAX; slot++) {
-      if (desired[slot] === null && this.entLast[slot] !== null) {
+      if (this.entSeen[slot] === 0 && this.entShown[slot] !== 0) {
         this.host.entHide(slot);
-        this.entLast[slot] = null;
+        this.entShown[slot] = 0;
       }
     }
   }
@@ -367,23 +451,32 @@ export class Scene {
       this.uiPage = box.pageIndex;
     }
     // rows: shown[0] at LINE1_Y, shown[1] at LINE2_Y (TextBox.lua:370)
-    const rowYs = [LINE1_Y, LINE2_Y];
-    box.shown.forEach((line, i) => {
+    for (let i = 0; i < box.shown.length; i++) {
+      const line = box.shown[i]!;
       const isLast = i === box.shown.length - 1;
-      // non-last rows are stamped padded to MAX_COLS so a scroll clears the
-      // stale glyphs beneath; the typing row stays unpadded for the reveal
+      const cached = this.uiRows[i];
+      // Identity hit: same ShownLine in the same role builds the same text
+      // by construction, so the pad rebuild + glyph encode + full-string
+      // compare (once EVERY tick a box was open) all skip.
+      if (cached && cached.line === line && cached.wasLast === isLast) {
+        continue;
+      }
       // Only non-last rows need the pad (a scroll must clear the glyphs
       // beneath); the typing row skips the encode entirely.
       const text = isLast
         ? line.text
         : line.text + " ".repeat(Math.max(0, MAX_COLS - encodeGlyphs(line.text).length));
-      const cached = this.uiRows[i];
       if (!cached || cached.text !== text) {
-        host.uiText(TEXT_X, rowYs[i], text);
-        this.uiRows[i] = { text, revealed: -1 };
+        host.uiText(TEXT_X, i === 0 ? LINE1_Y : LINE2_Y, text);
+        this.uiRows[i] = { line, wasLast: isLast, text, revealed: -1 };
         textsEmitted = true;
+      } else {
+        // Same text as the row already stamped (a scrolled-in twin): the op
+        // stream stays silent exactly as before — only the identity re-pins.
+        cached.line = line;
+        cached.wasLast = isLast;
       }
-    });
+    }
     this.uiRows.length = box.shown.length;
     // reveal counter for the last row (fresh uiTexts re-target it)
     const last = box.shown[box.shown.length - 1];

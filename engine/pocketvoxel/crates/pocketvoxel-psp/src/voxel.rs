@@ -44,6 +44,11 @@ static mut AUDIO: &[u8] = &[];
 /// this flag is exactly "the guest intends to sound", and the frame loop
 /// waits for it before opening a hardware stream (main.rs `audio_pump`).
 static mut AUDIO_WANTED: bool = false;
+/// Set when THIS tick's ops re-showed map slot 0 — a warp landing (the guest
+/// holds the world frozen through the fade, so the frame is a held cut).
+/// The frame loop reads-and-clears it every tick: it is the one moment a
+/// long collection is invisible (main.rs's arena-pressure GC).
+static mut MAP_SWAPPED: bool = false;
 
 /// # Safety
 /// Call once on the worker thread before `register`/`scene`.
@@ -127,8 +132,34 @@ macro_rules! audio_op_fn {
 }
 
 op_fn!(js_reset, op::RESET, 0);
-op_fn!(js_map_show, op::MAP_SHOW, 4);
 op_fn!(js_map_hide, op::MAP_HIDE, 1);
+
+/// `mapShow` dispatches like every numeric op, plus the one observation the
+/// frame loop's GC policy needs: slot 0 re-showing is a warp landing, and
+/// the guest holds the world frozen through it (game.ts WarpFadeState) — the
+/// held cut is where a long collection hides.
+unsafe extern "C" fn js_map_show(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: i32,
+    argv: *mut JSValue,
+) -> JSValue {
+    if arg_i32(ctx, argc, argv, 0) == 0 {
+        MAP_SWAPPED = true;
+    }
+    dispatch::<4>(ctx, argc, argv, op::MAP_SHOW)
+}
+
+/// Read-and-clear the warp-landing flag. Call EVERY tick — a stale flag from
+/// a cheap early map show must not license a collection mid-walk later.
+///
+/// # Safety
+/// Worker thread only.
+pub unsafe fn take_map_swapped() -> bool {
+    let v = MAP_SWAPPED;
+    MAP_SWAPPED = false;
+    v
+}
 op_fn!(js_cam, op::CAM, 2);
 op_fn!(js_pitch, op::PITCH, 1);
 op_fn!(js_tint, op::TINT, 1);
@@ -229,6 +260,42 @@ unsafe extern "C" fn js_ui_text(
     JS_UNDEFINED
 }
 
+/// Autopilot-only guest profiling channel (never in a shipped build; the
+/// bindings simply do not exist elsewhere, and the guest checks before
+/// installing its hook). `now()` — the kernel µs clock as a float.
+#[cfg(feature = "autopilot")]
+unsafe extern "C" fn js_now(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    _argc: i32,
+    _argv: *mut JSValue,
+) -> JSValue {
+    JS_NewFloat64(ctx, psp::sys::sceKernelGetSystemTimeLow() as f64)
+}
+
+/// `perf(line)` — one guest line into the frame loop's pilot log, flushed
+/// with the phase log when the tape ends.
+#[cfg(feature = "autopilot")]
+unsafe extern "C" fn js_perf(
+    ctx: *mut JSContext,
+    _this: JSValue,
+    argc: i32,
+    argv: *mut JSValue,
+) -> JSValue {
+    if argc < 1 {
+        return JS_UNDEFINED;
+    }
+    let mut len: size_t = 0;
+    let s = JS_ToCStringLen2(ctx, &mut len, *argv, 0);
+    if !s.is_null() {
+        if let Ok(text) = core::str::from_utf8(core::slice::from_raw_parts(s as *const u8, len)) {
+            crate::pilot_guest_line(text);
+        }
+        JS_FreeCString(ctx, s);
+    }
+    JS_UNDEFINED
+}
+
 /// Install `globalThis.voxel` — the full VOX_OP surface.
 ///
 /// # Safety
@@ -266,5 +333,10 @@ pub unsafe fn register(ctx: *mut JSContext, global: JSValue) {
     add_fn(ctx, obj, b"cry\0", js_cry, 5);
     add_fn(ctx, obj, b"audioWaves\0", js_audio_waves, 3);
     add_fn(ctx, obj, b"audioDrum\0", js_audio_drum, 4);
+    #[cfg(feature = "autopilot")]
+    {
+        add_fn(ctx, obj, b"now\0", js_now, 0);
+        add_fn(ctx, obj, b"perf\0", js_perf, 1);
+    }
     JS_SetPropertyStr(ctx, global, b"voxel\0".as_ptr() as *const _, obj);
 }

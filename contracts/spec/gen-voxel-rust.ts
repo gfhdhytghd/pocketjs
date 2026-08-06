@@ -245,6 +245,10 @@ export function generateVoxelRust(): string {
   put("    pub tree_hull_dist: f32,");
   put("    /// No chunk past this distance is drawn at all (any mesh kind).");
   put("    pub chunk_dist: f32,");
+  put("    /// Pulled meshes (grass, flower) draw in place with one constant");
+  put("    /// NDC-depth bias instead of per-vertex geometric displacement —");
+  put("    /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).");
+  put("    pub pull_depth_bias: bool,");
   put("}");
   put("");
   put("/// The dial table, indexed by `quality_tier`.");
@@ -257,6 +261,7 @@ export function generateVoxelRust(): string {
     put(`        flower_dist: ${f32(row.flowerDist)},`);
     put(`        tree_hull_dist: ${f32(row.treeHullDist)},`);
     put(`        chunk_dist: ${f32(row.chunkDist)},`);
+    put(`        pull_depth_bias: ${row.pullDepthBias === 1},`);
     put("    },");
   }
   put("];");

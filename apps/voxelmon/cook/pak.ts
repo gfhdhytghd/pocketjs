@@ -158,6 +158,16 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
 
   const appendMesh = (mesh: PackedMesh): Range => {
     if (mesh.verts.length === 0) return emptyRange;
+    // 16-byte-align every mesh's index range (pad entries are never
+    // referenced — each mesh reads exactly [indexBase, indexBase+count)).
+    // The PSP GE fetches the range in place, and a 2-mod-4 start is the
+    // difference between its fast path and a per-fetch misalignment stall
+    // (2026-08-06 device A/B: unaligned in-place indices cost the GE ~20 ms
+    // a Pallet frame vs a 16-aligned staging copy of the same bytes).
+    while (indexCount % 8 !== 0) {
+      indexPool.u16(0);
+      indexCount += 1;
+    }
     const range: Range = {
       vertBase: vertCount,
       vertCount: mesh.verts.length,

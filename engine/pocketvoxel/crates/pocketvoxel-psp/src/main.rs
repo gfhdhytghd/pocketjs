@@ -35,7 +35,10 @@ extern crate alloc;
 
 mod voxel;
 
-#[cfg(feature = "capture")]
+// The autopilot build borrows only the scripted-button half of capture.rs;
+// its dump/exit half stays dead there (real GE present, no VRAM dumps).
+#[cfg(any(feature = "capture", feature = "autopilot"))]
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 mod capture;
 
 use core::ffi::c_void;
@@ -100,6 +103,11 @@ const AUDIO_FRAMES_PER_TICK: usize = (AUDIO_RATE as usize).div_ceil(60);
 /// change discards. The ring holds 16384 frames — 1.5 s at this rate — so
 /// this is a lead, not a limit.
 const AUDIO_LEAD_FRAMES: usize = AUDIO_RATE as usize / 10;
+
+/// The deep lead pumped just before a garbage collection: the collection is
+/// ~175 ms, so 250 ms keeps the mixer fed through it. The cost is that ops
+/// landing during the covered ticks mix that much later — once, on a warp.
+const GC_LEAD_FRAMES: usize = AUDIO_RATE as usize / 4;
 
 /// Ceiling on frames rendered in ONE tick: three ticks' worth, 552 frames.
 /// Reaching the lead then takes a few ticks instead of one, which is what
@@ -321,11 +329,12 @@ unsafe fn run() {
     // ---- Frame loop (pipelined present, the openstrike-psp pattern) ----
     loop {
         sys::sceCtrlPeekBufferPositive(&mut pad, 1);
-        #[cfg(not(feature = "capture"))]
+        #[cfg(not(any(feature = "capture", feature = "autopilot")))]
         let mask = map_buttons(&pad);
-        // A capture build ignores the pad entirely: the run must be a pure
-        // function of the tick index for the marks to mean anything.
-        #[cfg(feature = "capture")]
+        // A capture/autopilot build ignores the pad entirely: the run must
+        // be a pure function of the tick index — for capture so the marks
+        // mean anything, for autopilot so two builds' numbers compare.
+        #[cfg(any(feature = "capture", feature = "autopilot"))]
         let mask = capture::scripted_buttons(frame);
 
         let t_frame_start = sys::sceKernelGetSystemTimeLow();
@@ -339,16 +348,34 @@ unsafe fn run() {
         JS_FreeValue(ctx, r);
         host::drain_jobs(rt);
 
-        // Arena-pressure GC (hosts/psp main.rs): collect when a frame
-        // leaves the bump >256 KiB past the last collection. Timed on its
-        // own: the boot parse leaves the bump far past LAST_GC_BUMP = 0, so
-        // the first in-loop frame necessarily collects over the whole
-        // freshly-parsed gamedata graph, and a mean-of-300 cannot tell that
-        // apart from "every early frame is slow".
+        // Arena-pressure GC (hosts/psp main.rs): collect when a frame leaves
+        // the bump past the last collection — but WHEN matters as much as
+        // whether. A collection is ~175 ms on this part (measured over the
+        // story tape), which mid-walk is a visible hitch; on a warp landing
+        // (voxel::take_map_swapped — the guest holds the world frozen
+        // through the fade) it is an invisible held cut, and map loads are
+        // exactly what balloon the bump in the first place. So: collect on
+        // the landing tick once pressure exists, with a 4x emergency
+        // threshold so a long fade-less stretch still cannot grow the arena
+        // unboundedly (that one may hitch; it fires when a run allocates
+        // ~1 MB without entering a single door, which the story tape never
+        // does). The ring is pre-fed to cover the stall either way.
+        let swapped = voxel::take_map_swapped();
+        let scene = voxel::scene();
         let gc_us = {
             const GC_BUMP_STEP: usize = 256 * 1024;
             let bump = arena::stats().bump_bytes;
-            if bump > LAST_GC_BUMP.saturating_add(GC_BUMP_STEP) {
+            let pressure = bump > LAST_GC_BUMP.saturating_add(GC_BUMP_STEP);
+            let emergency = bump > LAST_GC_BUMP.saturating_add(4 * GC_BUMP_STEP);
+            if pressure && (swapped || emergency) {
+                // Top the audio ring up past the stall first: the pump's
+                // steady lead is 100 ms, a collection is longer, and the
+                // mixer starving mid-cut would put a pop where the design
+                // put silence-free continuity. Each call renders at most
+                // AUDIO_MAX_FRAMES, so reaching the deep lead takes a few.
+                for _ in 0..8 {
+                    audio_pump_with_lead(scene, &pak, GC_LEAD_FRAMES);
+                }
                 let t_gc = sys::sceKernelGetSystemTimeLow();
                 JS_RunGC(rt);
                 LAST_GC_BUMP = arena::stats().bump_bytes;
@@ -366,7 +393,6 @@ unsafe fn run() {
         // then advance the tick clock once. Same order as the sim's replay
         // (pocketvoxel-sim/src/trace.rs `close!`), so what a .vtrace records
         // and what the console plays come from the same sequence.
-        let scene = voxel::scene();
         audio_pump(scene, &pak);
         scene.tick();
 
@@ -376,14 +402,18 @@ unsafe fn run() {
         // display list are reused only after the sync.
         #[cfg(not(feature = "capture"))]
         {
+            let t_guest_done = sys::sceKernelGetSystemTimeLow();
             let list = draw::build(scene, &pak);
             let t_work_done = sys::sceKernelGetSystemTimeLow();
             sys::sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
+            let t_synced = sys::sceKernelGetSystemTimeLow();
             sys::sceDisplayWaitVblankStart();
             sys::sceGuSwapBuffers();
+            let t_present = sys::sceKernelGetSystemTimeLow();
             renderer.reset_pool(); // GE idle: safe to rewind (pool contract)
             sys::sceGuStart(GuContextType::Direct, host::list_ptr());
             renderer.render(&list, &pak);
+            let t_recorded = sys::sceKernelGetSystemTimeLow();
             // Belt-and-braces coherence: ~0.1 ms flushes every dirty line
             // before the kick, so no per-write WritebackRange call can be
             // missed as staging paths evolve. (The one garble actually
@@ -392,6 +422,8 @@ unsafe fn run() {
             sys::sceKernelDcacheWritebackAll();
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
             let t_kicked = sys::sceKernelGetSystemTimeLow();
+            #[cfg(not(feature = "telemetry"))]
+            let _ = (t_guest_done, t_synced, t_present, t_recorded, t_kicked);
             #[cfg(feature = "telemetry")]
             {
                 let (mut tris, mut draws) = (0u32, 0u32);
@@ -406,11 +438,25 @@ unsafe fn run() {
                 GEO_TRIS = tris;
                 GEO_DRAWS = draws;
             }
-            #[cfg(feature = "telemetry")]
+            // The rolling mean answers "how is it generally"; the autopilot's
+            // per-frame phase log answers "where does THIS frame go". One
+            // build keeps one voice.
+            #[cfg(all(feature = "telemetry", not(feature = "autopilot")))]
             perf_sample(
                 frame,
                 t_work_done.wrapping_sub(t_frame_start),
                 t_kicked.wrapping_sub(t_frame_start),
+                gc_us,
+            );
+            #[cfg(feature = "autopilot")]
+            autopilot_sample(
+                frame,
+                t_guest_done.wrapping_sub(t_frame_start),
+                t_work_done.wrapping_sub(t_guest_done),
+                t_synced.wrapping_sub(t_work_done),
+                t_present.wrapping_sub(t_synced),
+                t_recorded.wrapping_sub(t_present),
+                t_kicked.wrapping_sub(t_recorded),
                 gc_us,
             );
         }
@@ -505,6 +551,12 @@ fn audio_event_number(line: &str, key: &str) -> Option<usize> {
 /// — no op, no hardware channel and no mixer thread, so a run with audio off
 /// costs one predictable branch per tick.
 unsafe fn audio_pump(scene: &mut Scene, pak: &pak::Pak<'_>) {
+    audio_pump_with_lead(scene, pak, AUDIO_LEAD_FRAMES);
+}
+
+/// [`audio_pump`] with the ring lead as a parameter — the GC path asks for a
+/// deeper one right before stalling the world (see the frame loop).
+unsafe fn audio_pump_with_lead(scene: &mut Scene, pak: &pak::Pak<'_>, lead: usize) {
     // A capture build stays silent: its marks are pixels, its run has to be a
     // pure function of the tick index, and PPSSPPHeadless has no speaker to
     // pace a mixer thread against. `cfg!` rather than `#[cfg]` so the pump
@@ -547,7 +599,7 @@ unsafe fn audio_pump(scene: &mut Scene, pak: &pak::Pak<'_>) {
     let per_tick = audio_frames_for_tick(AUDIO_CLOCK);
     AUDIO_CLOCK = AUDIO_CLOCK.wrapping_add(1);
     let queued = audio_spec::RING_FRAMES - AUDIO_FREE.min(audio_spec::RING_FRAMES);
-    let want = (per_tick + AUDIO_LEAD_FRAMES.saturating_sub(queued))
+    let want = (per_tick + lead.saturating_sub(queued))
         .min(AUDIO_MAX_FRAMES)
         .min(AUDIO_FREE);
     if want == 0 {
@@ -619,7 +671,7 @@ unsafe fn perf_write(text: &str) {
     }
 }
 
-#[cfg_attr(feature = "capture", allow(dead_code))]
+#[cfg_attr(any(feature = "capture", feature = "autopilot"), allow(dead_code))]
 #[cfg(feature = "telemetry")]
 unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32, gc_us: u32) {
     PERF_WORK += work_us as u64;
@@ -667,10 +719,89 @@ unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32, gc_us: u32) {
     perf_write(&line);
 }
 
+/// The autopilot's per-frame phase log: one line per frame into a
+/// pre-reserved buffer (an appending write per frame would cost more than
+/// most of the phases being measured), flushed to host0:/voxperf.txt in one
+/// write when the tape ends, then the run exits itself.
+///
+///   a<frame> g <guest> b <build> s <sync> v <vb> r <rec> k <kick>
+///     gc <gc> tris <n> draws <n>
+///
+/// guest = JS frame() + jobs + GC + audio pump + scene.tick; build =
+/// draw::build; sync = waiting on frame N-1's GE; vb = vblank + swap; rec =
+/// the CPU record pass (pool staging, pull restage); kick = the coherence
+/// writeback + list kick. All µs.
+#[cfg(feature = "autopilot")]
+static mut PILOT_LOG: Option<alloc::string::String> = None;
+/// One reservation up front: growing the log mid-run would both disturb the
+/// arena the guest is playing in and put its own realloc into the numbers.
+#[cfg(feature = "autopilot")]
+const PILOT_CAP: usize = 512 * 1024;
+
+/// Append one guest-side profiling line (voxel.rs's autopilot-only `perf`
+/// binding lands here, interleaved with the host's phase lines).
+#[cfg(feature = "autopilot")]
+pub(crate) unsafe fn pilot_guest_line(line: &str) {
+    use core::fmt::Write as _;
+    if let Some(log) = PILOT_LOG.as_mut() {
+        if log.len() + line.len() + 1 <= PILOT_CAP {
+            let _ = writeln!(log, "{}", line);
+        }
+    }
+}
+
+#[cfg(feature = "autopilot")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn autopilot_sample(
+    frame: u32,
+    guest_us: u32,
+    build_us: u32,
+    sync_us: u32,
+    vb_us: u32,
+    rec_us: u32,
+    kick_us: u32,
+    gc_us: u32,
+) {
+    use core::fmt::Write as _;
+    let log = PILOT_LOG.get_or_insert_with(|| {
+        let mut s = alloc::string::String::new();
+        s.reserve(PILOT_CAP);
+        s
+    });
+    if log.len() + 128 <= PILOT_CAP {
+        let _ = write!(
+            log,
+            "a{} g {} b {} s {} v {} r {} k {} gc {} tris {} draws {} pv {} pus {}\n",
+            frame,
+            guest_us,
+            build_us,
+            sync_us,
+            vb_us,
+            rec_us,
+            kick_us,
+            gc_us,
+            GEO_TRIS,
+            GEO_DRAWS,
+            gu::PULL_VERTS,
+            gu::PULL_US,
+        );
+    }
+    if frame % 300 == 0 {
+        psp::dprintln!("[voxelmon] autopilot: tick {}", frame);
+    }
+    // The tape is over one grace-second after its last mark: flush, exit.
+    let last = capture::last_mark_tick();
+    if frame >= last.saturating_add(60) {
+        perf_write(log);
+        psp::dprintln!("[voxelmon] autopilot: {} frames logged, exiting", frame + 1);
+        sys::sceKernelExitGame();
+    }
+}
+
 /// Map the console's pad onto VOX_BTN. CIRCLE = A (confirm), CROSS = B —
 /// see the module docs. The analog stick walks too, one axis at a time
 /// (the world is a grid; a diagonal push picks a lane).
-#[cfg_attr(feature = "capture", allow(dead_code))]
+#[cfg_attr(any(feature = "capture", feature = "autopilot"), allow(dead_code))]
 fn map_buttons(pad: &SceCtrlData) -> u32 {
     let b = pad.buttons;
     let mut mask = 0;

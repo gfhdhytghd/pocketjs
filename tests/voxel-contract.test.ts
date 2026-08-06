@@ -76,7 +76,21 @@ test("the top rung is the identity", () => {
   // Unbounded here means every tree carved, which is what the pre-ladder
   // runtime drew: the box level of detail exists only for lower rungs.
   expect(top.treeHullDist).toBe(QUALITY_UNBOUNDED);
+  // The mod's own pull is geometric — per-vertex, along each eye ray. The
+  // depth-bias substitute exists only below the top.
+  expect(top.pullDepthBias).toBe(0);
   for (const rung of QUALITY) expect(rung.chunkDist).toBe(CHUNK_DRAW_DIST_PX);
+});
+
+// The bias mode is a HOW, not a how-much: it must never appear on a rung
+// above one that draws geometrically, because climbing the ladder is allowed
+// to add fidelity but never to swap exact for approximate.
+test("depth-bias pull never rides above a geometric rung", () => {
+  let seenGeometric = false;
+  for (const rung of QUALITY) {
+    if (rung.pullDepthBias === 0) seenGeometric = true;
+    if (seenGeometric) expect(rung.pullDepthBias).toBe(0);
+  }
 });
 
 // The GB grass-over-feet trick lives at the player's own cell, so the chunk
