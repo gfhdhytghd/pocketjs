@@ -114,7 +114,7 @@ const GC_LEAD_FRAMES: usize = AUDIO_RATE as usize / 4;
 /// bounds the worst tick — at the extrapolated 1.1-2.2 us per frame that is
 /// 0.6-1.2 ms, where an uncapped catch-up after a long stall could ask for
 /// the ring's whole 16384.
-const AUDIO_CATCHUP_TICKS: usize = 3;
+const AUDIO_CATCHUP_TICKS: usize = 4;
 const AUDIO_MAX_FRAMES: usize = AUDIO_FRAMES_PER_TICK * AUDIO_CATCHUP_TICKS;
 
 /// The render buffer, sized for the worst tick and living in bss — the frame
@@ -326,8 +326,26 @@ unsafe fn run() {
     let mut pad = SceCtrlData::default();
     let mut frame: u32 = 0;
 
+    // Logic stays 60 Hz; presentation locks to every 2nd vblank (30 fps).
+    // Two guest ticks run per presented frame, so game speed is unchanged
+    // and the GE renders half as often — and, as important as the mean,
+    // the CADENCE is even: 27-34 ms frames on a 60 Hz grid alternate
+    // between 2- and 3-vblank presents (judder); paced by vcount they land
+    // every 33.3 ms exactly. Capture builds keep 1:1 (they present marks).
+    const TICKS_PER_PRESENT: u32 = 2;
+    let mut last_vcount = sys::sceDisplayGetVcount();
+    let mut t_frame_start = sys::sceKernelGetSystemTimeLow();
+    #[allow(unused_assignments)]
+    let mut t_js_done = t_frame_start;
+    #[allow(unused_assignments)]
+    let mut t_gc_done = t_frame_start;
+    let mut gc_frame_us: u32 = 0;
+
     // ---- Frame loop (pipelined present, the openstrike-psp pattern) ----
     loop {
+        t_frame_start = sys::sceKernelGetSystemTimeLow();
+        gc_frame_us = 0;
+        for _tick_step in 0..TICKS_PER_PRESENT {
         sys::sceCtrlPeekBufferPositive(&mut pad, 1);
         #[cfg(not(any(feature = "capture", feature = "autopilot")))]
         let mask = map_buttons(&pad);
@@ -337,8 +355,6 @@ unsafe fn run() {
         #[cfg(any(feature = "capture", feature = "autopilot"))]
         let mask = capture::scripted_buttons(frame);
 
-        let t_frame_start = sys::sceKernelGetSystemTimeLow();
-
         // One guest turn per host tick: frame(buttons), exactly once.
         let mut args = [JS_NewInt32(ctx, mask as i32)];
         let r = JS_Call(ctx, frame_fn, global, 1, args.as_mut_ptr());
@@ -347,7 +363,7 @@ unsafe fn run() {
         }
         JS_FreeValue(ctx, r);
         host::drain_jobs(rt);
-        let t_js_done = sys::sceKernelGetSystemTimeLow();
+        t_js_done = sys::sceKernelGetSystemTimeLow();
 
         // Arena-pressure GC (hosts/psp main.rs): collect when a frame leaves
         // the bump past the last collection — but WHEN matters as much as
@@ -385,6 +401,7 @@ unsafe fn run() {
                 0
             }
         };
+        gc_frame_us = gc_frame_us.wrapping_add(gc_us);
         #[cfg(feature = "capture")]
         let _ = gc_us; // a capture build keeps no telemetry
 
@@ -403,8 +420,42 @@ unsafe fn run() {
         // fade stepper (`audio.tick`, inside scene.tick) sitting one tick
         // ahead of the render — a deterministic 1-3% level offset during a
         // fade, and only there. render_audio itself reads no clock.
-        let t_gc_done = sys::sceKernelGetSystemTimeLow();
+        t_gc_done = sys::sceKernelGetSystemTimeLow();
         scene.tick();
+
+        // ---- CAPTURE PRESENT: only the mark frames render (capture.rs
+        // module docs — the state is pure CPU; drawing the in-between
+        // frames under the software renderer would take an hour). Each
+        // mark draws synchronously (start → render → kick → sync → swap)
+        // and dumps immediately; no pipeline, no off-by-one.
+        #[cfg(feature = "capture")]
+        {
+            capture::heartbeat(frame);
+            if capture::is_mark(frame) {
+                capture::log_line("mark: build");
+                let list = draw::build(scene, &pak);
+                renderer.reset_pool(); // GE idle: fully synced below, every mark
+                capture::log_line("mark: record");
+                sys::sceGuStart(GuContextType::Direct, host::list_ptr());
+                renderer.render(&list, &pak);
+                sys::sceGuFinish();
+                capture::log_line("mark: sync");
+                sys::sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
+                sys::sceDisplayWaitVblankStart();
+                sys::sceGuSwapBuffers();
+                capture::log_line("mark: dump");
+                capture::dump_frame(frame);
+                // Hold each mark ~3 s on screen so a live PSPLINK session
+                // can scrshot it (headless runs just get slightly longer).
+                for _ in 0..180 {
+                    sys::sceDisplayWaitVblankStart();
+                }
+            }
+            capture::tick_exit(frame);
+        }
+        frame = frame.wrapping_add(1);
+        } // ---- end of the ticks-per-present inner loop
+        let scene = voxel::scene();
 
         // ---- PIPELINED PRESENT: the GE has been executing frame N-1's
         // list while the JS/tick above ran. Wait for it, present it, then
@@ -417,7 +468,13 @@ unsafe fn run() {
             let t_work_done = sys::sceKernelGetSystemTimeLow();
             sys::sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
             let t_synced = sys::sceKernelGetSystemTimeLow();
-            sys::sceDisplayWaitVblankStart();
+            // Present on an even TICKS_PER_PRESENT-vblank cadence: wait
+            // until that many vblanks have passed since the last present
+            // and not a tick longer — the even beat IS the smoothness.
+            while sys::sceDisplayGetVcount() < last_vcount.wrapping_add(TICKS_PER_PRESENT) {
+                sys::sceDisplayWaitVblankStart();
+            }
+            last_vcount = sys::sceDisplayGetVcount();
             sys::sceGuSwapBuffers();
             let t_present = sys::sceKernelGetSystemTimeLow();
             renderer.reset_pool(); // GE idle: safe to rewind (pool contract)
@@ -469,7 +526,7 @@ unsafe fn run() {
                 frame,
                 t_work_done.wrapping_sub(t_frame_start),
                 t_kicked.wrapping_sub(t_frame_start),
-                gc_us,
+                gc_frame_us,
             );
             #[cfg(feature = "autopilot")]
             autopilot_sample(
@@ -480,45 +537,14 @@ unsafe fn run() {
                 t_present.wrapping_sub(t_synced),
                 t_recorded.wrapping_sub(t_present),
                 t_kicked.wrapping_sub(t_recorded),
-                gc_us,
+                gc_frame_us,
                 t_js_done.wrapping_sub(t_frame_start),
                 t_pump_done.wrapping_sub(t_kicked),
                 t_guest_done.wrapping_sub(t_gc_done),
             );
         }
 
-        // ---- CAPTURE PRESENT: only the mark frames render (capture.rs
-        // module docs — the state is pure CPU; drawing the in-between
-        // frames under the software renderer would take an hour). Each
-        // mark draws synchronously (start → render → kick → sync → swap)
-        // and dumps immediately; no pipeline, no off-by-one.
-        #[cfg(feature = "capture")]
-        {
-            capture::heartbeat(frame);
-            if capture::is_mark(frame) {
-                capture::log_line("mark: build");
-                let list = draw::build(scene, &pak);
-                renderer.reset_pool(); // GE idle: fully synced below, every mark
-                capture::log_line("mark: record");
-                sys::sceGuStart(GuContextType::Direct, host::list_ptr());
-                renderer.render(&list, &pak);
-                sys::sceGuFinish();
-                capture::log_line("mark: sync");
-                sys::sceGuSync(GuSyncMode::Finish, GuSyncBehavior::Wait);
-                sys::sceDisplayWaitVblankStart();
-                sys::sceGuSwapBuffers();
-                capture::log_line("mark: dump");
-                capture::dump_frame(frame);
-                // Hold each mark ~3 s on screen so a live PSPLINK session
-                // can scrshot it (headless runs just get slightly longer).
-                for _ in 0..180 {
-                    sys::sceDisplayWaitVblankStart();
-                }
-            }
-            capture::tick_exit(frame);
-        }
 
-        frame = frame.wrapping_add(1);
     }
 }
 
