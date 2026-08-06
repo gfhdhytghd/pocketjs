@@ -77,6 +77,37 @@ function roundTemplate(
     ];
   };
 
+  // A canvas pixel is a step x step art block, and the point-sampled faces
+  // below (side walls, disc-step tops, undersides) each speak with ONE texel
+  // of it. That texel must not land on the outline when the block also holds
+  // material: a coarse rim block usually mixes both, and corner-sampling it
+  // dressed whole flanks in outline black (a light round tree's body turned
+  // tree-palette dark on the psp rung while its cap stayed white). The
+  // representative is the block's most common non-outline, non-clear pixel,
+  // first-seen on tie; a block of pure outline keeps its corner. At step 1
+  // the block IS its corner pixel, so the fine carve is untouched.
+  const blockTexel = (px: number, py: number): [number, number] => {
+    const [ax, ay] = texel(px, py);
+    if (step === 1) return [ax, ay];
+    const counts = new Map<number, number>();
+    let best: [number, number] | null = null;
+    let bestN = 0;
+    for (let dy = 0; dy < step; dy++) {
+      for (let dx = 0; dx < step; dx++) {
+        const p = art.px(ax + dx, ay + dy);
+        const c = shadeClassOf(p);
+        if (c === "black" || c === "off") continue;
+        const n = (counts.get(p) ?? 0) + 1;
+        counts.set(p, n);
+        if (n > bestN) {
+          bestN = n;
+          best = [ax + dx, ay + dy];
+        }
+      }
+    }
+    return best ?? [ax, ay];
+  };
+
   // Shade class of every canvas pixel. A coarse canvas pixel classifies its
   // whole art block, solidest class first: the outline ("black") must stay
   // CLOSED under downsampling — it is the flood barrier below — so a block
@@ -248,12 +279,15 @@ function roundTemplate(
   const deepTexel = (ix: number, iy: number): [number, number] => {
     for (let iy2 = iy + 2; iy2 <= Math.min(NY - 1, iy + 4); iy2++) {
       const i = iy2 * NX + ix;
-      if (mask.has(i) && cls[i] !== "black") return texel(ix, iy2);
+      if (mask.has(i) && cls[i] !== "black") return blockTexel(ix, iy2);
     }
-    return texel(ix, iy);
+    return blockTexel(ix, iy);
   };
 
-  // side walls read as material: de-outline walk (Structures.lua:1067-1085)
+  // side walls read as material: de-outline walk (Structures.lua:1067-1085).
+  // The class test steers the walk; blockTexel picks within the block it
+  // lands on, so a walk that exhausts its 3 steps against all-"black"
+  // blocks still surfaces interior material when any block holds some.
   const sideTexel = (ix: number, iy: number): [number, number] => {
     const r = yBot !== undefined && iy > yBot ? yBot : src[iy * NX + ix];
     const dir = ix + ix < loRow[iy]! + hiRow[iy] ? 1 : -1;
@@ -261,9 +295,9 @@ function roundTemplate(
       const x2 = ix + dir * step;
       const i2 = r * NX + x2;
       if (x2 < 0 || x2 > NX - 1 || !mask.has(i2)) break;
-      if (cls[i2] !== "black") return texel(x2, r);
+      if (cls[i2] !== "black") return blockTexel(x2, r);
     }
-    return texel(ix, r);
+    return blockTexel(ix, r);
   };
 
   const quads: Quad[] = [];
@@ -350,7 +384,7 @@ function roundTemplate(
     for (let ix3 = loRow[iy]!; ix3 <= hiRow[iy]; ix3++) {
       const i = iy * NX + ix3;
       if (z0[i] === undefined) continue;
-      const [ax, ayp] = texel(ix3, src[i]);
+      const [ax, ayp] = blockTexel(ix3, src[i]);
       const u = ax + 0.5;
       const v = ayp + 0.5;
       const x0 = ix3 - N2;
