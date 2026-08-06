@@ -264,6 +264,11 @@ export const QUALITY = [
     // ~154 px": device run J cut only 1-3k of the predicted 11-15k
     // triangles); 0 is the dial that means what the design intended.
     groundBakeDist: 0,
+    // Draw every SECOND grass/flower quad (the cook packs each chunk's
+    // detail quads evens-first so a prefix of the index range IS the
+    // half-density set). Ankle-height detail at half density reads as
+    // texture, and it is measured as up to 18k of an outdoor frame.
+    detailDensity: 2,
   },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px
@@ -277,6 +282,7 @@ export const QUALITY = [
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
     groundBakeDist: QUALITY_UNBOUNDED,
+    detailDensity: 1,
   },
   // desktop — the identity rung: every mesh unbounded, as before the ladder.
   {
@@ -287,6 +293,7 @@ export const QUALITY = [
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
     groundBakeDist: QUALITY_UNBOUNDED,
+    detailDensity: 1,
   },
 ] as const;
 
@@ -710,11 +717,12 @@ export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
  * flags word; 5 grew the record again by the MIDDLE tree level
  * (`MESH_KIND.treeCoarse`); 6 by the baked-ground quad
  * (`MESH_KIND.groundBake`) and its per-chunk bake page; 7 by the baked
- * chunk's kept-structure stream (`MESH_KIND.terrainKeep`). The shapes are
+ * chunk's kept-structure stream (`MESH_KIND.terrainKeep`); 8 shrank the
+ * vertex to 16 bytes (u16 fixed-point UVs). The shapes are
  * pinned below and both readers validate them, so an older pak is
  * rejected, never mis-read.
  */
-export const VXPK_VERSION = 7;
+export const VXPK_VERSION = 8;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
@@ -833,11 +841,16 @@ export const ATLAS_KIND = {
 } as const;
 
 /**
- * The GE world vertex, byte-identical to pocket3d's cooked format:
- *   f32 u | f32 v | u32 abgr | i16 x | i16 y | i16 z | i16 pad  = 20 bytes.
- * i16 positions are countered by a x32768 model scale on the GE.
+ * The GE world vertex (v8):
+ *   u16 u | u16 v | u32 abgr | i16 x | i16 y | i16 z | i16 pad  = 16 bytes.
+ * UVs are page-normalized fixed point — round(uv * 32768), clamped to
+ * 32767 — matching the GE's TEXTURE_16BIT semantics in TRANSFORM_3D (the
+ * hardware divides by 32768; the software rasterizer divides identically,
+ * so both backends sample the same quantized coordinate). i16 positions
+ * are countered by a x32768 model scale on the GE. The 20-byte f32-UV
+ * vertex this replaces cost 25% more GE fetch bytes on a fetch-bound part.
  */
-export const VERTEX_STRIDE = 20;
+export const VERTEX_STRIDE = 16;
 /** A batch seals before u16 index overflow. */
 export const MAX_VERTS_PER_CHUNK_MESH = 65532;
 

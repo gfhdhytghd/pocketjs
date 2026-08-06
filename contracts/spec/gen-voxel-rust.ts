@@ -259,6 +259,9 @@ export function generateVoxelRust(): string {
   put("    /// An ELIGIBLE chunk past this draws its baked ground quad");
   put("    /// (`mesh_kind::GROUND_BAKE`) instead of terrain+grass+flower.");
   put("    pub ground_bake_dist: f32,");
+  put("    /// Draw every Nth grass/flower quad (1 = all; the cook packs");
+  put("    /// evens first, so a prefix of the indices IS the sparse set).");
+  put("    pub detail_density: u8,");
   put("    /// Pulled meshes (grass, flower) draw in place with one constant");
   put("    /// NDC-depth bias instead of per-vertex geometric displacement —");
   put("    /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).");
@@ -277,6 +280,7 @@ export function generateVoxelRust(): string {
     put(`        tree_coarse_dist: ${f32(row.treeCoarseDist)},`);
     put(`        chunk_dist: ${f32(row.chunkDist)},`);
     put(`        ground_bake_dist: ${f32(row.groundBakeDist)},`);
+    put(`        detail_density: ${row.detailDensity},`);
     put(`        pull_depth_bias: ${row.pullDepthBias === 1},`);
     put("    },");
   }

@@ -614,10 +614,16 @@ only clock; tile animation and menu cursors derive from it.
    2 battle marks — grass depth quantises differently away from the focus
    plane — with the grass-over-feet contract verified intact in the psp-rung
    shots and the PPSSPP e2e green at every mark (worst AE 4963 of 12000).
-   `story-max.hashes` / `battle-max.hashes` are the pre-ladder hashes,
-   asserted at the top rung and **never re-recorded** — a mismatch there means
-   the top rung stopped being the identity, and the fix is the dials, not the
-   file.
+   `story-max.hashes` / `battle-max.hashes` are the identity anchor,
+   asserted at the top rung and **never re-recorded for a dial edit** — a
+   mismatch there means the top rung stopped being the identity, and the fix
+   is the dials, not the file. A VERTEX FORMAT change is the one legitimate
+   re-basing event, and it pays for the file rewrite with a pixel-diff
+   proof: the v8 16-byte vertex (u16 fixed-point UVs, ÷32768 — at most a
+   1/64-texel sampling shift against the 0.02-texel INSET) moved **590
+   pixels across all fifteen max-tier frames** (worst 255 in one frame,
+   0.195%; nine frames under 10), every one a texel-boundary flip, and the
+   anchors were re-recorded 2026-08-06 with that bound in hand.
 
 ## 8. Audio
 

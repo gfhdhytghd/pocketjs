@@ -114,6 +114,9 @@ pub struct QualityDials {
     /// An ELIGIBLE chunk past this draws its baked ground quad
     /// (`mesh_kind::GROUND_BAKE`) instead of terrain+grass+flower.
     pub ground_bake_dist: f32,
+    /// Draw every Nth grass/flower quad (1 = all; the cook packs
+    /// evens first, so a prefix of the indices IS the sparse set).
+    pub detail_density: u8,
     /// Pulled meshes (grass, flower) draw in place with one constant
     /// NDC-depth bias instead of per-vertex geometric displacement —
     /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).
@@ -130,6 +133,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_coarse_dist: 96.0,
         chunk_dist: 340.0,
         ground_bake_dist: 0.0,
+        detail_density: 2,
         pull_depth_bias: true,
     },
     // vita
@@ -140,6 +144,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_coarse_dist: 192.0,
         chunk_dist: 340.0,
         ground_bake_dist: 1000000000.0,
+        detail_density: 1,
         pull_depth_bias: false,
     },
     // desktop
@@ -150,6 +155,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_coarse_dist: 1000000000.0,
         chunk_dist: 340.0,
         ground_bake_dist: 1000000000.0,
+        detail_density: 1,
         pull_depth_bias: false,
     },
 ];
@@ -387,7 +393,7 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 7;
+pub const VXPK_VERSION: u16 = 8;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
@@ -437,7 +443,7 @@ pub mod atlas_kind {
 }
 
 /// The GE world vertex: f32 u | f32 v | u32 abgr | i16 x,y,z | i16 pad.
-pub const VERTEX_STRIDE: usize = 20;
+pub const VERTEX_STRIDE: usize = 16;
 /// A batch seals before u16 index overflow.
 pub const MAX_VERTS_PER_CHUNK_MESH: usize = 65532;
 

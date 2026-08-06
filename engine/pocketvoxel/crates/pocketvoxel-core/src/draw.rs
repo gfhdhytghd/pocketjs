@@ -511,11 +511,18 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
 
     // `dist` is the rung's dial for this mesh kind: the chunk cap already
     // bounded the gather, so a kind-level dial only ever narrows it further.
+    // Detail density: draw a PREFIX of the stream's quads. The cook packs
+    // grass/flower evens-first, so the first ceil(n/N) quads of a mesh ARE
+    // its every-Nth set; quads are 6 indices each in these streams (they
+    // never merge), which is what makes the prefix computable from the
+    // count alone.
+    let density = dials.detail_density.max(1) as u32;
     let mesh_pass =
         |items: &mut Vec<Item>, kind: u16, pull: f32, bias: f32, dist: f32, skip_baked: bool| {
             if terrain_page.is_none() {
                 return;
             }
+            let thin = density > 1 && (kind == mesh_kind::GRASS || kind == mesh_kind::FLOWER);
             for v in &visible {
                 if !within_dist(v.dist2, v.half, dist) {
                     continue;
@@ -523,7 +530,19 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                 if skip_baked && baked(v) {
                     continue;
                 }
+                let before = items.len();
                 push_mesh(items, v, kind, pull, bias);
+                if thin && items.len() > before {
+                    if let Some(Item::ChunkMesh { mesh, .. }) = items.last_mut() {
+                        let quads = mesh.index_count as u32 / 6;
+                        let keep = quads.div_ceil(density);
+                        mesh.index_count = (keep * 6) as u16;
+                        // The prefix indices only reference the prefix
+                        // vertices (evens pack first), so the geometric
+                        // restage path shrinks with it.
+                        mesh.vert_count = (keep * 4) as u16;
+                    }
+                }
             }
         };
 
@@ -939,8 +958,8 @@ mod tests {
         b.atlas_linear(16, 16, atlas_kind::UI, &[&texels]);
         let mut quad = |x0: i16, z0: i16, x1: i16, z1: i16| {
             let v = |x, z| PakVert {
-                u: 0.25,
-                v: 0.25,
+                u: 8192, // 0.25 in the ÷32768 fixed point
+                v: 8192,
                 abgr: 0xffff_ffff,
                 x,
                 y: 0,

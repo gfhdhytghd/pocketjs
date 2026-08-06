@@ -462,8 +462,8 @@ pub fn render(list: &DrawList, pak: &Pak, cache: &AtlasCache) -> Frame {
                                 pv.z as f32 + mesh.off_y as f32,
                             ),
                             mesh.pull,
-                            pv.u,
-                            pv.v,
+                            pv.uf(),
+                            pv.vf(),
                             abgr_to_rgba_f(pv.abgr),
                             true,
                         )

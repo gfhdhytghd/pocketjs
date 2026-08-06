@@ -177,8 +177,9 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
       indexBase: indexCount,
     };
     for (const v of mesh.verts) {
-      verts.f32(v.u);
-      verts.f32(v.v);
+      // v8 fixed-point UV: the GE divides TEXTURE_16BIT coords by 32768.
+      verts.u16(Math.min(32767, Math.round(v.u * 32768)));
+      verts.u16(Math.min(32767, Math.round(v.v * 32768)));
       verts.u32(v.abgr);
       verts.i16(v.x);
       verts.i16(v.y);

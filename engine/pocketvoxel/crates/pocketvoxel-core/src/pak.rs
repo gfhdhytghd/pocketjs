@@ -64,7 +64,7 @@
 //!   0  u16 map_count | 2 u16 pad = 0
 //!   4  u32 chunk_total
 //!   8  u32 verts_off      from the CHNK payload start, 16-aligned
-//!   12 u32 verts_len      bytes, multiple of VERTEX_STRIDE (20)
+//!   12 u32 verts_len      bytes, multiple of VERTEX_STRIDE (16)
 //!   16 u32 indices_off    from the CHNK payload start, 16-aligned
 //!   20 u32 indices_len    bytes, multiple of 2
 //!   24 u32 pad = 0 | 28 u32 pad = 0
@@ -82,7 +82,7 @@
 //!          u32 vert_base | u16 vert_count | u16 index_count | u32 index_base
 //!        - indices are RELATIVE to vert_base (GE batch style, u16-safe)
 //!        - index_count % 3 == 0; every index < vert_count (checked at load)
-//!   .. vertex pool  (verts_off; 20-byte GE verts, borrowed zero-copy)
+//!   .. vertex pool  (verts_off; 16-byte GE verts, borrowed zero-copy)
 //!   .. index pool   (indices_off; u16, borrowed zero-copy)
 //!
 //! STMP  (table count = map count):
@@ -140,18 +140,34 @@ pub type ReadError = &'static str;
 /// META.emote_page value for "no emote art".
 pub const EMOTE_PAGE_NONE: u32 = 0xffff_ffff;
 
-/// The GE world vertex, byte-identical to pocket3d's cooked format
-/// (voxel-spec.ts §VXPK). repr(C), NOT packed: 4-byte alignment, 20 bytes.
+/// The GE world vertex (voxel-spec.ts §VXPK, v8). repr(C), NOT packed:
+/// 4-byte alignment, 16 bytes. UVs are page-normalized FIXED POINT —
+/// `round(uv * 32768)` — because the GE's TEXTURE_16BIT coords divide by
+/// 32768 in TRANSFORM_3D; [`PakVert::uf`]/[`PakVert::vf`] are the one
+/// conversion both backends share.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PakVert {
-    pub u: f32,
-    pub v: f32,
+    pub u: u16,
+    pub v: u16,
     pub abgr: u32,
     pub x: i16,
     pub y: i16,
     pub z: i16,
     pub pad: i16,
+}
+
+impl PakVert {
+    /// The fixed-point U as the fraction the GE computes.
+    #[inline]
+    pub fn uf(&self) -> f32 {
+        self.u as f32 / 32768.0
+    }
+    /// The fixed-point V as the fraction the GE computes.
+    #[inline]
+    pub fn vf(&self) -> f32 {
+        self.v as f32 / 32768.0
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<PakVert>() == VERTEX_STRIDE);
@@ -308,7 +324,7 @@ pub struct Pak<'a> {
     /// 256 ABGR entries per palette, indexed by atlas kind.
     pub palettes: Vec<[u32; 256]>,
     pub atlases: Vec<AtlasPage<'a>>,
-    /// Shared vertex pool, 20-byte GE verts.
+    /// Shared vertex pool, 16-byte GE verts.
     pub verts: &'a [PakVert],
     /// Shared index pool (relative to each mesh's `vert_base`).
     pub indices: &'a [u16],
@@ -1021,8 +1037,8 @@ pub(crate) mod tests {
         // One chunk: a ground quad spanning the whole chunk at height 0.
         let quad = |x0: i16, z0: i16, x1: i16, z1: i16, abgr: u32| -> (Vec<PakVert>, Vec<u16>) {
             let v = |x, z| PakVert {
-                u: 0.25,
-                v: 0.25,
+                u: 8192, // 0.25 fixed point
+                v: 8192,
                 abgr,
                 x,
                 y: 0,
@@ -1085,8 +1101,8 @@ pub(crate) mod tests {
         b.atlas_linear(16, 32, atlas_kind::SPRITES, &[&vec![1u8; 16 * 32]]);
         b.atlas_linear(16, 16, atlas_kind::UI, &[&texels]);
         let v = |x: i16, z: i16| PakVert {
-            u: 0.25,
-            v: 0.25,
+            u: 8192, // 0.25 fixed point
+            v: 8192,
             abgr: 0xffff_ffff,
             x,
             y: 0,

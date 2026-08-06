@@ -43,9 +43,11 @@ fn build_pak() -> Vec<u8> {
     let ui: Vec<u8> = (0..16 * 16).map(|i| (i % 2 + 1) as u8).collect();
     b.atlas_linear(16, 16, atlas_kind::UI, &[&ui]);
 
+    // v8 fixed-point UVs (÷32768): the old 0..8 repeat span remaps to 0..1
+    // — a synthetic pak, its hashes are computed in-test, never committed.
     let v = |x: i16, z: i16, u: f32, vv: f32| PakVert {
-        u,
-        v: vv,
+        u: ((u / 8.0 * 32768.0) as i32).min(32767) as u16,
+        v: ((vv / 8.0 * 32768.0) as i32).min(32767) as u16,
         abgr: 0xffff_ffff,
         x,
         y: 0,

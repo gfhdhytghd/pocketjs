@@ -26,9 +26,9 @@
 //! ```
 //!
 //! GE gotchas pinned here (each enforced or comment-pinned at its site):
-//! - the 20-byte world vertex is `PakVert` — `#[repr(C)]`, NOT packed
-//!   (const-asserted 20; a packed 14/16-byte layout draws plausible garbage,
-//!   not a crash);
+//! - the 16-byte world vertex is `PakVert` — `#[repr(C)]`, NOT packed
+//!   (const-asserted; a mis-sized layout draws plausible garbage, not a
+//!   crash) — u16 fixed-point UVs, ÷32768 by the GE;
 //! - i16 world positions are normalized ÷32768 by the GE in TRANSFORM_3D;
 //!   the model matrix counters with a ×32768 scale (pocket3d-gu world.rs);
 //! - `sceGuTexImage` does NOT invalidate the GE texture cache —
@@ -82,12 +82,14 @@ pub unsafe fn writeback(data: &[u8]) {
 /// The 20-byte, 4-aligned repr(C) layout is what the vtype below describes;
 /// re-asserted here so a core-side change cannot silently skew this crate.
 const _: () = assert!(core::mem::size_of::<PakVert>() == VERTEX_STRIDE);
-const _: () = assert!(VERTEX_STRIDE == 20, "20B world vertex — repr(C), NOT packed");
+const _: () = assert!(VERTEX_STRIDE == 16, "16B world vertex — repr(C), NOT packed");
 const _: () = assert!(core::mem::align_of::<PakVert>() == 4);
 
-/// TEXTURE_32BITF | COLOR_8888 | VERTEX_16BIT | INDEX_16BIT | TRANSFORM_3D.
+/// TEXTURE_16BIT | COLOR_8888 | VERTEX_16BIT | INDEX_16BIT | TRANSFORM_3D.
+/// 16-bit texture coords divide by 32768 in TRANSFORM_3D — the pak's UVs
+/// are cooked in exactly that fixed point (voxel-spec VERTEX_STRIDE).
 const WORLD_VTYPE: VertexType = VertexType::from_bits_truncate(
-    VertexType::TEXTURE_32BITF.bits()
+    VertexType::TEXTURE_16BIT.bits()
         | VertexType::COLOR_8888.bits()
         | VertexType::VERTEX_16BIT.bits()
         | VertexType::INDEX_16BIT.bits()
@@ -693,19 +695,20 @@ impl Renderer {
         // atlas pages must be >= 64 px wide (the cooker pads sprite sheets;
         // 16-px-wide pages missample into vertical-strip noise).
         let mut out = [PakVert {
-            u: 0.0,
-            v: 0.0,
+            u: 0,
+            v: 0,
             abgr: 0xffff_ffff,
             x: 0,
             y: 0,
             z: 0,
             pad: 0,
         }; 4];
+        let q16 = |f: f32| -> u16 { ((f.clamp(0.0, 1.0) * 32768.0) as i32).min(32767) as u16 };
         for ci in 0..4 {
             let p = pulled(eye, vec3(verts[ci][0], verts[ci][1], verts[ci][2]), pull);
             out[ci] = PakVert {
-                u: uvs[ci].0,
-                v: uvs[ci].1,
+                u: q16(uvs[ci].0),
+                v: q16(uvs[ci].1),
                 abgr: 0xffff_ffff,
                 x: p.x as i16,
                 y: p.y as i16,
