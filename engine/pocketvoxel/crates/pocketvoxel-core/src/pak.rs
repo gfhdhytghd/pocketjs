@@ -314,6 +314,27 @@ pub struct Pak<'a> {
 }
 
 impl<'a> Pak<'a> {
+    /// The AUDI programs half: the ROM sound banks concatenated in the
+    /// manifest's `bankOrder`, one 0x4000-byte window each. This is what the
+    /// synth reads (`audio::Audio::render`); every audio op's `bank` argument
+    /// is an index into these windows. Empty on a pak without audio.
+    ///
+    /// The layout was already validated by [`read`], so this only re-splits.
+    pub fn audio_programs(&self) -> &'a [u8] {
+        if self.audio.len() < spec::VXPK_AUDIO_HEADER_SIZE {
+            return &[];
+        }
+        let json_len =
+            u32::from_le_bytes(self.audio[0..4].try_into().unwrap()) as usize;
+        let program_len =
+            u32::from_le_bytes(self.audio[4..8].try_into().unwrap()) as usize;
+        let off = (spec::VXPK_AUDIO_HEADER_SIZE + json_len).div_ceil(VXPK_ALIGN) * VXPK_ALIGN;
+        match off.checked_add(program_len) {
+            Some(end) if end <= self.audio.len() => &self.audio[off..end],
+            _ => &[],
+        }
+    }
+
     /// Chunk directory entry for `map_id`.
     pub fn find_map(&self, map_id: u32) -> Option<&MapDir> {
         self.maps.iter().find(|m| m.map_id == map_id)

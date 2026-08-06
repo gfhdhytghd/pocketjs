@@ -5,107 +5,56 @@
 //   bun tools/voxel.ts wav --cry PIDGEY          one cry
 //   bun tools/voxel.ts wav --sfx Press_AB        one effect
 //
+// The synth is the CORE's, so this renders the way the game does: it resolves
+// names to op arguments out of gen/audio.json, writes a one-tape `.vtrace`
+// carrying exactly those ops, and replays it through `pocketvoxel-sim --wav`.
+// What comes out is the same PCM a host would pump on device — not a second
+// implementation of the synth that could drift from it.
+//
 // Writes dist/voxelmon/audio/*.wav (git-ignored with the rest of dist/) and
 // prints each file's peak and RMS level, so "it renders" and "it is audible"
-// are two different claims. The shape matches contracts/spec/audio.ts's WAV
+// stay two different claims. The shape matches contracts/spec/audio.ts's WAV
 // contract exactly (PCM, 16-bit, stereo, a rate in AUDIO_RATES), which means
 // the same bytes also load through framework/src/audio-api.ts decodeWav.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  AUDIO_MUSIC_FLAG,
+  AUDIO_SFX_TEMPO,
+  TICK_HZ,
+  VOX_OP,
+} from "../../../../contracts/spec/voxel-spec.ts";
 import { fromGenDir, type AudioBanks } from "./banks.ts";
-import { renderEffect, SAMPLE_RATE, type Engine } from "./synth.ts";
-
-/** A 44-byte canonical RIFF/WAVE header + interleaved s16 frames. */
-export function encodeWav(pcm: Int16Array, rate: number, channels = 2): Uint8Array {
-  const dataBytes = pcm.length * 2;
-  const out = new Uint8Array(44 + dataBytes);
-  const v = new DataView(out.buffer);
-  const ascii = (at: number, s: string) => {
-    for (let i = 0; i < s.length; i++) out[at + i] = s.charCodeAt(i);
-  };
-  ascii(0, "RIFF");
-  v.setUint32(4, 36 + dataBytes, true);
-  ascii(8, "WAVE");
-  ascii(12, "fmt ");
-  v.setUint32(16, 16, true); // fmt chunk size
-  v.setUint16(20, 1, true); // PCM
-  v.setUint16(22, channels, true);
-  v.setUint32(24, rate, true);
-  v.setUint32(28, rate * channels * 2, true); // byte rate
-  v.setUint16(32, channels * 2, true); // block align
-  v.setUint16(34, 16, true); // bits per sample
-  ascii(36, "data");
-  v.setUint32(40, dataBytes, true);
-  out.set(new Uint8Array(pcm.buffer, pcm.byteOffset, dataBytes), 44);
-  return out;
-}
-
-export interface Levels {
-  peak: number;
-  rms: number;
-  /** peak as a fraction of full scale, 0..1. */
-  peakPct: number;
-  rmsPct: number;
-}
-
-export function levels(pcm: Int16Array): Levels {
-  let peak = 0;
-  let sum = 0;
-  for (let i = 0; i < pcm.length; i++) {
-    const v = pcm[i] < 0 ? -pcm[i] : pcm[i];
-    if (v > peak) peak = v;
-    sum += pcm[i] * pcm[i];
-  }
-  const rms = pcm.length > 0 ? Math.sqrt(sum / pcm.length) : 0;
-  return { peak, rms, peakPct: peak / 32767, rmsPct: rms / 32767 };
-}
-
-/** Render `seconds` of a looping engine (a song) into interleaved s16. */
-export function renderSeconds(engine: Engine, seconds: number, gain = 1): Int16Array {
-  const frames = Math.floor(engine.rate * seconds);
-  const out = new Int16Array(frames * 2);
-  engine.render(frames, out, 0, gain);
-  return out;
-}
-
-/** Render a one-shot (SFX / cry) and trim to the frames it actually used. */
-export function renderOneShot(engine: Engine, gain = 1): Int16Array {
-  const out = new Int16Array(engine.rate * 5 * 2);
-  const frames = renderEffect(engine, out);
-  const trimmed = out.subarray(0, frames * 2);
-  if (gain !== 1) for (let i = 0; i < trimmed.length; i++) trimmed[i] = Math.round(trimmed[i] * gain);
-  return trimmed;
-}
-
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 const ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
+const PAK = "dist/voxelmon/voxelmon.vxpak";
+
+/** The op lines for one render: the engine table pins, then the program. */
+function tape(banks: AudioBanks, program: number[], ticks: number): string {
+  const lines = ["voxtrace 1", "t 0 0"];
+  for (const pin of banks.pins()) {
+    lines.push(
+      pin.drum < 0
+        ? `o ${VOX_OP.audioWaves} ${pin.engine} ${pin.bank} ${pin.address}`
+        : `o ${VOX_OP.audioDrum} ${pin.engine} ${pin.drum} ${pin.bank} ${pin.address}`,
+    );
+  }
+  lines.push(`o ${program.join(" ")}`);
+  for (let t = 1; t < ticks; t++) lines.push(`t ${t} 0`);
+  return lines.join("\n") + "\n";
+}
 
 interface Job {
   name: string;
-  pcm: Int16Array;
-}
-
-function songJobs(banks: AudioBanks, labels: string[], rate: number, seconds: number): Job[] {
-  return labels.flatMap((label) => {
-    const header = banks.song(label);
-    if (!header) {
-      console.error(`  (no such song: ${label})`);
-      return [];
-    }
-    const engine = banks.engineFor(header, { bank: header.bank, rate, allowLoops: true });
-    return [{ name: label, pcm: renderSeconds(engine, seconds) }];
-  });
+  op: number[];
 }
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
-  let rate = SAMPLE_RATE;
+  let rate = 44100;
   let seconds = 20;
   const cries: string[] = [];
   const sfx: string[] = [];
@@ -124,8 +73,26 @@ async function main(): Promise<number> {
     console.error(`voxel wav: no audio dataset at ${genDir} — run \`bun tools/voxel.ts import\``);
     return 1;
   }
+  if (!existsSync(join(ROOT, PAK))) {
+    // The programs themselves live in the pak's AUDI section, which is what
+    // the core reads; the manifest alone cannot be played.
+    console.error(`voxel wav: no pak at ${PAK} — run \`bun tools/voxel.ts cook\``);
+    return 1;
+  }
 
   const jobs: Job[] = [];
+  const addSong = (label: string) => {
+    const ref = banks.song(label);
+    if (!ref) {
+      console.error(`  (no such song: ${label})`);
+      return;
+    }
+    jobs.push({
+      name: label,
+      op: [VOX_OP.music, ref.bank, ref.address, ref.engine, AUDIO_MUSIC_FLAG.loop],
+    });
+  };
+
   if (songs.length === 0 && cries.length === 0 && sfx.length === 0) {
     // The default sweep: the themes this slice's maps actually reach, plus
     // the wild-battle pair and the two sounds the overworld plays.
@@ -137,27 +104,23 @@ async function main(): Promise<number> {
     }
     if (m.battle.wild) defaults.add(m.battle.wild);
     if (m.battle.wildWin) defaults.add(m.battle.wildWin);
-    jobs.push(...songJobs(banks, [...defaults], rate, seconds));
+    for (const label of defaults) addSong(label);
     sfx.push("Press_AB");
     cries.push("PIDGEY");
   } else {
-    jobs.push(...songJobs(banks, songs, rate, seconds));
+    for (const label of songs) addSong(label);
   }
 
   for (const name of sfx) {
-    const header = banks.sfx(name);
-    if (!header) {
+    const ref = banks.sfx(name);
+    if (!ref) {
       console.error(`  (no such sfx: ${name})`);
       continue;
     }
-    const engine = banks.engineFor(header, {
-      bank: header.bank,
-      rate,
-      allowLoops: false,
-      mono: true,
-      frameTicks: 0x80 + 0x80,
+    jobs.push({
+      name: `sfx_${name}`,
+      op: [VOX_OP.sfx, ref.bank, ref.address, ref.engine, 0, AUDIO_SFX_TEMPO, 0],
     });
-    jobs.push({ name: `sfx_${name}`, pcm: renderOneShot(engine) });
   }
   for (const species of cries) {
     const cry = banks.cry(species);
@@ -165,29 +128,46 @@ async function main(): Promise<number> {
       console.error(`  (no such cry: ${species})`);
       continue;
     }
-    const engine = banks.engineFor(cry.header, {
-      bank: cry.header.bank,
-      rate,
-      allowLoops: false,
-      mono: true,
-      frequencyOffset: cry.pitch,
-      cryLength: cry.length,
+    jobs.push({
+      name: `cry_${species}`,
+      op: [VOX_OP.cry, cry.bank, cry.address, cry.engine, cry.pitch, cry.length],
     });
-    jobs.push({ name: `cry_${species}`, pcm: renderOneShot(engine) });
   }
 
   const outDir = join(ROOT, "dist/voxelmon/audio");
   mkdirSync(outDir, { recursive: true });
+  const tracePath = join(outDir, "_wav.vtrace");
+  const ticks = Math.max(1, Math.round(seconds * TICK_HZ));
   for (const job of jobs) {
-    const path = join(outDir, `${job.name}.wav`);
-    writeFileSync(path, encodeWav(job.pcm, rate));
-    const l = levels(job.pcm);
-    const secs = (job.pcm.length / 2 / rate).toFixed(2);
-    console.log(
-      `${job.name.padEnd(24)} ${secs.padStart(6)}s  peak ${String(l.peak).padStart(5)} ` +
-        `(${(l.peakPct * 100).toFixed(1).padStart(5)}%)  rms ${String(Math.round(l.rms)).padStart(5)} ` +
-        `(${(l.rmsPct * 100).toFixed(1).padStart(5)}%)`,
+    await Bun.write(tracePath, tape(banks, job.op, ticks));
+    const out = join(outDir, `${job.name}.wav`);
+    const proc = Bun.spawnSync(
+      [
+        "cargo",
+        "run",
+        "--release",
+        "-q",
+        "-p",
+        "pocketvoxel-sim",
+        "--",
+        join(ROOT, PAK),
+        "--trace",
+        tracePath,
+        "--wav",
+        out,
+        "--rate",
+        String(rate),
+      ],
+      { cwd: join(ROOT, "engine"), stderr: "inherit" },
     );
+    if (proc.exitCode !== 0) {
+      console.error(`voxel wav: sim failed for ${job.name}`);
+      return 1;
+    }
+    // `wav <path> <frames> frames <rate> Hz peak <n> (<pct>%) rms <n> (<pct>%)`
+    const line = proc.stdout.toString().trim().split("\n")[0] ?? "";
+    const tail = line.split(/\s+/).slice(2).join(" ");
+    console.log(`${job.name.padEnd(24)} ${tail}`);
   }
   console.log(`voxel wav: ${jobs.length} file(s) -> ${outDir} (${rate} Hz, stereo s16)`);
   return 0;

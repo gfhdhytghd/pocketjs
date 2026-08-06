@@ -1,28 +1,38 @@
-// The synth's INPUT: the ROM sound-program banks plus the manifest that
-// names what lives in them (song / sfx / cry / drum headers, wave tables,
-// the map->song policy table). Ports the loading half of gen1recomp
-// `src/core/ChipSynth.lua` (:121-146 loadBanks, :685-707 readWaves) and the
-// audio block `src/import/RomExtractor.lua:2065-2114` writes.
+// The audio MANIFEST: what the ROM's sound programs are called and where
+// they live. Ports the loading half of gen1recomp `src/core/ChipSynth.lua`
+// (:121-146 loadBanks) and the audio block `src/import/RomExtractor.lua`
+// :2065-2114 writes.
 //
-// Two transports, one loader — the data.ts discipline:
-//   Bun   `fromGenDir(dir)` reads dist/voxelmon/gen/{audio.json,programs.bin}
-//   PSP   `fromSection(bytes)` parses the pak's AUDI section, which the
-//         cooker packed from those same two files and the `audiodata` op
-//         hands over at boot (one cold read, then nothing crosses again).
+// The guest owns names; the core owns bytes. Everything here resolves a
+// NAME — a song label, an sfx name, a species — into the numbers the voxel
+// surface's audio ops carry (contracts/spec/voxel-spec.ts §audio): a bank
+// SLOT, a GB address, a sound-engine id, and the cry's two modifiers. The
+// core parses no JSON and knows no name; the guest reads no sample.
+//
+// Two transports, one loader (the `data.ts` discipline):
+//   Bun   `fromGenDir(dir)` reads dist/voxelmon/gen/audio.json
+//   PSP   `fromSection(bytes)` takes the JSON half of the pak's AUDI section,
+//         which the `audiodata` op hands over at boot (one cold read). The
+//         PROGRAM half of that section never crosses: the core reads it in
+//         place (pak.audio_programs).
 //
 // Nothing here touches Bun outside `fromGenDir`, so the module loads in
 // QuickJS.
 
-import { VXPK_ALIGN, VXPK_AUDIO_HEADER_SIZE } from "../../../../contracts/spec/voxel-spec.ts";
 import {
-  Engine,
-  readWaves,
-  type EngineOptions,
-  type EngineTables,
-  type ProgramBanks,
-  type ProgramHeader,
-  type WaveBankSpec,
-} from "./synth.ts";
+  AUDIO_DRUMS,
+  AUDIO_ENGINES,
+  VXPK_ALIGN,
+  VXPK_AUDIO_HEADER_SIZE,
+} from "../../../../contracts/spec/voxel-spec.ts";
+
+/** A song / sfx / cry / drum program: where its channel list starts. */
+export interface ProgramHeader {
+  bank: number;
+  address: number;
+  /** Sound-engine id 1..3; picks the wave + drum tables. */
+  engine: number;
+}
 
 /** A cry: whose program to run, and the two modifiers applied to it. */
 export interface CryDef {
@@ -33,11 +43,18 @@ export interface CryDef {
   length: number;
 }
 
+/** Where a sound engine's wave-instrument table lives. */
+export interface WaveBankSpec {
+  bank: number;
+  address: number;
+}
+
 /** `gen/audio.json` — the manifest audio block plus the importer's tables. */
 export interface AudioManifest {
   runtime: boolean;
   programFile: string;
-  /** Bank numbers in the order programs.bin concatenates them. */
+  /** Bank numbers in the order programs.bin concatenates them. The INDEX in
+   *  this list is the bank slot every audio op carries. */
   bankOrder: number[];
   songs: Record<string, ProgramHeader>;
   sfx: Record<string, ProgramHeader>;
@@ -60,8 +77,6 @@ export interface AudioSection {
   json: Uint8Array;
   programs: Uint8Array;
 }
-
-const BANK_SIZE = 0x4000;
 
 function u32(bytes: Uint8Array, at: number): number {
   return (
@@ -121,99 +136,131 @@ function utf8(bytes: Uint8Array): string {
   return out;
 }
 
+/** A resolved program, in the numbers an audio op carries. */
+export interface ProgramRef {
+  /** Index of the ROM bank in `bankOrder` — the op's `bank` argument. */
+  bank: number;
+  address: number;
+  engine: number;
+}
+
+/** One boot-time table pin (`audioWaves` / `audioDrum`). */
+export interface Pin {
+  engine: number;
+  /** Drum id, or -1 for the wave-instrument table. */
+  drum: number;
+  bank: number;
+  address: number;
+}
+
 /**
- * The loaded audio dataset: the bank windows the interpreter reads and the
- * tables that name programs inside them. Engine tables (waves, drums) are
- * built once per sound-engine id and cached — ChipSynth rebuilds them per
- * song (:728-774); here a song change costs nothing.
+ * The manifest, with every lookup already reduced to op arguments.
  */
 export class AudioBanks {
   readonly manifest: AudioManifest;
-  readonly banks: ProgramBanks;
-  private readonly tables = new Map<number, EngineTables>();
+  /** ROM bank number -> bank slot (its index in bankOrder). */
+  private readonly slots = new Map<number, number>();
 
-  constructor(manifest: AudioManifest, programs: Uint8Array) {
+  constructor(manifest: AudioManifest) {
     this.manifest = manifest;
-    const banks = new Map<number, Uint8Array>();
-    // ChipSynth.lua:139-143 — programs.bin is the banks concatenated in
-    // bankOrder, one 0x4000 window each.
-    manifest.bankOrder.forEach((bank, index) => {
-      const first = index * BANK_SIZE;
-      banks.set(bank, programs.subarray(first, first + BANK_SIZE));
-    });
-    this.banks = banks;
+    manifest.bankOrder.forEach((bank, index) => this.slots.set(bank, index));
   }
 
-  /** True when the programs actually arrived (a pak may ship without them). */
+  /** True when the manifest actually names programs to play. */
   get playable(): boolean {
-    for (const bank of this.manifest.bankOrder) {
-      const bytes = this.banks.get(bank);
-      if (!bytes || bytes.length < BANK_SIZE) return false;
+    return this.manifest.bankOrder.length > 0 && Object.keys(this.manifest.songs).length > 0;
+  }
+
+  /** A header's op arguments, or null when its bank is not in the pak. */
+  ref(header: ProgramHeader | undefined): ProgramRef | null {
+    if (!header) return null;
+    const slot = this.slots.get(header.bank);
+    if (slot === undefined) return null;
+    return { bank: slot, address: header.address, engine: header.engine };
+  }
+
+  song(label: string | undefined): ProgramRef | null {
+    return label ? this.ref(this.manifest.songs[label]) : null;
+  }
+
+  sfx(name: string): ProgramRef | null {
+    return this.ref(this.manifest.sfx[name]);
+  }
+
+  cry(species: string): (ProgramRef & { pitch: number; length: number }) | null {
+    const def = this.manifest.cries[species];
+    const ref = def && this.ref(def.header);
+    return ref ? { ...ref, pitch: def.pitch, length: def.length } : null;
+  }
+
+  /** Music.lua:339 playMap — the overworld theme label for a map id. */
+  mapSong(mapId: string): string | undefined {
+    return this.manifest.mapSongs[mapId];
+  }
+
+  /** Music.lua:357 playBattle / :370 playVictory — the role's song label. */
+  battleSong(role: string): string | undefined {
+    return this.manifest.battle[role];
+  }
+
+  /**
+   * The boot-time table pins: every sound engine's wave-instrument table
+   * (ChipSynth.lua:685) and every drum program (:645). The core holds these
+   * as addresses and decodes them the first time a program that uses the
+   * engine starts, so pinning is a few dozen ops once and nothing after.
+   */
+  pins(): Pin[] {
+    const out: Pin[] = [];
+    for (const [engine, spec] of Object.entries(this.manifest.waveBanks)) {
+      const id = Number(engine);
+      const slot = this.slots.get(spec.bank);
+      if (!Number.isInteger(id) || id < 0 || id >= AUDIO_ENGINES) continue;
+      if (slot === undefined) continue;
+      out.push({ engine: id, drum: -1, bank: slot, address: spec.address });
     }
-    return this.manifest.bankOrder.length > 0;
-  }
-
-  /** ChipSynth.lua:750-754 — the wave + drum tables of one sound engine. */
-  engineTables(engine: number): EngineTables {
-    const cached = this.tables.get(engine);
-    if (cached) return cached;
-    const spec = this.manifest.waveBanks[String(engine)];
-    const tables: EngineTables = {
-      waves: spec ? readWaves(this.banks, spec) : [],
-      noiseHeaders: this.manifest.noiseHeaders[String(engine)] ?? {},
-    };
-    this.tables.set(engine, tables);
-    return tables;
-  }
-
-  /** Build a rendering engine for one program header. */
-  engineFor(header: ProgramHeader, options: EngineOptions): Engine {
-    return new Engine(this.banks, header, this.engineTables(header.engine), options);
-  }
-
-  song(label: string): ProgramHeader | undefined {
-    return this.manifest.songs[label];
-  }
-
-  sfx(name: string): ProgramHeader | undefined {
-    return this.manifest.sfx[name];
-  }
-
-  cry(species: string): CryDef | undefined {
-    return this.manifest.cries[species];
+    for (const [engine, drums] of Object.entries(this.manifest.noiseHeaders)) {
+      const id = Number(engine);
+      if (!Number.isInteger(id) || id < 0 || id >= AUDIO_ENGINES) continue;
+      for (const [drum, header] of Object.entries(drums)) {
+        const drumId = Number(drum);
+        const slot = this.slots.get(header.bank);
+        if (!Number.isInteger(drumId) || drumId < 0 || drumId >= AUDIO_DRUMS) continue;
+        if (slot === undefined) continue;
+        out.push({ engine: id, drum: drumId, bank: slot, address: header.address });
+      }
+    }
+    return out;
   }
 }
 
-/** Build from an already-parsed manifest + raw banks (the test path). */
-export function fromParts(manifest: AudioManifest, programs: Uint8Array): AudioBanks {
-  return new AudioBanks(manifest, programs);
+/** Build from an already-parsed manifest (the test path). */
+export function fromParts(manifest: AudioManifest): AudioBanks {
+  return new AudioBanks(manifest);
 }
 
 /**
  * The device transport: the pak's AUDI section, exactly as the `audiodata`
- * op hands it over. Returns null for an absent or empty section — the game
- * then runs silent, which is a supported configuration, not an error.
+ * op hands it over. Only the JSON half is read — the programs stay in the
+ * pak, where the core reads them. Returns null for an absent or empty
+ * section: the game then runs silent, which is a supported configuration,
+ * not an error.
  */
 export function fromSection(bytes: ArrayBuffer | Uint8Array | null | undefined): AudioBanks | null {
   if (!bytes) return null;
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (view.length === 0) return null;
-  const { json, programs } = readAudioSection(view);
+  const { json } = readAudioSection(view);
   if (json.length === 0) return null;
-  const manifest = JSON.parse(utf8(json)) as AudioManifest;
-  return new AudioBanks(manifest, programs);
+  return new AudioBanks(JSON.parse(utf8(json)) as AudioManifest);
 }
 
 /**
- * The Bun transport: dist/voxelmon/gen/{audio.json,programs.bin}, the two
- * files the importer's audio stage writes. Null when either is absent (a
- * dataset imported before the audio stage existed).
+ * The Bun transport: dist/voxelmon/gen/audio.json, which the importer's audio
+ * stage writes. Null when it is absent (a dataset imported before the audio
+ * stage existed).
  */
 export async function fromGenDir(dir: string): Promise<AudioBanks | null> {
   const manifestFile = Bun.file(`${dir}/audio.json`);
-  const programFile = Bun.file(`${dir}/programs.bin`);
-  if (!(await manifestFile.exists()) || !(await programFile.exists())) return null;
-  const manifest = (await manifestFile.json()) as AudioManifest;
-  const programs = new Uint8Array(await programFile.arrayBuffer());
-  return new AudioBanks(manifest, programs);
+  if (!(await manifestFile.exists())) return null;
+  return new AudioBanks((await manifestFile.json()) as AudioManifest);
 }

@@ -4,11 +4,18 @@
 //!
 //! ```text
 //! pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert]
+//!                       [--wav file] [--rate hz] [--quality tier]
 //! pocketvoxel-sim <pak> --validate
 //! ```
 //!
 //! `--validate` loads the pak through the full reader (every range check)
 //! and prints a one-line summary — the cook test's smoke gate.
+//!
+//! `--quality` names the ladder rung the replay stands on — `psp` (the
+//! shipped default), `vita`, `desktop`, or the rung's number. The sim is the
+//! host here, and the rung is a host decision: the same recorded tape
+//! produces the shipped goldens at `psp` and the pre-ladder identity goldens
+//! at `desktop` (voxel-spec.ts §quality ladder).
 //!
 //! Without `--assert`, hashes print to stdout (and write to `--hashes` when
 //! given) as `<name> <hex>` lines — the committed golden format
@@ -16,6 +23,11 @@
 //! compare against the `--hashes` file and any mismatch exits nonzero.
 //! `--shots` writes per-checkpoint PNGs locally; PNGs are never committed
 //! (the pak is ROM-derived — docs/VOXEL.md §1).
+//!
+//! `--wav` renders the audio the tape's ops produce — the real core synth,
+//! pumped for exactly `audioFramesForTick` frames per tick — and writes it as
+//! a RIFF/WAVE file, printing its peak and RMS. That is how the synth is
+//! listened to and measured without hardware.
 
 #[cfg(test)]
 mod e2e;
@@ -23,6 +35,7 @@ mod fnv;
 mod png;
 mod raster;
 mod trace;
+mod wav;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -36,13 +49,30 @@ struct Args {
     hashes: Option<PathBuf>,
     assert: bool,
     validate: bool,
+    wav: Option<PathBuf>,
+    rate: u32,
+    quality: u8,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert]\n       pocketvoxel-sim <pak> --validate"
+        "usage: pocketvoxel-sim <pak> --trace <file> [--shots dir] [--hashes file] [--assert] [--wav file] [--rate hz] [--quality psp|vita|desktop]\n       pocketvoxel-sim <pak> --validate"
     );
     std::process::exit(2);
+}
+
+/// A `--quality` argument: a rung name from `spec::quality_tier` or its
+/// number. Names are what scripts and goldens should say; the number is the
+/// escape hatch for a rung this binary is older than.
+fn parse_quality(raw: &str) -> Option<u8> {
+    use pocketvoxel_core::spec::{QUALITY, quality_tier};
+    let tier = match raw {
+        "psp" => quality_tier::PSP,
+        "vita" => quality_tier::VITA,
+        "desktop" => quality_tier::DESKTOP,
+        n => n.parse().ok()?,
+    };
+    ((tier as usize) < QUALITY.len()).then_some(tier)
 }
 
 fn parse_args() -> Args {
@@ -52,12 +82,29 @@ fn parse_args() -> Args {
     let mut hashes = None;
     let mut assert = false;
     let mut validate = false;
+    let mut wav = None;
+    let mut rate = 44100u32;
+    let mut quality = pocketvoxel_core::spec::QUALITY_TIER_DEFAULT;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--trace" => trace = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--shots" => shots = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
             "--hashes" => hashes = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--wav" => wav = Some(PathBuf::from(it.next().unwrap_or_else(|| usage()))),
+            "--rate" => {
+                rate = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
+            "--quality" => {
+                let raw = it.next().unwrap_or_else(|| usage());
+                quality = parse_quality(&raw).unwrap_or_else(|| {
+                    eprintln!("--quality: unknown tier {raw:?} (psp|vita|desktop)");
+                    std::process::exit(2);
+                })
+            }
             "--assert" => assert = true,
             "--validate" => validate = true,
             _ if pak.is_none() && !arg.starts_with('-') => pak = Some(PathBuf::from(arg)),
@@ -72,6 +119,10 @@ fn parse_args() -> Args {
         eprintln!("--assert needs --hashes <file> to compare against");
         std::process::exit(2);
     }
+    if 44100 % rate != 0 {
+        eprintln!("--rate must divide 44100 (contracts/spec/audio.ts AUDIO_RATES)");
+        std::process::exit(2);
+    }
     Args {
         pak,
         trace,
@@ -79,6 +130,9 @@ fn parse_args() -> Args {
         hashes,
         assert,
         validate,
+        wav,
+        rate,
+        quality,
     }
 }
 
@@ -133,15 +187,38 @@ fn run(args: &Args) -> Result<bool, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let shots = args.shots.clone();
-    let hashes = trace::run(&pak, &cache, &entries, |name, frame| {
-        if let Some(dir) = &shots {
-            let bytes = png::encode_rgba(raster::W as u32, raster::H as u32, &frame.rgba_bytes());
-            let path = dir.join(format!("{name}.png"));
-            if let Err(e) = std::fs::write(&path, bytes) {
-                eprintln!("pocketvoxel-sim: {}: {e}", path.display());
+    let mut capture = args.wav.as_ref().map(|_| trace::Capture::new(args.rate));
+    let hashes = trace::run(
+        &pak,
+        &cache,
+        &entries,
+        args.quality,
+        capture.as_mut(),
+        |name, frame| {
+            if let Some(dir) = &shots {
+                let bytes =
+                    png::encode_rgba(raster::W as u32, raster::H as u32, &frame.rgba_bytes());
+                let path = dir.join(format!("{name}.png"));
+                if let Err(e) = std::fs::write(&path, bytes) {
+                    eprintln!("pocketvoxel-sim: {}: {e}", path.display());
+                }
             }
-        }
-    })?;
+        },
+    )?;
+
+    if let (Some(path), Some(capture)) = (&args.wav, &capture) {
+        let bytes = wav::encode(&capture.pcm, capture.rate, 2);
+        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (peak, rms, peak_pct, rms_pct) = wav::levels(&capture.pcm);
+        println!(
+            "wav {} {} frames {} Hz peak {peak} ({:.1}%) rms {rms:.0} ({:.1}%)",
+            path.display(),
+            capture.pcm.len() / 2,
+            capture.rate,
+            peak_pct * 100.0,
+            rms_pct * 100.0,
+        );
+    }
 
     let report: String = hashes
         .iter()

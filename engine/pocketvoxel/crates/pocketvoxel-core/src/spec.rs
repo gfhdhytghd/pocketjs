@@ -71,6 +71,61 @@ pub const PITCH_TWEEN_TICKS: u32 = 15;
 pub const CAM_FOCAL: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
+// The quality ladder — one cooked pak, many machines
+// ---------------------------------------------------------------------------
+
+/// Quality rungs, weakest first. Append-only, like op codes.
+pub mod quality_tier {
+    pub const PSP: u8 = 0;
+    pub const VITA: u8 = 1;
+    pub const DESKTOP: u8 = 2;
+}
+
+/// The rung a scene boots at (and keeps across `reset`): the weakest,
+/// so a host that never calls `quality` renders a frame it can hold.
+pub const QUALITY_TIER_DEFAULT: u8 = 0;
+/// "No limit" for a distance dial, in world px (a finite sentinel: the
+/// widened compare `(limit + half)^2` must never reach a NaN).
+pub const QUALITY_UNBOUNDED: f32 = 1000000000.0;
+/// The chunk distance cap: 2.5 view-heights, held at every rung.
+pub const CHUNK_DRAW_DIST_PX: f32 = 340.0;
+
+/// One rung's dials. Distances are world px, measured from the view
+/// centre to a chunk's own centre — all through `draw::within_dist`.
+/// Adding a dial is appending a field here and to every QUALITY row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QualityDials {
+    /// Grass chunk meshes past this distance are not drawn.
+    pub grass_dist: f32,
+    /// Flower chunk meshes past this distance are not drawn.
+    pub flower_dist: f32,
+    /// No chunk past this distance is drawn at all (any mesh kind).
+    pub chunk_dist: f32,
+}
+
+/// The dial table, indexed by `quality_tier`.
+pub const QUALITY: [QualityDials; 3] = [
+    // psp
+    QualityDials {
+        grass_dist: 96.0,
+        flower_dist: 96.0,
+        chunk_dist: 340.0,
+    },
+    // vita
+    QualityDials {
+        grass_dist: 192.0,
+        flower_dist: 192.0,
+        chunk_dist: 340.0,
+    },
+    // desktop
+    QualityDials {
+        grass_dist: 1000000000.0,
+        flower_dist: 1000000000.0,
+        chunk_dist: 340.0,
+    },
+];
+
+// ---------------------------------------------------------------------------
 // Diorama constants — baked at cook time, pinned so cooker and core agree
 // ---------------------------------------------------------------------------
 
@@ -218,6 +273,7 @@ pub mod op {
     pub const GAMEDATA: u32 = 1;
     pub const STATS: u32 = 2;
     pub const RESET: u32 = 3;
+    pub const QUALITY: u32 = 4;
     pub const AUDIODATA: u32 = 17;
     pub const MAP_SHOW: u32 = 10;
     pub const MAP_HIDE: u32 = 11;
@@ -239,11 +295,55 @@ pub mod op {
     pub const CARD_HIDE: u32 = 72;
     pub const BATTLE_CAM: u32 = 73;
     pub const ARENA_END: u32 = 74;
+    pub const MUSIC: u32 = 18;
+    pub const MUSIC_STOP: u32 = 19;
+    pub const MUSIC_FADE: u32 = 20;
+    pub const SFX: u32 = 21;
+    pub const CRY: u32 = 22;
+    pub const AUDIO_WAVES: u32 = 23;
+    pub const AUDIO_DRUM: u32 = 24;
 }
 
 /// Fixed-point scales used by op args.
 pub const Q4: i32 = 16;
 pub const Q8: i32 = 256;
+
+// ---------------------------------------------------------------------------
+// The chip synth (ChipSynth.lua's own constants)
+// ---------------------------------------------------------------------------
+
+/// One ROM sound bank: the window a program address is read inside.
+pub const AUDIO_BANK_SIZE: usize = 16384;
+/// Sound-engine table slots. Red uses ids 1..3; slot 0 is never pinned.
+pub const AUDIO_ENGINES: usize = 4;
+/// Drum ids per sound engine.
+pub const AUDIO_DRUMS: usize = 32;
+/// Wave instruments a sound engine exposes (5 read + 1 shared by 6..9).
+pub const AUDIO_WAVES: usize = 9;
+/// The channel-program tick clock durations are counted in.
+pub const AUDIO_TICKS_PER_SECOND: u64 = 15360;
+/// One frame of the GB sound driver, in program ticks.
+pub const AUDIO_FRAME_TICKS: u32 = 256;
+/// The GB master clock the noise LFSR divides down.
+pub const AUDIO_GB_CLOCK: u64 = 4194304;
+/// The plain SFX tempo byte (ChipAudio.lua:418).
+pub const AUDIO_SFX_TEMPO: u32 = 128;
+/// rAUDVOL levels a fade walks down through (Music.lua:312).
+pub const AUDIO_FADE_LEVELS: u32 = 7;
+/// Longest one-shot the reference renders (ChipSynth.lua:849).
+pub const AUDIO_EFFECT_MAX_SECONDS: u32 = 5;
+/// One channel at full scale, in the integer mix's units (lcm(15, 32)).
+pub const AUDIO_MIX_UNIT: i32 = 480;
+
+/// `music(…, flags)`.
+pub mod music_flag {
+    pub const LOOP: u32 = 1;
+}
+
+/// `sfx(…, flags)`.
+pub mod sfx_flag {
+    pub const DUCK: u32 = 1;
+}
 
 // ---------------------------------------------------------------------------
 // Events — core -> guest facts. No kinds defined yet; wire pinned.

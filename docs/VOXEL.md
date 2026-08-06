@@ -63,7 +63,8 @@ Tests that need the ROM or a reference checkout skip when absent — the
 engine/pocketvoxel/crates/
   pocketvoxel-core/   scene core: VXPK reader, chunk registry, entities,
                       camera rungs, battle staging, GB UI tile layer, draw
-                      list. no_std + alloc, f32 (libm on PSP), zero deps.
+                      list, chip synth. no_std + alloc, f32 (libm on PSP),
+                      zero deps.
   pocketvoxel-sim/    headless host: software rasterizer, PNG out, op-trace
                       replay, frame hashes. (desktop workspace member)
   pocketvoxel-gu/     sceGu backend. Consumes the draw list; never touches
@@ -109,6 +110,10 @@ tick: `frame(buttons)`, exactly once.
   up to 16 entity billboards, removable stamps, emotes, the battle stage, and
   a retained GB UI tile grid (20×18) with a reveal counter for typewriter
   text;
+- interprets the ROM's sound programs and renders PCM on demand (§8): the
+  guest names a song, an effect or a cry in numbers and the core does the
+  synthesis, because the same interpreter in QuickJS costs 2.3 s of CPU per
+  second of audio on this part;
 - resolves every textured draw's CLUT through one function,
   `draw::resolve_pal` — the pak's per-map world palette, then the page's own
   palette, then the `palette` op's SGB selection, then the page kind's GB
@@ -151,17 +156,90 @@ drift guard — the `mon-spec.ts` discipline unchanged. Op groups:
   solved camera rigs (tele / wide) and the spread correction come from the
   mod's constants. Battles stage on the map; **nothing moves the player** —
   the camera goes to the arena, exactly as upstream.
+- **audio** — `music(bank, addr, engine, flags)`, `musicStop()`,
+  `musicFade(ticks)`, `sfx(bank, addr, engine, pitch, tempo, flags)`,
+  `cry(bank, addr, engine, pitch, length)`, plus the two boot-time table
+  pins `audioWaves(engine, bank, addr)` and
+  `audioDrum(engine, drum, bank, addr)`. Every argument is a number the guest
+  resolved out of the AUDI manifest: `bank` is a **bank slot** (that ROM
+  bank's index in the manifest's `bankOrder`) and `addr` the program's GB
+  address inside its 0x4000-byte window. **The core parses no JSON and knows
+  no name; the guest reads no sample.**
 - **system** — `gamedata()` (returns the pak's GAME section to the guest at
   boot: one cold JSON parse, then the guest never crosses for data again),
-  `audiodata()` (the pak's AUDI section, the chip synth's banks + manifest;
-  same one-cold-read discipline, undefined on a pak without audio),
-  `stats()` (frame counters), `reset()`.
+  `audiodata()` (the pak's AUDI section; the guest parses only its JSON half,
+  and the program half stays in the pak, where the core reads it),
+  `stats()` (frame counters), `reset()`, `quality(tier)` (§4a).
 
-Audio itself does **not** ride this surface. It is the PocketJS `audio`
-module (`contracts/spec/audio.ts`, capability `audio.pcm`) in its own op
-space: the guest synthesizes PCM and writes it under credit, and a host that
-mounts no `globalThis.audio` runs the identical tick silently. `audiodata`
-is only how the ROM's channel programs reach the guest.
+### 4a. The quality ladder
+
+This runtime is ported to machines an order of magnitude apart in
+throughput, so fidelity is a **ladder a machine climbs, not a build flag**.
+The rungs and their dials are pinned in `voxel-spec.ts` (`QUALITY_TIER`,
+`QUALITY`); a host names its rung once with `quality(tier)` and the core
+applies that rung's dials while it builds every frame.
+
+Two rules make it a ladder and not a pile of switches:
+
+- **Every dial here is a RUNTIME dial.** One cooked pak serves every rung, so
+  the rung is a host decision and never a re-cook — no op stream and no pak
+  byte differs between a PSP and a desktop. Geometry that must itself differ
+  per machine belongs in the cook, and the pak then declares which rungs it
+  carries so a runtime asking for one it does not hold degrades instead of
+  misrendering. The `VOXEL_TREE_BOXES=1` cook flag is the shape this replaces.
+- **The top rung is the identity.** It draws exactly what this runtime drew
+  before the ladder existed. `tests/goldens/voxel/*-max.hashes` are the
+  pre-ladder frame hashes and `bun tools/voxel.ts check` replays both tapes at
+  the top rung against them byte-for-byte, so no later dial edit can quietly
+  move the picture the ladder is supposed to preserve.
+
+v1's dials, all distances in world px from the view centre to a chunk's own
+centre, widened by the chunk's half-extent — one function, `draw::within_dist`,
+so a dial added later cannot measure differently from these:
+
+| rung | `grassDist` | `flowerDist` | `chunkDist` |
+| --- | --- | --- | --- |
+| `psp` (default) | 96 | 96 | 340 |
+| `vita` | 192 | 192 | 340 |
+| `desktop` | unbounded | unbounded | 340 |
+
+`chunkDist` is 2.5 view-heights at **every** rung including the top: it is
+`draw.rs`'s old hard-coded `CULL_DIST` folded in, a pre-existing frame-budget
+cap rather than a new fidelity dial, and widening it at the top would draw
+*more* than the pre-ladder runtime instead of the same.
+
+**Why the grass and flower distances are what they are.** The GE measures
+~1.1 M triangles/s, so 60 fps budgets ≈18 k triangles a frame. The cooker
+emits two standing slabs per grass cell and a cutout per flower cell across
+the whole field, and on ROUTE_1 at pitch rung 2 those two meshes are **40 226
+of the frame's 80 428 triangles** — half the frame spent below the ankle.
+
+Culling is chunk-granular (128 px chunks), and that quantises the dial hard.
+Measured over the story trace at the three ROUTE_1 checkpoints, grass+flower
+cost is **flat from 48 px to 96 px and jumps at 112 px**: at `mid-route` it is
+27 686 triangles anywhere in 48..96 and 34 130 at 112; at `route-1` it is
+22 632 anywhere in 64..96 and the full 32 224 at 112. **96 px is the largest
+distance that still buys the whole first-ring saving**, which is why it is the
+shipped number — every larger value costs picture and buys nothing. It takes
+30–34% off the two detail meshes at the ROUTE_1 checkpoints and 5–17% off
+those whole frames.
+
+It does not reach 18 k, and **no distance dial can**: ROUTE_1's terrain alone
+is 40 202 triangles at rung 2 and Pallet Town's is 89 k with its neighbours
+loaded, so even deleting grass and flowers outright leaves the worst story
+frame at 99 176 triangles against 131 432 today. This rung takes the largest
+bite a runtime dial can take; closing the budget needs the cook-time rungs
+(tree LOD, stamp instancing, per-map streaming).
+
+The `vita` rung is a placeholder, not a measurement: at 192 px it is
+pixel-identical to the top rung across both tapes on the v1 maps, because
+128 px chunks inside a 340 px cap leave room for only two distinct settings
+here. It is a labelled rung owed a number from the machine itself.
+
+PCM leaves through the PocketJS `audio` module (`contracts/spec/audio.ts`,
+capability `audio.pcm`), not through this surface: the host pumps
+`Scene::render_audio` for exactly the frames its ring wants and writes them
+under credit. A host that pumps nothing runs the identical op stream silent.
 
 Events are the standard packed batch wire (`u16 kind | u16 a | i32 b | i32 c
 | i32 d`) with **no kinds defined yet** — the core currently states no fact
@@ -194,11 +272,61 @@ instead of every session on the handheld:
    a texel write; day tint is a CLUT rewrite, the GB's own trick;
 5. bake RED++ colour into the terrain page and resolve the bindings
    (`cook/redpp.ts`, below);
-6. write `dist/voxelmon/voxelmon.vxpak` (MONPAK-style container: magic,
+6. drop the faces no camera can reach (below);
+7. write `dist/voxelmon/voxelmon.vxpak` (MONPAK-style container: magic,
    section table, 16-byte alignment, validated zero-copy reader in the core)
    including the GAME section the guest reads at boot, the AUDI section
    carrying `audio.json` + `programs.bin` verbatim, and the VCOL section
    naming each map's and each page's CLUT.
+
+### The hidden-face cull
+
+Every quad the cooker emits names the direction its front points in
+(`cook/geom.ts` `FACE`, the mesher's own `SIDES` numbering), and one rule —
+`visibleFacing` — decides which of them no camera can reach. The rule is
+applied at exactly one site, `runGeometry`'s return, after the shading and
+ground votes have read the full face set. `VOXEL_KEEP_HIDDEN=1` restores
+every face and re-cooks a byte-identical pre-cull pak, which is how the rule
+is A/B'd.
+
+The rule is **-Y faces topping out at or below 24 world px are dropped**. A
+downward face is front-facing only when the eye is under it, and eye height
+depends on the rung or rig alone, never on where the player stands:
+`WORLD_VIEW_H * cos 75°` = 35.20 px for the field camera, 37.12 px for the
+tele rig, 27.91 px for the wide rig at minimum dolly and zero pitch steer
+(steer only raises it). **This cuts 5.2% of the cooked quads and 4.6% of the
+pak — 210143 → 199175 quads, 21809312 → 20797312 bytes over the seven v1
+maps — with all 11 story and 4 battle hash goldens byte-identical.**
+
+Two neighbouring ideas were measured and rejected, and stay rejected:
+
+- **North-facing (-Z) quads are not hidden.** A north wall is front-facing
+  wherever `z > eye.z = cy + dist·sin a`, and at rung 0 `eye.z` is the middle
+  of the frame — the southern half of a top-down frame shows the north walls
+  of everything in it. Dropping them moves 16 of a 30-frame pitch-ladder
+  sweep (20916 pixels, 7076 in the worst frame) and breaks the `route-1`
+  story golden.
+- **The pulled streams keep every face.** GRASS and FLOWER draw with a
+  camera-ward `pull` (46 px at rung 0) that displaces each vertex along its
+  OWN eye ray — not a rigid transform, so a quad's cooked facing is not its
+  drawn facing. Culling them costs 4380 (grass) and 415 (flower) pixels over
+  the same sweep and breaks six story and two battle goldens. TERRAIN, WATER
+  and the stamps draw with `pull = 0.0` and are the streams the rule acts on.
+
+**The cull is not pixel-exact, by 6 pixels in 3916800.** The rasterizer draws
+double-sided with no top-left tie-break, so both triangles sharing an edge
+cover a pixel centre that lands on it, and the depth test is strict: a
+back-facing underside that ties with the flank it shares an edge with can win
+that pixel. Removing the underside hands those 6 pixels — 4 frames of the
+30-frame sweep, all at rungs 0 and 1, all single isolated pixels on a
+building eave or a tree-hull rim — to the neighbouring face. This is a
+property of the renderer, not of the height threshold: a threshold of 2 px,
+which drops almost nothing, still leaves 3 of them.
+
+**A free-roam or orbiting field camera deletes this optimisation, it does not
+work around it.** Anything that lowers a camera's eye below 24 px — a new
+rig, a smaller `RIG.*.height`, a sixth pitch rung past 75° — invalidates the
+cooked pak, not just `cook/geom.ts`.
 
 ### Per-tile colour (RED++ / pokered-gbc)
 
@@ -322,52 +450,83 @@ only clock; tile animation and menu cursors derive from it.
    (committed) and PNGs (local only). The capture EBOOT replays the same
    recorded input under PPSSPP and must agree with the rasterizer — the
    Pocket Mon `--emit-psp` pattern.
+5. **Two rungs, one tape** — a tape is a guest op stream and the quality rung
+   is a host decision, so `bun tools/voxel.ts check` replays each recorded
+   trace twice through `pocketvoxel-sim --quality`. `story.hashes` /
+   `battle.hashes` are recorded at the **shipped `psp` rung**, so they carry
+   that rung's grass and flower distance fade (§4a) and legitimately moved
+   when the ladder landed: 5 of 11 story marks and all 4 battle marks changed,
+   every one of them in the far field. `story-max.hashes` / `battle-max.hashes`
+   are the pre-ladder hashes, asserted at the top rung and **never
+   re-recorded** — a mismatch there means the top rung stopped being the
+   identity, and the fix is the dials, not the file.
 
 ## 8. Audio
 
 Sound is the ROM's own **channel programs** — short bytecode streams the GB's
-sound driver interprets a frame at a time — run offline by a TypeScript
-interpreter (`game/audio/synth.ts`, a port of gen1recomp's `ChipSynth.lua`)
-that renders straight to PCM. There is no register-level emulation: the
-interpreter tracks each channel's note, envelope, duty, vibrato, slide, sweep
-and noise LFSR itself, and the four channels sum, divide by four and clamp.
+sound driver interprets a frame at a time — run by an interpreter in the
+**Rust core** (`pocketvoxel-core/src/audio.rs`, a port of gen1recomp's
+`ChipSynth.lua`) that renders straight to PCM. There is no register-level
+emulation: the interpreter tracks each channel's note, envelope, duty,
+vibrato, slide, sweep and noise LFSR itself, and the four channels sum,
+divide by four and clamp.
 
-The pieces:
+The split is the same one the rest of this runtime uses. The guest owns
+names, the core owns bytes:
 
-- `game/audio/banks.ts` — the three sound banks ($02/$08/$1F, 0x4000 bytes
-  each) plus the manifest naming the programs inside them. Two transports,
-  one loader (the `data.ts` discipline): Bun reads `gen/audio.json` +
-  `gen/programs.bin`, the device takes the pak's AUDI section from the
-  `audiodata` op.
-- `game/audio/synth.ts` — the interpreter and renderer. Pure, deterministic,
-  no host imports; the same header renders byte-identical PCM every time.
-- `game/audio/music.ts` — the policy (a port of `Music.lua` + `Sound.lua`)
-  and the pump. **One** stream: music, effects and cries mix guest-side, the
-  way a fanfare takes the music's channels on hardware.
+- `game/audio/banks.ts` — the manifest. It resolves a song label, an sfx name
+  or a species into the numbers an audio op carries, including the **bank
+  slot**: the index of that ROM bank in `bankOrder`, which is where the
+  core's 0x4000-byte program window starts. Two transports, one loader (the
+  `data.ts` discipline): Bun reads `gen/audio.json`, the device takes the
+  JSON half of the pak's AUDI section from the `audiodata` op.
+- `game/audio/music.ts` — the policy (a port of `Music.lua` + `Sound.lua`):
+  one op per state transition, and nothing else.
+- `pocketvoxel-core/src/audio.rs` — the interpreter, the mixer and the
+  program bytes, read in place out of the pak's AUDI section. The host pumps
+  `Scene::render_audio(pak, frames, out)` for exactly the frames its ring
+  wants; rendering is a pure function of (the ops applied so far, the frames
+  asked for), so splitting a tick's frames across two calls writes the same
+  bytes.
 
-The pump obeys the audio module's frame contract: per tick it writes
-`audioFramesForTick(rate, tick)` frames plus whatever it takes to reach a
-100 ms lead, capped at three ticks' worth so one tick can never blow the
-frame budget, and it mirrors its free-frame credit rather than querying. The
-tap opens only after the first write lands, so a track change never opens on
-an empty ring.
+**Why it moved.** Measured on real PSP hardware, one PCM frame of the
+four-channel interpreter cost **~0.21 ms** in QuickJS, so 11.025 kHz wanted
+**~2.3 seconds of CPU per second of audio**: the guest could never reach the
+ring's lead and the frame collapsed to ~9 fps while the music played slow and
+gapped. Compiled, the same interpreter renders a whole tick's 184 frames in
+**~6.5 µs on a desktop** (measured over 600 s of audio at 11.025 kHz), which
+extrapolates to a few hundred microseconds on the Allegrex — **~2% of the
+16.7 ms frame**, not 230% of it.
 
-On PSP hardware the synth does not fit the clock. Measured on device, one PCM
-frame of the four-channel interpreter costs **~0.21 ms**, so 11.025 kHz needs
-**~2.3 seconds of CPU per second of audio** — the guest can never reach the
-ring's lead, `want` pins at the three-tick catch-up cap on every tick, and the
-frame collapses to ~9 fps while the music plays slow and gapped. The device
-guest therefore constructs the director with **no banks**
-(`psp-main.ts`: `game.setAudio(null)`), which is total silence and a tick that
-costs nothing; `setAudioFromPak()` is the switch, kept for the Bun transport
-and for whenever the synth is not interpreted. The Bun sim and the goldens
-were always silent — they mount no `globalThis.audio` — so nothing about
-`tools/voxel.ts wav`, the audio tests, or the recorded traces changes.
+The arithmetic is integer wherever the reference's doubles are integer
+underneath: the envelope, the noise LFSR and its clock divider, the NR10
+sweep, the durations, the tick snapping, and the whole mix. Two places keep
+the reference's double on purpose and both are off the per-sample path — the
+60 Hz frame index, where the reference's double disagrees with the exact
+rational and the ROM is timed against the reference, and the frequency, which
+is recomputed only when the register moves (≤128 times a second per channel)
+and lands in a 64-bit fixed-point phase accumulator that advances by integer
+addition.
 
-The synth runs at **11.025 kHz** stereo (`AUDIO_RATE` in `game.ts`) — every
-`AUDIO_RATES` value divides 44.1 kHz exactly, so the host resamples with
-integer math, and the highest note the ROM's pitch table reaches (~2 kHz)
-sits well inside Nyquist. The cost of a tick is linear in the rate.
+The synth runs at whatever rate the host sets (`Audio::set_rate`), and every
+`AUDIO_RATES` value divides 44.1 kHz exactly, so a host resamples with
+integer math. The highest note the ROM's pitch table reaches (~2 kHz) sits
+inside Nyquist at **11.025 kHz**, the device rate; the cost of a tick is
+linear in the rate.
+
+**The pump on device.** The EBOOT is the audio module's client, not the
+guest: `pocketvoxel-psp/src/main.rs::audio_pump` runs once per tick, between
+`frame(buttons)` and `scene.tick()`, so no PCM crosses the JS boundary at
+all. It drains the module's event batch (a `credit` event resets its
+free-frame mirror), asks for this tick's `audioFramesForTick` frames plus
+whatever it takes to reach a **100 ms lead**, caps that at **three ticks
+(552 frames)** so one catch-up cannot blow the frame budget, renders into a
+bss buffer sized for that worst tick, and writes it with one `write_pcm`.
+The stream opens on the first audio op the guest emits and plays only after
+the first accepted write, so a guest with audio off (`setAudio(null)` in
+`psp-main.ts`) never reserves a hardware channel. The sim pumps the same
+`Scene::render_audio` on its virtual clock (`--wav`), which is what makes a
+recorded `.wav` and a device run the same sequence.
 
 What plays where, straight from the reference's own call sites: the map's
 theme on map entry (`Music.lua:339`), the wild-battle theme and the enemy's
@@ -376,11 +535,31 @@ moment the win is decided (`:370`), the map theme again when the battle
 closes (`:407`), and the `Press_AB` beep on a textbox advance or close
 (`TextBox.lua:269`, `:284`).
 
-A host that mounts no `globalThis.audio` — the Bun sim, the goldens, any
-console without the `audio.pcm` capability — runs the identical tick with
-nothing synthesized. `bun tools/voxel.ts wav` renders any song, sfx or cry
-to `dist/voxelmon/audio/*.wav` with its peak and RMS printed, so "it renders"
-and "it is audible" stay two different claims.
+`bun tools/voxel.ts wav` renders any song, sfx or cry to
+`dist/voxelmon/audio/*.wav` with its peak and RMS printed, so "it renders"
+and "it is audible" stay two different claims. It goes through the same core
+synth as the game does: a one-program `.vtrace` replayed by
+`pocketvoxel-sim --wav`.
+
+### Verification: the reference is the oracle
+
+`tests/voxel-audio.test.ts` renders the same program twice — once through the
+REFERENCE `ChipSynth.lua` under LuaJIT (`tests/fixtures/voxelmon/oracle/
+chipsynth-oracle.lua`, a two-function `love` stub around the unmodified
+file), once through the core over the real op stream — and requires the PCM
+to be **sample-exact**, not within a tolerance. It also asserts the level:
+sample-exact silence would still be a bug, so music has to clear 30% of full
+scale.
+
+Measured over the whole ROM at 44.1 kHz, five seconds each: **45 songs, 104
+sound effects and 154 cries, all sample-exact** — ~200 million samples, zero
+differences. Reaching that took three fixes the sweep found and no unit test
+would have: the quantizer's tie at exactly ±2.0 channel-sum, where the
+reference's double falls off the boundary its own rounding chose; the phase
+step, which must be the reference's double rather than the exact rational,
+because a register like 1920 is 1024 Hz exactly and lands ON a duty boundary
+every 11025 samples; and the phase accumulator's own rounding, reproduced by
+normalizing and rounding the fixed-point sum to 53 significant bits.
 
 ## 9. Budgets
 
@@ -404,15 +583,18 @@ accuracy / crit / status / catch / run / exp through the oracle-verified
 rules; the early-route effect set; unknown effects degrade via the
 reference's own fallbacks) staged in the voxel arena with the classic GB
 battle screen composited over it. One tape drives Bun, the Rust rasterizer
-(committed hash goldens: 11 story + 4 battle marks) and the PSP capture
-EBOOT. Sound is the ROM's own channel programs, interpreted and rendered to
-PCM guest-side (`game/audio/`): map themes, the wild-battle and victory
+(committed hash goldens: 11 story + 4 battle marks, at two quality rungs
+each — §4a) and the PSP capture EBOOT. Sound is the ROM's own channel programs, interpreted and rendered to
+PCM core-side (`pocketvoxel-core/src/audio.rs`, sample-exact against the
+reference over all 303 of them): map themes, the wild-battle and victory
 themes, the textbox beep and species cries. Colour is RED++ / pokered-gbc
 **per tile**, baked into the terrain texel index and bound per map (§5),
 oracle-checked against the reference's own `PaletteFX`; the GB UI layer
 stays grayscale.
 
-Later rungs, in dependency order: the GB UI colour layer (a `uiPal` op — the
+Later rungs, in dependency order: the next quality-ladder rung, tree LOD —
+the first dial the geometry itself must carry, so it is cooked into the pak
+and declared there (§4a); the GB UI colour layer (a `uiPal` op — the
 one piece of RED++ parity that needs a new op); pak slimming for the
 PSP-1000's 24 MB
 (stamp instancing over the tree-wall boxes; per-map streaming); the arena

@@ -11,9 +11,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::audio::Audio;
+use crate::pak::Pak;
 use crate::spec::{
-    self, ENTS_MAX, PITCH_RUNGS, PITCH_TWEEN_TICKS, Q8, RIG_ZOOM_MAX, RIG_ZOOM_MIN, UI_COLS,
-    UI_ROWS, op,
+    self, ENTS_MAX, PITCH_RUNGS, PITCH_TWEEN_TICKS, Q8, QUALITY, QUALITY_TIER_DEFAULT,
+    QualityDials, RIG_ZOOM_MAX, RIG_ZOOM_MIN, UI_COLS, UI_ROWS, op,
 };
 
 /// Map slots: slot 0 is the current map, 1..4 the connected neighbours at
@@ -145,6 +147,17 @@ pub struct Scene {
     /// Glyphs of `ui_text` shown. `uiText` resets it to "all".
     pub ui_reveal: u32,
     pub battle: Battle,
+    /// The quality rung this host climbed to (`spec::quality_tier`), always a
+    /// valid index into [`spec::QUALITY`]. HOST configuration, not guest
+    /// state: the host knows the machine, so `reset()` keeps this exactly as
+    /// it keeps the synth's rate (voxel-spec.ts `quality`).
+    pub quality: u8,
+    /// The chip synth. Presentation like everything else here: the guest says
+    /// what to play in numbers, the core interprets the ROM's channel
+    /// programs, and the host pumps [`Scene::render_audio`] for the frames
+    /// its ring wants. A host that mounts no audio module never pumps, and
+    /// the identical op stream runs silent.
+    pub audio: Audio,
     /// The tick index — the only clock (tile animation, cursors, rig drift).
     pub tick: u32,
     /// Total ops dispatched (debug counter for `stats()`).
@@ -168,9 +181,21 @@ impl Scene {
             ui_text: None,
             ui_reveal: u32::MAX,
             battle: Battle::default(),
+            quality: QUALITY_TIER_DEFAULT,
+            audio: Audio::new(),
             tick: 0,
             ops: 0,
         }
+    }
+
+    /// The dials of the rung this scene is on — the ONE place the ladder is
+    /// read. `quality` is range-checked on the way in, so this cannot fail;
+    /// the fallback keeps an impossible value rendering the default rung
+    /// rather than panicking on untrusted state.
+    pub fn dials(&self) -> &'static QualityDials {
+        QUALITY
+            .get(self.quality as usize)
+            .unwrap_or(&QUALITY[QUALITY_TIER_DEFAULT as usize])
     }
 
     /// Advance the tick clock. The host calls this exactly once per frame,
@@ -178,6 +203,21 @@ impl Scene {
     pub fn tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         self.pitch_t = self.pitch_t.saturating_add(1);
+        self.audio.tick();
+    }
+
+    /// Render `frames` interleaved stereo frames of the chip synth into `out`
+    /// (which must hold `frames * 2` samples; a short buffer renders what
+    /// fits). The host calls this once per tick with exactly the frames its
+    /// ring wants — `audioFramesForTick` on a virtual clock, whatever the
+    /// device's credit says on a real one.
+    ///
+    /// Pure in (the ops applied so far, the frames asked for): no clock is
+    /// read, so splitting one tick's frames across two calls writes the same
+    /// bytes as asking for them at once.
+    pub fn render_audio(&mut self, pak: &Pak<'_>, frames: usize, out: &mut [i16]) {
+        let want = frames.min(out.len() / 2) * 2;
+        self.audio.render(pak.audio_programs(), &mut out[..want]);
     }
 
     /// The tweened camera pitch in degrees (smoothstep between the tween's
@@ -216,6 +256,10 @@ impl Scene {
     pub fn op(&mut self, code: u32, args: &[i32], s: Option<&str>) -> OpResult {
         self.ops = self.ops.wrapping_add(1);
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        // The audio group owns its own codes (voxel-spec.ts §audio).
+        if self.audio.op(code, args) {
+            return OpResult::None;
+        }
         match code {
             op::GAMEDATA => return OpResult::Gamedata,
             op::STATS => {
@@ -224,7 +268,25 @@ impl Scene {
                 out[4..8].copy_from_slice(&self.ops.to_le_bytes());
                 return OpResult::Stats(out);
             }
-            op::RESET => *self = Scene::new(),
+            op::RESET => {
+                // The synth's pinned engine tables and output rate are boot
+                // configuration, not scene state; carry them across. So is
+                // the quality rung: the machine did not change.
+                let audio = core::mem::take(&mut self.audio).into_reset();
+                let quality = self.quality;
+                *self = Scene::new();
+                self.audio = audio;
+                self.quality = quality;
+            }
+            op::QUALITY => {
+                // Out of range is a no-op, never a clamp: a host naming a rung
+                // this core does not carry keeps the rung it had rather than
+                // silently landing on a neighbour's dials.
+                let tier = a(0);
+                if !args.is_empty() && (0..QUALITY.len() as i32).contains(&tier) {
+                    self.quality = tier as u8;
+                }
+            }
 
             op::MAP_SHOW => {
                 if args.len() >= 4
@@ -449,6 +511,39 @@ mod tests {
         assert!(s.battle.cards[1].shown);
         s.op(op::ARENA_END, &[], None);
         assert!(!s.battle.active);
+    }
+
+    /// The `quality` op is HOST configuration: it survives `reset`, refuses
+    /// a rung this core does not carry, and boots at the weakest rung.
+    #[test]
+    fn quality_is_host_configuration() {
+        let mut s = Scene::new();
+        assert_eq!(s.quality, spec::quality_tier::PSP, "boots at the weakest");
+        assert_eq!(s.dials(), &spec::QUALITY[spec::quality_tier::PSP as usize]);
+
+        s.op(op::QUALITY, &[spec::quality_tier::DESKTOP as i32], None);
+        assert_eq!(s.quality, spec::quality_tier::DESKTOP);
+        assert_eq!(
+            s.dials(),
+            &spec::QUALITY[spec::quality_tier::DESKTOP as usize]
+        );
+
+        // Out of range and malformed are no-ops, not clamps: a host naming a
+        // rung this core is older than keeps the rung it had.
+        s.op(op::QUALITY, &[spec::QUALITY.len() as i32], None);
+        s.op(op::QUALITY, &[-1], None);
+        s.op(op::QUALITY, &[], None);
+        assert_eq!(s.quality, spec::quality_tier::DESKTOP);
+
+        // The machine did not change, so neither does the rung.
+        s.op(op::CAM, &[99, 99], None);
+        s.op(op::RESET, &[], None);
+        assert_eq!(s.cam_x, 0, "reset still drops scene state");
+        assert_eq!(
+            s.quality,
+            spec::quality_tier::DESKTOP,
+            "reset keeps the rung, like the synth's rate"
+        );
     }
 
     #[test]

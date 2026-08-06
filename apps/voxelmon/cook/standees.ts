@@ -9,7 +9,7 @@
 
 import type { Shape } from "./classify.ts";
 import { type Art, type GameMap, type Profile, shadeClassOf } from "./data.ts";
-import { DIRS4, keyOf, type Quad, type SGrid } from "./geom.ts";
+import { DIRS4, FACE, type Facing, keyOf, type Quad, type SGrid } from "./geom.ts";
 import { mergeQuads } from "./merge.ts";
 
 // VoxelMod Structures.lua:82 PINNED_DEPTH.
@@ -312,9 +312,10 @@ function buildForcedObject(
       const y = baseY + c.lowY - ly;
       const u = srcU[i] + 0.5;
       const v = srcV[i] + 0.5;
-      const quad = (cs4: [number, number, number][], shade: number): void => {
-        out.push({ c: cs4, u, v, shade });
+      const quad = (cs4: [number, number, number][], shade: number, f: Facing): void => {
+        out.push({ c: cs4, u, v, shade, f });
       };
+      // z1 = z0 + depth, so the drawing (front) is the SOUTH face.
       quad(
         [
           [x, y, z1],
@@ -323,6 +324,7 @@ function buildForcedObject(
           [x, y + 1, z1],
         ],
         OBJ_SHADE.front,
+        FACE.south,
       );
       quad(
         [
@@ -332,6 +334,7 @@ function buildForcedObject(
           [x + 1, y + 1, z0],
         ],
         OBJ_SHADE.back,
+        FACE.north,
       );
       if (at(lx, ly - 1) === undefined) {
         quad(
@@ -342,6 +345,7 @@ function buildForcedObject(
             [x, y + 1, z1],
           ],
           OBJ_SHADE.top,
+          FACE.up,
         );
       }
       if (y > baseY && at(lx, ly + 1) === undefined) {
@@ -353,6 +357,7 @@ function buildForcedObject(
             [x, y, z0],
           ],
           OBJ_SHADE.bottom,
+          FACE.down,
         );
       }
       if (at(lx - 1, ly) === undefined) {
@@ -364,6 +369,7 @@ function buildForcedObject(
             [x, y + 1, z0],
           ],
           OBJ_SHADE.side,
+          FACE.west,
         );
       }
       if (at(lx + 1, ly) === undefined) {
@@ -375,6 +381,7 @@ function buildForcedObject(
             [x + 1, y + 1, z1],
           ],
           OBJ_SHADE.side,
+          FACE.east,
         );
       }
     }

@@ -108,10 +108,12 @@ The cooker splices `audio.json` and `programs.bin` into the pak's own AUDI
 section (`contracts/spec/voxel-spec.ts` §VXPK_TAG.audio): a 16-byte header
 (`u32 json_len | u32 program_len | two pad words`), the JSON, then the
 program banks at the next 16-byte boundary. The guest calls
-`voxel.audiodata()` once at boot, parses the JSON half, and windows the
-program half by `bankOrder`; the core never looks inside either. In Bun the
-same two files load straight from `gen/` — one loader, two transports, like
-`gamedata`.
+`voxel.audiodata()` once at boot and parses the JSON half, which is the
+manifest it resolves names through; the PROGRAM half never crosses, because
+the core reads it in place (`Pak::audio_programs`) and every audio op names
+a bank by its **slot** — that bank's index in `bankOrder`, which is the
+window's position in the concatenation. In Bun the manifest loads straight
+from `gen/audio.json` — one loader, two transports, like `gamedata`.
 
 ## `VCOL` — the per-tile colour bindings
 
@@ -195,5 +197,10 @@ m <name>                    # checkpoint marker: sim renders + hashes here
 
 Ticks are contiguous from 0. The sim renders at every `m`, appends
 `<name> <fnv1a64-of-rgba>` to its hash report, and `--shots` writes the PNG
-locally. Committed goldens are the hash lines only
-(`tests/goldens/voxel/<tape>.hashes`).
+locally. Committed goldens are the hash lines only.
+
+A tape carries the GUEST op stream, so the quality rung — a HOST decision
+(docs/VOXEL.md §4a) — arrives beside it as `pocketvoxel-sim --quality`. Each
+tape therefore pins two golden files: `tests/goldens/voxel/<tape>.hashes` at
+the shipped `psp` rung, and `<tape>-max.hashes` at the top rung, which are the
+pre-ladder hashes and are never re-recorded.

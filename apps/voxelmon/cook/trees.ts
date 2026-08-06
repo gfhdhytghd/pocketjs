@@ -11,7 +11,7 @@
 // stamped per cell (Structures.lua:1268-1276 roundCache).
 
 import { type Art, type GameMap, mod, shadeClassOf } from "./data.ts";
-import { keyOf, type Quad, type SGrid } from "./geom.ts";
+import { FACE, keyOf, type Quad, type SGrid } from "./geom.ts";
 import { mergeQuads } from "./merge.ts";
 
 // VoxelMod Structures.lua:571 ROUND_SHADE.
@@ -286,6 +286,9 @@ function roundTemplate(
           [u0, v0],
         ],
         shade: ROUND_SHADE.front,
+        // zF > zB by construction (the depth scan fills z1 > z0) and the
+        // stamp translates in +z, so the drawing's own face is the SOUTH one.
+        f: FACE.south,
       });
       quads.push({
         c: [
@@ -301,6 +304,7 @@ function roundTemplate(
           [u1, v0],
         ],
         shade: ROUND_SHADE.back,
+        f: FACE.north,
       });
       ix = ix2 + 1;
     }
@@ -347,6 +351,7 @@ function roundTemplate(
           u: su,
           v: sv,
           shade: ROUND_SHADE.side,
+          f: FACE.west,
         });
       });
       pieces(ix3 + 1, iy, (zA, zB) => {
@@ -360,6 +365,7 @@ function roundTemplate(
           u: su,
           v: sv,
           shade: ROUND_SHADE.side,
+          f: FACE.east,
         });
       });
       pieces(ix3, iy - 1, (zA, zB, izA, izB) => {
@@ -374,6 +380,7 @@ function roundTemplate(
             u: tu,
             v: tv,
             shade: ROUND_SHADE.top,
+            f: FACE.up,
           });
         };
         if (izA === z0[i] && izB === z1[i] - 1 && izB - izA >= 2) {
@@ -398,6 +405,7 @@ function roundTemplate(
             u: u,
             v: v,
             shade: ROUND_SHADE.bottom,
+            f: FACE.down,
           });
         });
       }

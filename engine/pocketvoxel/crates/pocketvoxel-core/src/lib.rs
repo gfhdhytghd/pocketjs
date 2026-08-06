@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod audio;
 pub mod cam;
 pub mod draw;
 pub mod math;

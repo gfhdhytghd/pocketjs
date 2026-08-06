@@ -13,11 +13,25 @@ import {
   ARENA_GAP_CELLS,
   ARENA_SHAPE,
   ATLAS_KIND,
+  AUDIO_BANK_SIZE,
+  AUDIO_DRUMS,
+  AUDIO_EFFECT_MAX_SECONDS,
+  AUDIO_ENGINES,
+  AUDIO_FADE_LEVELS,
+  AUDIO_FRAME_TICKS,
+  AUDIO_GB_CLOCK,
+  AUDIO_MIX_UNIT,
+  AUDIO_MUSIC_FLAG,
+  AUDIO_SFX_FLAG,
+  AUDIO_SFX_TEMPO,
+  AUDIO_TICKS_PER_SECOND,
+  AUDIO_WAVES,
   BLOCK_PX,
   COLOR_PAL_NONE,
   BLOCK_TILES,
   CAM_FOCAL,
   CELL_PX,
+  CHUNK_DRAW_DIST_PX,
   CHUNK_PX,
   CHUNK_TILES,
   CLASS_HEIGHT,
@@ -49,6 +63,10 @@ import {
   PULL_SUB,
   Q4,
   Q8,
+  QUALITY,
+  QUALITY_TIER,
+  QUALITY_TIER_DEFAULT,
+  QUALITY_UNBOUNDED,
   RIG,
   RIG_DOLLY,
   RIG_DOLLY_TICKS,
@@ -195,6 +213,49 @@ export function generateVoxelRust(): string {
   put("");
 
   put("// ---------------------------------------------------------------------------");
+  put("// The quality ladder — one cooked pak, many machines");
+  put("// ---------------------------------------------------------------------------");
+  put("");
+  constMod(put, "quality_tier", "u8", QUALITY_TIER, [
+    "Quality rungs, weakest first. Append-only, like op codes.",
+  ]);
+  put("/// The rung a scene boots at (and keeps across `reset`): the weakest,");
+  put("/// so a host that never calls `quality` renders a frame it can hold.");
+  put(`pub const QUALITY_TIER_DEFAULT: u8 = ${QUALITY_TIER_DEFAULT};`);
+  put('/// "No limit" for a distance dial, in world px (a finite sentinel: the');
+  put("/// widened compare `(limit + half)^2` must never reach a NaN).");
+  put(`pub const QUALITY_UNBOUNDED: f32 = ${f32(QUALITY_UNBOUNDED)};`);
+  put("/// The chunk distance cap: 2.5 view-heights, held at every rung.");
+  put(`pub const CHUNK_DRAW_DIST_PX: f32 = ${f32(CHUNK_DRAW_DIST_PX)};`);
+  put("");
+  put("/// One rung's dials. Distances are world px, measured from the view");
+  put("/// centre to a chunk's own centre — all through `draw::within_dist`.");
+  put("/// Adding a dial is appending a field here and to every QUALITY row.");
+  put("#[derive(Clone, Copy, Debug, PartialEq)]");
+  put("pub struct QualityDials {");
+  put("    /// Grass chunk meshes past this distance are not drawn.");
+  put("    pub grass_dist: f32,");
+  put("    /// Flower chunk meshes past this distance are not drawn.");
+  put("    pub flower_dist: f32,");
+  put("    /// No chunk past this distance is drawn at all (any mesh kind).");
+  put("    pub chunk_dist: f32,");
+  put("}");
+  put("");
+  put("/// The dial table, indexed by `quality_tier`.");
+  put(`pub const QUALITY: [QualityDials; ${QUALITY.length}] = [`);
+  for (const [i, row] of QUALITY.entries()) {
+    const tier = Object.entries(QUALITY_TIER).find(([, v]) => v === i)?.[0] ?? "?";
+    put(`    // ${tier}`);
+    put("    QualityDials {");
+    put(`        grass_dist: ${f32(row.grassDist)},`);
+    put(`        flower_dist: ${f32(row.flowerDist)},`);
+    put(`        chunk_dist: ${f32(row.chunkDist)},`);
+    put("    },");
+  }
+  put("];");
+  put("");
+
+  put("// ---------------------------------------------------------------------------");
   put("// Diorama constants — baked at cook time, pinned so cooker and core agree");
   put("// ---------------------------------------------------------------------------");
   put("");
@@ -293,6 +354,36 @@ export function generateVoxelRust(): string {
   put(`pub const Q4: i32 = ${Q4};`);
   put(`pub const Q8: i32 = ${Q8};`);
   put("");
+
+  put("// ---------------------------------------------------------------------------");
+  put("// The chip synth (ChipSynth.lua's own constants)");
+  put("// ---------------------------------------------------------------------------");
+  put("");
+  put("/// One ROM sound bank: the window a program address is read inside.");
+  put(`pub const AUDIO_BANK_SIZE: usize = ${AUDIO_BANK_SIZE};`);
+  put("/// Sound-engine table slots. Red uses ids 1..3; slot 0 is never pinned.");
+  put(`pub const AUDIO_ENGINES: usize = ${AUDIO_ENGINES};`);
+  put("/// Drum ids per sound engine.");
+  put(`pub const AUDIO_DRUMS: usize = ${AUDIO_DRUMS};`);
+  put("/// Wave instruments a sound engine exposes (5 read + 1 shared by 6..9).");
+  put(`pub const AUDIO_WAVES: usize = ${AUDIO_WAVES};`);
+  put("/// The channel-program tick clock durations are counted in.");
+  put(`pub const AUDIO_TICKS_PER_SECOND: u64 = ${AUDIO_TICKS_PER_SECOND};`);
+  put("/// One frame of the GB sound driver, in program ticks.");
+  put(`pub const AUDIO_FRAME_TICKS: u32 = ${AUDIO_FRAME_TICKS};`);
+  put("/// The GB master clock the noise LFSR divides down.");
+  put(`pub const AUDIO_GB_CLOCK: u64 = ${AUDIO_GB_CLOCK};`);
+  put("/// The plain SFX tempo byte (ChipAudio.lua:418).");
+  put(`pub const AUDIO_SFX_TEMPO: u32 = ${AUDIO_SFX_TEMPO};`);
+  put("/// rAUDVOL levels a fade walks down through (Music.lua:312).");
+  put(`pub const AUDIO_FADE_LEVELS: u32 = ${AUDIO_FADE_LEVELS};`);
+  put("/// Longest one-shot the reference renders (ChipSynth.lua:849).");
+  put(`pub const AUDIO_EFFECT_MAX_SECONDS: u32 = ${AUDIO_EFFECT_MAX_SECONDS};`);
+  put("/// One channel at full scale, in the integer mix's units (lcm(15, 32)).");
+  put(`pub const AUDIO_MIX_UNIT: i32 = ${AUDIO_MIX_UNIT};`);
+  put("");
+  constMod(put, "music_flag", "u32", AUDIO_MUSIC_FLAG, ["`music(…, flags)`."]);
+  constMod(put, "sfx_flag", "u32", AUDIO_SFX_FLAG, ["`sfx(…, flags)`."]);
 
   put("// ---------------------------------------------------------------------------");
   put("// Events — core -> guest facts. No kinds defined yet; wire pinned.");

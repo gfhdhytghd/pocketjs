@@ -39,6 +39,11 @@ static mut GAME: &[u8] = &[];
 /// runs, and an empty section is a pak without audio: `audiodata()` then
 /// answers undefined and the guest's audio director runs silent.
 static mut AUDIO: &[u8] = &[];
+/// Set by the first audio op of the run. The guest emits its engine-table
+/// pins at boot when — and only when — its audio director has a manifest, so
+/// this flag is exactly "the guest intends to sound", and the frame loop
+/// waits for it before opening a hardware stream (main.rs `audio_pump`).
+static mut AUDIO_WANTED: bool = false;
 
 /// # Safety
 /// Call once on the worker thread before `register`/`scene`.
@@ -61,6 +66,18 @@ pub unsafe fn set_audio(audio: &'static [u8]) {
 #[allow(static_mut_refs)]
 pub unsafe fn scene() -> &'static mut Scene {
     SCENE.as_mut().expect("voxel::init not called")
+}
+
+/// True once the guest has emitted any audio op. The frame loop's pump reads
+/// it to decide whether to reserve a hardware channel at all: a guest that
+/// keeps audio off (psp-main.ts `setAudio(null)`) never trips it, and the
+/// EBOOT stays exactly as silent — and as cheap — as it was before the ops
+/// existed.
+///
+/// # Safety
+/// Worker thread only, same as the ops that set it.
+pub unsafe fn audio_wanted() -> bool {
+    AUDIO_WANTED
 }
 
 /// One numeric op: collect up to `N` i32 args, dispatch. Missing args read
@@ -92,6 +109,23 @@ macro_rules! op_fn {
     };
 }
 
+/// The same numeric dispatch, plus the one bit the host side needs: this run
+/// wants sound. Every audio op sets it, including the boot-time table pins,
+/// so the flag is up before the first `frame()` of a run that has audio.
+macro_rules! audio_op_fn {
+    ($name:ident, $code:expr, $n:literal) => {
+        unsafe extern "C" fn $name(
+            ctx: *mut JSContext,
+            _this: JSValue,
+            argc: i32,
+            argv: *mut JSValue,
+        ) -> JSValue {
+            AUDIO_WANTED = true;
+            dispatch::<$n>(ctx, argc, argv, $code)
+        }
+    };
+}
+
 op_fn!(js_reset, op::RESET, 0);
 op_fn!(js_map_show, op::MAP_SHOW, 4);
 op_fn!(js_map_hide, op::MAP_HIDE, 1);
@@ -112,6 +146,17 @@ op_fn!(js_card, op::CARD, 4);
 op_fn!(js_card_hide, op::CARD_HIDE, 1);
 op_fn!(js_battle_cam, op::BATTLE_CAM, 3);
 op_fn!(js_arena_end, op::ARENA_END, 0);
+
+// The chip synth's ops (voxel-spec.ts §audio). Plain numeric ops like every
+// other: the core queues the intent and interprets the ROM's channel programs
+// when the frame loop pumps `Scene::render_audio` for frames.
+audio_op_fn!(js_music, op::MUSIC, 4);
+audio_op_fn!(js_music_stop, op::MUSIC_STOP, 0);
+audio_op_fn!(js_music_fade, op::MUSIC_FADE, 1);
+audio_op_fn!(js_sfx, op::SFX, 6);
+audio_op_fn!(js_cry, op::CRY, 5);
+audio_op_fn!(js_audio_waves, op::AUDIO_WAVES, 3);
+audio_op_fn!(js_audio_drum, op::AUDIO_DRUM, 4);
 
 /// `gamedata()`: the pak's GAME JSON as a string — one cold parse at boot,
 /// then the guest never crosses for data again (docs/VOXEL.md §4).
@@ -214,5 +259,12 @@ pub unsafe fn register(ctx: *mut JSContext, global: JSValue) {
     add_fn(ctx, obj, b"cardHide\0", js_card_hide, 1);
     add_fn(ctx, obj, b"battleCam\0", js_battle_cam, 3);
     add_fn(ctx, obj, b"arenaEnd\0", js_arena_end, 0);
+    add_fn(ctx, obj, b"music\0", js_music, 4);
+    add_fn(ctx, obj, b"musicStop\0", js_music_stop, 0);
+    add_fn(ctx, obj, b"musicFade\0", js_music_fade, 1);
+    add_fn(ctx, obj, b"sfx\0", js_sfx, 6);
+    add_fn(ctx, obj, b"cry\0", js_cry, 5);
+    add_fn(ctx, obj, b"audioWaves\0", js_audio_waves, 3);
+    add_fn(ctx, obj, b"audioDrum\0", js_audio_drum, 4);
     JS_SetPropertyStr(ctx, global, b"voxel\0".as_ptr() as *const _, obj);
 }

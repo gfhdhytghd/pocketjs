@@ -75,6 +75,37 @@ pub fn resolve_pal(pak: &Pak, page: u16, kind: u16, pal: u16, selection: i32) ->
     kind as usize
 }
 
+/// THE distance test every quality dial uses (voxel-spec.ts §quality ladder).
+///
+/// `dist2` is the squared planar distance from the view centre to a chunk's
+/// own centre and `half` that chunk's half-extent, both computed once per
+/// visible chunk in [`build`]; `limit` is the dial. The half-extent widens
+/// the limit, so a chunk counts as inside the moment any part of it is.
+///
+/// Every dial compares through this one function against that one pair —
+/// the chunk cap and the grass/flower fades cannot drift apart, and a dial
+/// added for a later rung measures exactly what the goldens were recorded
+/// with. `QUALITY_UNBOUNDED` is finite by construction, so the widened
+/// square stays a number.
+#[inline]
+pub fn within_dist(dist2: f32, half: f32, limit: f32) -> bool {
+    let r = limit + half;
+    dist2 <= r * r
+}
+
+/// A chunk that passed the frustum and the rung's chunk cap, plus the
+/// distance pair the per-mesh dials re-test against.
+struct Visible<'p> {
+    slot: u8,
+    ox: i32,
+    oy: i32,
+    chunk: &'p crate::pak::Chunk,
+    /// Squared planar distance, view centre → chunk centre (world px²).
+    dist2: f32,
+    /// Chunk half-extent, world px — widens every dial's limit.
+    half: f32,
+}
+
 /// Entity shadow decal: half-extents as fractions of the card width, and a
 /// lift above the feet so the decal never z-fights the ground it sits on.
 pub const SHADOW_W_FRAC: f32 = 0.375;
@@ -288,8 +319,11 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     // Only 5 slots exist, so a flat lookup beats widening the gather tuple.
     let mut slot_page = [terrain_page.unwrap_or(0); crate::scene::MAP_SLOTS];
     let mut slot_pal = [COLOR_PAL_NONE; crate::scene::MAP_SLOTS];
-    let mut visible: Vec<(u8, i32, i32, &crate::pak::Chunk)> = Vec::new();
+    let mut visible: Vec<Visible<'_>> = Vec::new();
     let mut shown_maps: Vec<(u8, u32, i32, i32)> = Vec::new();
+    // The rung this host climbed to: grass/flower draw distances and the
+    // chunk cap, all applied below through `within_dist`.
+    let dials = scene.dials();
     {
         for (slot, ms) in scene.maps.iter().enumerate() {
             if !ms.shown {
@@ -320,17 +354,25 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
                 // otherwise admits every chunk up-map. 2.5 view heights is
                 // the mod's own north-reach cap for its shadow frustum; the
                 // real PSP GE is the budget this protects (measured: Pallet
-                // full-set 56 ms -> bounded set well under half).
-                const CULL_DIST: f32 = 2.5 * (crate::spec::WORLD_VIEW_H as f32);
+                // full-set 56 ms -> bounded set well under half). It is the
+                // rung's `chunk_dist` dial now, held at 2.5 view heights on
+                // every rung — see voxel-spec.ts §quality ladder.
                 let (ccx, ccy) = (
                     (mins.x + maxs.x) * 0.5 - scene.cam_x as f32 / crate::spec::Q4 as f32,
                     (mins.z + maxs.z) * 0.5 - scene.cam_y as f32 / crate::spec::Q4 as f32,
                 );
                 let half = (maxs.x - mins.x).max(maxs.z - mins.z) * 0.5;
-                let within = ccx * ccx + ccy * ccy
-                    <= (CULL_DIST + half) * (CULL_DIST + half);
-                if within && frustum.intersects_aabb(mins, maxs) {
-                    visible.push((slot as u8, ms.ox, ms.oy, chunk));
+                let dist2 = ccx * ccx + ccy * ccy;
+                if within_dist(dist2, half, dials.chunk_dist) && frustum.intersects_aabb(mins, maxs)
+                {
+                    visible.push(Visible {
+                        slot: slot as u8,
+                        ox: ms.ox,
+                        oy: ms.oy,
+                        chunk,
+                        dist2,
+                        half,
+                    });
                 }
             }
         }
@@ -341,13 +383,26 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let pull_flower = (pull_card - FLOWER_PULL_SUB_PX * sinf(a)).max(0.0);
     let anim_frame = |frames: u16| ((scene.tick / TILE_ANIM_DIV) % frames as u32) as u16;
 
-    let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32| {
+    // `dist` is the rung's dial for this mesh kind: the chunk cap already
+    // bounded the gather, so a kind-level dial only ever narrows it further.
+    let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32, dist: f32| {
         if terrain_page.is_none() {
             return;
         }
-        for &(slot, ox, oy, chunk) in &visible {
+        for &Visible {
+            slot,
+            ox,
+            oy,
+            chunk,
+            dist2,
+            half,
+        } in &visible
+        {
             let m = &chunk.meshes[kind as usize];
             if m.index_count == 0 {
+                continue;
+            }
+            if !within_dist(dist2, half, dist) {
                 continue;
             }
             let page = slot_page[slot as usize];
@@ -371,8 +426,10 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         }
     };
 
-    // 2. Terrain, then stamps (terrain sub-meshes; few, uncculled).
-    mesh_pass(&mut items, mesh_kind::TERRAIN, 0.0);
+    // 2. Terrain, then stamps (terrain sub-meshes; few, uncculled). Terrain
+    // and water carry no dial of their own — they ARE the silhouette, so the
+    // chunk cap is the only distance that bounds them.
+    mesh_pass(&mut items, mesh_kind::TERRAIN, 0.0, spec::QUALITY_UNBOUNDED);
     if terrain_page.is_some() {
         for &(slot, map_id, ox, oy) in &shown_maps {
             let page = slot_page[slot as usize];
@@ -405,7 +462,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     }
 
     // 3. Water.
-    mesh_pass(&mut items, mesh_kind::WATER, 0.0);
+    mesh_pass(&mut items, mesh_kind::WATER, 0.0, spec::QUALITY_UNBOUNDED);
 
     // 4. Shadow decals: field entities, then staged battle cards (which
     // darken harder — the cards need grounding).
@@ -502,9 +559,16 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         }
     }
 
-    // 7./8. Grass then flower, with their baked pull biases.
-    mesh_pass(&mut items, mesh_kind::GRASS, pull_card);
-    mesh_pass(&mut items, mesh_kind::FLOWER, pull_flower);
+    // 7./8. Grass then flower, with their baked pull biases and the rung's
+    // fade distances: ankle-height detail past a few tiles is a texture, not
+    // a silhouette, and on ROUTE_1 it is half the frame's triangles.
+    mesh_pass(&mut items, mesh_kind::GRASS, pull_card, dials.grass_dist);
+    mesh_pass(
+        &mut items,
+        mesh_kind::FLOWER,
+        pull_flower,
+        dials.flower_dist,
+    );
 
     // 9. The GB UI layer.
     ui::append_ui(scene, pak, &mut items);
@@ -683,6 +747,136 @@ mod tests {
             resolve_pal(&pak, 0, atlas_kind::TERRAIN, COLOR_PAL_NONE, -1),
             atlas_kind::TERRAIN as usize
         );
+    }
+
+    /// A two-chunk map: the chunk at the origin and one three chunks NORTH
+    /// (the orbit camera stands to the south and looks -Z, so that is the
+    /// direction distance is visible in), each carrying terrain + grass +
+    /// flower. The far chunk is inside the chunk cap (384 px < 340 + 64) and
+    /// outside every detail dial, so it is exactly the chunk a fade is
+    /// supposed to strip and the cap is not.
+    fn fading_pak_bytes() -> alloc::vec::Vec<u8> {
+        use crate::pak::builder::{ChunkDef, PakBuilder};
+        use crate::pak::{MeshRange, PakVert};
+        let mut b = PakBuilder::new();
+        let pal = [0xff00_ff00u32; 256];
+        for _ in 0..3 {
+            b.palette(pal);
+        }
+        let texels = alloc::vec![1u8; 16 * 16];
+        b.atlas_linear(16, 16, atlas_kind::TERRAIN, &[&texels]);
+        b.atlas_linear(16, 32, atlas_kind::SPRITES, &[&alloc::vec![1u8; 16 * 32]]);
+        b.atlas_linear(16, 16, atlas_kind::UI, &[&texels]);
+        let mut quad = |x0: i16, z0: i16, x1: i16, z1: i16| {
+            let v = |x, z| PakVert {
+                u: 0.25,
+                v: 0.25,
+                abgr: 0xffff_ffff,
+                x,
+                y: 0,
+                z,
+                pad: 0,
+            };
+            b.mesh(
+                &[v(x0, z0), v(x1, z0), v(x1, z1), v(x0, z1)],
+                &[0, 1, 2, 0, 2, 3],
+            )
+        };
+        let chunk = |cy: i16, m: [MeshRange; 4]| ChunkDef {
+            cx: 0,
+            cy,
+            aabb_min: [0, 0, cy * 128],
+            aabb_max: [128, 0, cy * 128 + 128],
+            meshes: m,
+        };
+        let near = [
+            quad(0, 0, 128, 128),
+            MeshRange::default(),
+            quad(0, 0, 64, 64),
+            quad(64, 64, 128, 128),
+        ];
+        let far = [
+            quad(0, -384, 128, -256),
+            MeshRange::default(),
+            quad(0, -384, 64, -320),
+            quad(64, -320, 128, -256),
+        ];
+        b.map(7, &[chunk(-3, far), chunk(0, near)]);
+        b.stamps(7, &[]);
+        b.game(b"{}");
+        b.finish()
+    }
+
+    /// The rung's grass/flower dials strip the far chunk's DETAIL meshes and
+    /// nothing else: the same chunk's terrain still draws, because terrain is
+    /// the silhouette and only the chunk cap bounds it.
+    #[test]
+    fn detail_meshes_fade_with_the_rung() {
+        let blob = pak::AlignedBlob::from_bytes(&fading_pak_bytes());
+        let pak = pak::read(blob.bytes()).unwrap();
+        let kinds = |tier: u8| -> alloc::vec::Vec<(u16, u32)> {
+            let mut s = Scene::new();
+            s.op(op::QUALITY, &[tier as i32], None);
+            s.op(op::MAP_SHOW, &[0, 7, 0, 0], None);
+            // Stand in the near chunk, looking straight down the row of them.
+            s.op(op::CAM, &[64 * Q4, 64 * Q4], None);
+            s.op(op::PITCH, &[4], None);
+            for _ in 0..spec::PITCH_TWEEN_TICKS {
+                s.tick();
+            }
+            build(&s, &pak)
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::ChunkMesh { kind, mesh, .. } => Some((*kind, mesh.vert_base)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let count = |v: &[(u16, u32)], kind: u16| v.iter().filter(|(k, _)| *k == kind).count();
+
+        let top = kinds(spec::quality_tier::DESKTOP);
+        assert_eq!(count(&top, mesh_kind::TERRAIN), 2, "both chunks in view");
+        assert_eq!(count(&top, mesh_kind::GRASS), 2, "top rung fades nothing");
+        assert_eq!(count(&top, mesh_kind::FLOWER), 2);
+
+        let psp = kinds(spec::quality_tier::PSP);
+        assert_eq!(
+            count(&psp, mesh_kind::TERRAIN),
+            2,
+            "a detail dial never touches terrain — the silhouette must not move"
+        );
+        assert_eq!(count(&psp, mesh_kind::GRASS), 1, "the far grass faded");
+        assert_eq!(count(&psp, mesh_kind::FLOWER), 1);
+    }
+
+    /// The chunk the view centre stands in is inside EVERY rung's detail
+    /// dials, at any position within it. That is what keeps the GB
+    /// grass-over-feet trick alive at the player's own cell no matter how far
+    /// down the ladder a machine sits, and it is a property of the numbers,
+    /// not of a lucky camera: the farthest a point inside a chunk can be from
+    /// that chunk's centre is half * sqrt(2).
+    #[test]
+    fn the_chunk_underfoot_never_fades_at_any_rung() {
+        let half = spec::CHUNK_PX as f32 * 0.5;
+        let worst_dist2 = 2.0 * half * half;
+        for (rung, dials) in spec::QUALITY.iter().enumerate() {
+            for (name, limit) in [("grass", dials.grass_dist), ("flower", dials.flower_dist)] {
+                assert!(
+                    within_dist(worst_dist2, half, limit),
+                    "rung {rung}'s {name} dial ({limit}) drops the chunk underfoot"
+                );
+            }
+        }
+    }
+
+    /// Every rung's chunk cap is the pre-ladder `CULL_DIST`, so the ladder
+    /// cannot quietly widen or narrow what the frustum is allowed to admit.
+    #[test]
+    fn the_chunk_cap_is_the_pre_ladder_one_at_every_rung() {
+        for dials in spec::QUALITY.iter() {
+            assert_eq!(dials.chunk_dist, 2.5 * spec::WORLD_VIEW_H as f32);
+        }
     }
 
     #[test]

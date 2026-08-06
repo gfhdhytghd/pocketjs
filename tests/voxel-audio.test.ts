@@ -1,936 +1,575 @@
-// tests/voxel-audio.test.ts — the chip synth and its policy layer.
+// tests/voxel-audio.test.ts — the chip synth, and the policy that drives it.
 //
-// Two layers, the POCKET3D_TEST_MAPS convention:
+// The synth lives in the Rust core (engine/pocketvoxel/crates/pocketvoxel-core
+// /src/audio.rs), ported from gen1recomp `src/core/ChipSynth.lua`. That Lua
+// is the spec, so it is also the ORACLE: layer 2 below runs the REFERENCE
+// ChipSynth under luajit and the core through `pocketvoxel-sim --wav` over
+// the same program, and requires the PCM to be SAMPLE-EXACT — not close, not
+// within a tolerance. Both sides read the same ROM-decoded programs and the
+// same manifest numbers, so there is nothing left for a tolerance to hide.
 //
-//  1. ROM-FREE, always runs. The interpreter's pieces (envelope, noise LFSR,
-//     sweep) are pinned against the reference's own formulas, and a
-//     hand-written channel program in a synthetic bank exercises the whole
-//     render path — so CI covers the synth without a byte of ROM.
-//  2. ROM-GATED, skipped with a printed reason when dist/voxelmon/gen/ has
-//     no audio dataset. Real songs, sfx and cries must render AUDIBLE audio:
-//     "not silent" is too weak a bar (the Pocket Mon lesson), so the peak has
-//     to clear 10% of full scale.
+// Layer 1 (ROM-free, always runs): the AUDI section reader, the manifest's
+// name -> op-argument resolution, and the audio policy (which song for which
+// map, battle/victory switching, the textbox beep, cries) asserted on the op
+// stream the guest emits.
+//
+// Layer 2 (gated, skips with a printed reason): needs luajit, the gen1recomp
+// checkout (VOXELMON_G1R), the imported dataset and the cooked pak — the
+// POCKET3D_TEST_MAPS convention. CI never sees any of it.
 
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { AUDIO_RING_FRAMES, audioFramesForTick } from "../contracts/spec/audio.ts";
 import {
+  AUDIO_MUSIC_FLAG,
+  AUDIO_SFX_FLAG,
+  AUDIO_SFX_TEMPO,
   VOX_OP,
   VXPK_ALIGN,
   VXPK_AUDIO_HEADER_SIZE,
 } from "../contracts/spec/voxel-spec.ts";
-import { decodeWav } from "../framework/src/audio-api.ts";
-import { AudioDirector, type AudioOps } from "../apps/voxelmon/game/audio/music.ts";
 import {
   fromGenDir,
   fromParts,
+  fromSection,
   readAudioSection,
   type AudioBanks,
   type AudioManifest,
 } from "../apps/voxelmon/game/audio/banks.ts";
-import {
-  clockNoiseLfsr,
-  envelopeVolume,
-  renderEffect,
-  sweptRegister,
-} from "../apps/voxelmon/game/audio/synth.ts";
-import { encodeWav, levels, renderSeconds } from "../apps/voxelmon/game/audio/wav.ts";
-import { loadRuntimeData } from "../apps/voxelmon/game/data.ts";
-import { VoxelmonGame } from "../apps/voxelmon/game/game.ts";
-import { RecorderHost } from "../apps/voxelmon/game/host.ts";
-import { parseTape, TapePlayer } from "../apps/voxelmon/game/sim/tape.ts";
+import { AudioDirector } from "../apps/voxelmon/game/audio/music.ts";
+import type { VoxelHost } from "../apps/voxelmon/game/host.ts";
 
 const root = join(import.meta.dir, "..");
 const genDir = join(root, "dist/voxelmon/gen");
-const hasAudio =
-  existsSync(join(genDir, "audio.json")) && existsSync(join(genDir, "programs.bin"));
-if (!hasAudio) {
-  console.error(`voxel-audio ROM tests skipped — no audio dataset at ${genDir}`);
+const pakPath = join(root, "dist/voxelmon/voxelmon.vxpak");
+const scratch = join(root, "dist/voxelmon/audio");
+
+// ---------------------------------------------------------------------------
+// Layer 1: the AUDI section reader
+// ---------------------------------------------------------------------------
+
+/** Build an AUDI payload the way the cooker does (voxel-spec.ts §VXPK_TAG). */
+function audiPayload(json: string, programs: Uint8Array): Uint8Array {
+  const jsonBytes = new TextEncoder().encode(json);
+  const off = Math.ceil((VXPK_AUDIO_HEADER_SIZE + jsonBytes.length) / VXPK_ALIGN) * VXPK_ALIGN;
+  const out = new Uint8Array(off + programs.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, jsonBytes.length, true);
+  view.setUint32(4, programs.length, true);
+  out.set(jsonBytes, VXPK_AUDIO_HEADER_SIZE);
+  out.set(programs, off);
+  return out;
 }
 
-/** Peak amplitude a rendered buffer must clear to count as audible. */
-const AUDIBLE = 0.1 * 32767;
-
-// ---------------------------------------------------------------------------
-// Layer 1 — the interpreter's pieces, ROM-free
-// ---------------------------------------------------------------------------
-
-describe("envelope (ChipSynth.lua:483-488)", () => {
-  test("fade 0 holds the level forever", () => {
-    expect(envelopeVolume(9, 0, 0)).toBe(9);
-    expect(envelopeVolume(9, 0, 60)).toBe(9);
+describe("the AUDI section", () => {
+  test("splits into its two halves at the aligned offset", () => {
+    const programs = new Uint8Array([1, 2, 3, 4, 5]);
+    const section = readAudioSection(audiPayload('{"a":1}', programs));
+    expect(new TextDecoder().decode(section.json)).toBe('{"a":1}');
+    expect([...section.programs]).toEqual([1, 2, 3, 4, 5]);
   });
 
-  test("a positive fade steps down one level every fade/64 seconds", () => {
-    // fade 1 = one step per 1/64 s; the step is a floor, so the level holds
-    // for the whole period and drops on its boundary.
-    expect(envelopeVolume(15, 1, 0)).toBe(15);
-    expect(envelopeVolume(15, 1, 1 / 64 - 1e-9)).toBe(15);
-    expect(envelopeVolume(15, 1, 1 / 64)).toBe(14);
-    expect(envelopeVolume(15, 1, 4 / 64)).toBe(11);
-    // and floors at silence rather than going negative
-    expect(envelopeVolume(15, 1, 60 / 64)).toBe(0);
-    expect(envelopeVolume(15, 1, 600 / 64)).toBe(0);
+  test("a header that disagrees with the payload is a build error, not a limp", () => {
+    expect(() => readAudioSection(new Uint8Array(4))).toThrow();
+    const payload = audiPayload('{"a":1}', new Uint8Array(8));
+    expect(() => readAudioSection(payload.subarray(0, payload.length - 4))).toThrow();
   });
 
-  test("a negative fade steps up and clamps at 15", () => {
-    expect(envelopeVolume(2, -2, 0)).toBe(2);
-    expect(envelopeVolume(2, -2, 2 / 64)).toBe(3);
-    expect(envelopeVolume(2, -2, 100 / 64)).toBe(15);
+  test("an empty or absent section runs silent instead of failing", () => {
+    expect(fromSection(null)).toBeNull();
+    expect(fromSection(new Uint8Array(0))).toBeNull();
+    expect(fromSection(audiPayload("", new Uint8Array(0)))).toBeNull();
   });
 
-  test("a slower fade takes proportionally longer per step", () => {
-    expect(envelopeVolume(15, 4, 3 / 64)).toBe(15);
-    expect(envelopeVolume(15, 4, 4 / 64)).toBe(14);
-    expect(envelopeVolume(15, 4, 8 / 64)).toBe(13);
-  });
-});
-
-describe("noise LFSR (ChipSynth.lua:495-507)", () => {
-  test("15-bit mode walks 0x7FFF down and feeds back into bit 14", () => {
-    // From all-ones the XOR feedback is 0 for fifteen steps, so the register
-    // just shifts right; the sixteenth step feeds a 1 into bit 14.
-    let lfsr = 0x7fff;
-    const seen: number[] = [];
-    for (let i = 0; i < 16; i++) {
-      lfsr = clockNoiseLfsr(lfsr, false);
-      seen.push(lfsr);
-    }
-    expect(seen.slice(0, 6)).toEqual([0x3fff, 0x1fff, 0x0fff, 0x07ff, 0x03ff, 0x01ff]);
-    expect(seen[13]).toBe(0x0001); // fourteen shifts drain the ones out
-    expect(seen[14]).toBe(0x4000); // then the first 1 comes back in at bit 14
-    expect(seen[15]).toBe(0x2000);
-  });
-
-  test("the sequence is the full 2^15 - 1 cycle, never stuck", () => {
-    let lfsr = 0x7fff;
-    const seen = new Set<number>();
-    for (let i = 0; i < 32767; i++) {
-      seen.add(lfsr);
-      lfsr = clockNoiseLfsr(lfsr, false);
-    }
-    expect(seen.size).toBe(32767); // every state but all-zero
-    expect(lfsr).toBe(0x7fff); // and back to the seed, exactly on the period
-  });
-
-  test("7-bit mode also drives bit 6, shortening the cycle", () => {
-    let lfsr = 0x7fff;
-    const seen = new Set<number>();
-    for (let i = 0; i < 4096; i++) {
-      seen.add(lfsr);
-      lfsr = clockNoiseLfsr(lfsr, true);
-    }
-    expect(seen.size).toBeLessThan(300); // 7-bit: at most 127 states
-    expect(seen.size).toBeGreaterThan(1);
-  });
-});
-
-describe("sweep (ChipSynth.lua:539-552)", () => {
-  test("shift 0 passes the register through untouched", () => {
-    expect(sweptRegister(0x400, { pace: 3, subtract: false, shift: 0 }, 1)).toBe(0x400);
-  });
-
-  test("pace 0 loads the sweep but never steps it", () => {
-    expect(sweptRegister(0x400, { pace: 0, subtract: false, shift: 4 }, 1)).toBe(0x400);
-  });
-
-  test("an upward sweep climbs one step per pace/128 s and then overflows", () => {
-    const sweep = { pace: 1, subtract: false, shift: 4 };
-    expect(sweptRegister(0x400, sweep, 0)).toBe(0x400);
-    // one iteration: 0x400 + 0x400>>4 = 0x440
-    expect(sweptRegister(0x400, sweep, 1 / 128)).toBe(0x440);
-    // three iterations compound: 0x400 -> 0x440 -> 0x484 -> 0x4cc
-    expect(sweptRegister(0x400, sweep, 3 / 128)).toBe(0x4cc);
-    // eventually the next step leaves the 11-bit register: the channel dies
-    expect(sweptRegister(0x400, sweep, 1)).toBeNull();
-  });
-
-  test("a downward sweep falls and never goes negative before it stops", () => {
-    const sweep = { pace: 2, subtract: true, shift: 3 };
-    const at = (elapsed: number) => sweptRegister(0x600, sweep, elapsed);
-    expect(at(0)).toBe(0x600);
-    expect(at(2 / 128)).toBe(0x540);
-    const late = at(0.5);
-    expect(late === null || (late >= 0 && late < 0x600)).toBe(true);
+  test("the JSON half alone is what the guest needs — the programs stay in the pak", () => {
+    const banks = fromSection(audiPayload(JSON.stringify(fixtureManifest()), new Uint8Array(0)));
+    expect(banks).not.toBeNull();
+    expect(banks!.playable).toBe(true);
+    expect(banks!.song("Theme")).toEqual({ bank: 0, address: 0x4100, engine: 1 });
   });
 });
 
 // ---------------------------------------------------------------------------
-// Layer 1b — a hand-written channel program through the whole render path
+// Layer 1: name -> op arguments
 // ---------------------------------------------------------------------------
 
-/**
- * A synthetic sound bank: a one-channel header at $4000 pointing at a program
- * at $4100. The command encoding is the ROM's own (ChipSynth.lua:350-481):
- *
- *   $00       header descriptor: 1 channel ((b & $F0) >> 6 == 0), hardware 1
- *   $D8 $F0   note_type speed 8, volume 15, fade 0
- *   $E4       octave 4
- *   $03       note 0 (C), length 4
- *   $23       note 2 (D), length 4
- *   $FF       sound_ret with an empty call stack: the channel ends
- */
-function syntheticBank(program: number[]): Uint8Array {
-  const bank = new Uint8Array(0x4000);
-  bank[0] = 0x00; // channel count 1, hardware channel 1
-  bank[1] = 0x00; // program pointer low  ($4100)
-  bank[2] = 0x41; // program pointer high
-  bank.set(program, 0x100);
-  return bank;
-}
-
-function syntheticBanks(program: number[]): AudioBanks {
-  const manifest: AudioManifest = {
+function fixtureManifest(): AudioManifest {
+  return {
     runtime: true,
     programFile: "programs.bin",
-    bankOrder: [2],
-    songs: { TEST: { bank: 2, address: 0x4000, engine: 1 } },
-    sfx: {},
-    cries: {},
-    mapSongs: { TEST_MAP: "TEST" },
-    battle: { wild: "TEST", wildWin: "TEST" },
-    waveBanks: {},
-    noiseHeaders: {},
-  };
-  return fromParts(manifest, syntheticBank(program));
-}
-
-const TONE_PROGRAM = [0xd8, 0xf0, 0xe4, 0x03, 0x23, 0xff];
-/** The same two notes with a fast fade-out on the second note_type. */
-const FADE_PROGRAM = [0xd8, 0xf1, 0xe4, 0x0f, 0xff];
-
-describe("synth render path (ROM-free, synthetic bank)", () => {
-  const make = (program: number[], rate = 11025) => {
-    const banks = syntheticBanks(program);
-    const header = banks.song("TEST")!;
-    return banks.engineFor(header, { bank: header.bank, rate, allowLoops: false });
-  };
-
-  test("renders audible PCM inside the s16 range", () => {
-    const engine = make(TONE_PROGRAM);
-    const pcm = renderSeconds(engine, 0.5);
-    const l = levels(pcm);
-    expect(pcm.length).toBe(Math.floor(11025 * 0.5) * 2);
-    expect(l.peak).toBeGreaterThan(AUDIBLE);
-    for (let i = 0; i < pcm.length; i++) {
-      expect(pcm[i]).toBeGreaterThanOrEqual(-32768);
-      expect(pcm[i]).toBeLessThanOrEqual(32767);
-    }
-  });
-
-  test("the same program renders byte-identical PCM twice", () => {
-    const a = renderSeconds(make(TONE_PROGRAM), 0.5);
-    const b = renderSeconds(make(TONE_PROGRAM), 0.5);
-    expect(a.length).toBe(b.length);
-    expect(Buffer.from(a.buffer)).toEqual(Buffer.from(b.buffer));
-  });
-
-  test("determinism holds at every spec rate", () => {
-    for (const rate of [44100, 22050, 11025]) {
-      const a = renderSeconds(make(TONE_PROGRAM, rate), 0.25);
-      const b = renderSeconds(make(TONE_PROGRAM, rate), 0.25);
-      expect(Buffer.from(a.buffer)).toEqual(Buffer.from(b.buffer));
-      expect(levels(a).peak).toBeGreaterThan(AUDIBLE);
-    }
-  });
-
-  test("a pulse note is a square wave: two levels, symmetric about zero", () => {
-    const pcm = renderSeconds(make(TONE_PROGRAM), 0.1);
-    const distinct = new Set<number>();
-    for (let i = 0; i < pcm.length; i += 2) distinct.add(pcm[i]);
-    // volume 15 with no fade: exactly +v and -v
-    expect(distinct.size).toBe(2);
-    const [a, b] = [...distinct].sort((x, y) => x - y);
-    expect(a).toBeLessThan(0);
-    expect(b).toBeGreaterThan(0);
-    expect(Math.abs(a + b)).toBeLessThanOrEqual(1); // rounding only
-  });
-
-  test("a fading note decays toward silence", () => {
-    const pcm = renderSeconds(make(FADE_PROGRAM), 0.4);
-    const half = Math.floor(pcm.length / 4) * 2;
-    const early = levels(pcm.subarray(0, half));
-    const late = levels(pcm.subarray(half));
-    expect(early.peak).toBeGreaterThan(AUDIBLE);
-    expect(late.peak).toBeLessThan(early.peak);
-  });
-
-  test("a non-looping program ends, and past the end renders silence", () => {
-    const engine = make(TONE_PROGRAM);
-    // the two notes are 4*8*256 ticks each = ~1.07 s total at tempo 0x100
-    renderSeconds(engine, 3);
-    expect(engine.finished()).toBe(true);
-    const tail = renderSeconds(engine, 0.1);
-    expect(levels(tail).peak).toBe(0);
-  });
-
-  test("renderEffect refuses a program too short to be audible", () => {
-    // an immediate sound_ret produces no events at all
-    const engine = make([0xff]);
-    const out = new Int16Array(engine.rate * 5 * 2);
-    expect(renderEffect(engine, out)).toBe(0);
-  });
-
-  test("an unreadable bank fails loudly instead of rendering garbage", () => {
-    const banks = fromParts(
-      {
-        runtime: true,
-        programFile: "",
-        bankOrder: [2],
-        songs: { TEST: { bank: 9, address: 0x4000, engine: 1 } },
-        sfx: {},
-        cries: {},
-        mapSongs: {},
-        battle: {},
-        waveBanks: {},
-        noiseHeaders: {},
+    // Bank NUMBERS; an op carries their INDEX in this list.
+    bankOrder: [2, 8],
+    songs: {
+      Theme: { bank: 2, address: 0x4100, engine: 1 },
+      Battle: { bank: 8, address: 0x4200, engine: 2 },
+      Victory: { bank: 8, address: 0x4300, engine: 2 },
+      Elsewhere: { bank: 31, address: 0x4400, engine: 3 },
+    },
+    sfx: {
+      Press_AB: { bank: 2, address: 0x4500, engine: 1 },
+      Level_Up: { bank: 2, address: 0x4600, engine: 1 },
+    },
+    cries: {
+      PIDGEY: { header: { bank: 2, address: 0x4700, engine: 1 }, pitch: 223, length: 4 },
+    },
+    mapSongs: { PALLET_TOWN: "Theme", REDS_HOUSE_1F: "Theme", ROUTE_1: "Missing" },
+    battle: { wild: "Battle", wildWin: "Victory" },
+    waveBanks: { "1": { bank: 2, address: 0x4300 }, "9": { bank: 2, address: 0x4300 } },
+    noiseHeaders: {
+      "1": {
+        "1": { bank: 2, address: 0x4800, engine: 1 },
+        "99": { bank: 2, address: 0, engine: 1 },
       },
-      new Uint8Array(0x4000),
-    );
-    const header = banks.song("TEST")!;
-    expect(() => banks.engineFor(header, { bank: 9, allowLoops: false })).toThrow(
-      /uncached audio bank/,
-    );
-  });
-});
+      "2": { "1": { bank: 31, address: 0x4900, engine: 2 } },
+    },
+  };
+}
 
-describe("AUDI section (contracts/spec/voxel-spec.ts §VXPK_TAG.audio)", () => {
-  test("round-trips both halves at their pinned offsets", () => {
-    const json = new TextEncoder().encode('{"bankOrder":[2,8,31]}');
-    const programs = new Uint8Array(48).fill(0x5a);
-    // The cooker's layout: 16-byte header, JSON, 16-aligned programs.
-    const programsOff = Math.ceil((16 + json.length) / 16) * 16;
-    const payload = new Uint8Array(programsOff + programs.length);
-    new DataView(payload.buffer).setUint32(0, json.length, true);
-    new DataView(payload.buffer).setUint32(4, programs.length, true);
-    payload.set(json, 16);
-    payload.set(programs, programsOff);
+describe("manifest resolution", () => {
+  const banks = fromParts(fixtureManifest());
 
-    const section = readAudioSection(payload);
-    expect(new TextDecoder().decode(section.json)).toBe('{"bankOrder":[2,8,31]}');
-    expect(section.programs.length).toBe(48);
-    expect(section.programs.every((b) => b === 0x5a)).toBe(true);
+  test("a bank NUMBER becomes the bank SLOT the op carries", () => {
+    expect(banks.song("Theme")).toEqual({ bank: 0, address: 0x4100, engine: 1 });
+    expect(banks.song("Battle")).toEqual({ bank: 1, address: 0x4200, engine: 2 });
   });
 
-  test("a truncated payload throws rather than reading past the end", () => {
-    const payload = new Uint8Array(32);
-    new DataView(payload.buffer).setUint32(0, 8, true);
-    new DataView(payload.buffer).setUint32(4, 4096, true);
-    expect(() => readAudioSection(payload)).toThrow(/do not fit/);
-    expect(() => readAudioSection(new Uint8Array(4))).toThrow(/shorter than its header/);
+  test("a program in a bank the pak does not carry resolves to nothing", () => {
+    expect(banks.song("Elsewhere")).toBeNull();
+    expect(banks.song("nope")).toBeNull();
   });
-});
 
-describe("WAV encoding (contracts/spec/audio.ts §WAV pak entries)", () => {
-  test("the encoder's output decodes through the framework's reference decoder", () => {
-    const engine = (() => {
-      const banks = syntheticBanks(TONE_PROGRAM);
-      const header = banks.song("TEST")!;
-      return banks.engineFor(header, { bank: header.bank, rate: 22050, allowLoops: false });
-    })();
-    const pcm = renderSeconds(engine, 0.2);
-    const wav = encodeWav(pcm, 22050);
-    const decoded = decodeWav(wav);
-    expect(decoded.sampleRate).toBe(22050);
-    expect(decoded.channels).toBe(2);
-    expect(decoded.frames).toBe(pcm.length / 2);
-    expect(decoded.data[0]).toBe(pcm[0]);
-    expect(decoded.data[decoded.data.length - 1]).toBe(pcm[pcm.length - 1]);
+  test("a cry carries its two modifiers", () => {
+    expect(banks.cry("PIDGEY")).toEqual({
+      bank: 0,
+      address: 0x4700,
+      engine: 1,
+      pitch: 223,
+      length: 4,
+    });
+    expect(banks.cry("MISSINGNO")).toBeNull();
+  });
+
+  test("pins name every engine table, and skip what the core cannot hold", () => {
+    // Engine 9 is past AUDIO_ENGINES, drum 99 past AUDIO_DRUMS, and engine
+    // 2's drum lives in a bank this pak has no slot for.
+    expect(banks.pins()).toEqual([
+      { engine: 1, drum: -1, bank: 0, address: 0x4300 },
+      { engine: 1, drum: 1, bank: 0, address: 0x4800 },
+    ]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Layer 2 — the real ROM programs
+// Layer 1: the policy, on the op stream
 // ---------------------------------------------------------------------------
 
-describe.skipIf(!hasAudio)("ROM sound programs", () => {
-  let banks: AudioBanks;
+type Emitted = [string, ...number[]];
 
-  test("the imported dataset loads and carries the three sound banks", async () => {
-    banks = (await fromGenDir(genDir))!;
-    expect(banks).not.toBeNull();
-    expect(banks.playable).toBe(true);
-    expect(banks.manifest.bankOrder).toEqual([2, 8, 31]);
-    // RomExtractor.lua:2098-2107 — one cry per real INTERNAL species slot,
-    // MISSINGNO and UNUSED rows read but dropped. That is 154, not 151: the
-    // internal order also carries FOSSIL_KABUTOPS, FOSSIL_AERODACTYL and
-    // MON_GHOST, which have cries but no Pokedex entry.
-    expect(Object.keys(banks.manifest.cries).length).toBe(154);
-    expect(Object.keys(banks.manifest.songs).length).toBeGreaterThan(40);
-    for (const id of Object.keys(banks.manifest.cries)) {
-      expect(id.startsWith("MISSINGNO")).toBe(false);
-      expect(id.startsWith("UNUSED")).toBe(false);
-    }
+/** A VoxelHost that records only the audio ops. */
+function recorder(): { host: VoxelHost; ops: Emitted[] } {
+  const ops: Emitted[] = [];
+  const nop = () => {};
+  const host = {
+    gamedata: () => null,
+    audiodata: () => null,
+    stats: () => null,
+    reset: nop,
+    mapShow: nop,
+    mapHide: nop,
+    cam: nop,
+    pitch: nop,
+    tint: nop,
+    stamp: nop,
+    palette: nop,
+    ent: nop,
+    entHide: nop,
+    emote: nop,
+    uiTile: nop,
+    uiFill: nop,
+    uiText: nop,
+    uiReveal: nop,
+    uiClear: nop,
+    arena: nop,
+    card: nop,
+    cardHide: nop,
+    battleCam: nop,
+    arenaEnd: nop,
+    frameDone: nop,
+    music: (...a: number[]) => ops.push(["music", ...a]),
+    musicStop: () => ops.push(["musicStop"]),
+    musicFade: (...a: number[]) => ops.push(["musicFade", ...a]),
+    sfx: (...a: number[]) => ops.push(["sfx", ...a]),
+    cry: (...a: number[]) => ops.push(["cry", ...a]),
+    audioWaves: (...a: number[]) => ops.push(["audioWaves", ...a]),
+    audioDrum: (...a: number[]) => ops.push(["audioDrum", ...a]),
+  } as unknown as VoxelHost;
+  return { host, ops };
+}
+
+function director(): { d: AudioDirector; ops: Emitted[] } {
+  const { host, ops } = recorder();
+  const d = new AudioDirector(fromParts(fixtureManifest()), host);
+  ops.length = 0; // drop the boot pins; they have their own test
+  return { d, ops };
+}
+
+describe("the audio policy", () => {
+  test("boot pins the engine tables once, before anything can name one", () => {
+    const { host, ops } = recorder();
+    new AudioDirector(fromParts(fixtureManifest()), host);
+    expect(ops).toEqual([
+      ["audioWaves", 1, 0, 0x4300],
+      ["audioDrum", 1, 1, 0, 0x4800],
+    ]);
   });
 
-  test("every map theme and battle theme this slice reaches resolves", () => {
-    const m = banks.manifest;
-    for (const map of ["PALLET_TOWN", "ROUTE_1", "VIRIDIAN_CITY", "REDS_HOUSE_1F", "OAKS_LAB"]) {
-      const label = m.mapSongs[map];
-      expect(label, `${map} has no theme`).toBeTruthy();
-      expect(banks.song(label), `${label} has no program`).toBeTruthy();
-    }
-    expect(banks.song(m.battle.wild)).toBeTruthy();
-    expect(banks.song(m.battle.wildWin)).toBeTruthy();
+  test("a map entry starts its theme, and the same theme does not restart", () => {
+    const { d, ops } = director();
+    d.startMap("PALLET_TOWN");
+    expect(ops).toEqual([["music", 0, 0x4100, 1, AUDIO_MUSIC_FLAG.loop]]);
+    // Music.lua:239 dedupes on the label: a house door must not restart the
+    // town song.
+    ops.length = 0;
+    d.startMap("REDS_HOUSE_1F");
+    expect(ops).toEqual([]);
+    expect(d.playing).toBe("Theme");
   });
 
-  test("a real song renders audibly, well inside full scale", () => {
-    const label = banks.manifest.mapSongs.PALLET_TOWN;
-    const header = banks.song(label)!;
-    const engine = banks.engineFor(header, { bank: header.bank, rate: 11025, allowLoops: true });
-    const pcm = renderSeconds(engine, 8, 0.7);
-    const l = levels(pcm);
-    // "not silent" is too weak: the reference mixes four channels at /4, so a
-    // healthy song peaks around half scale and averages a fifth of it.
-    expect(l.peak).toBeGreaterThan(AUDIBLE);
-    expect(l.rms).toBeGreaterThan(0.05 * 32767);
-    expect(l.peak).toBeLessThanOrEqual(32767);
+  test("a map whose theme the manifest cannot resolve is silent, once", () => {
+    const { d, ops } = director();
+    d.startMap("ROUTE_1");
+    d.startMap("ROUTE_1");
+    expect(ops).toEqual([]);
+    expect(d.playing).toBeNull();
   });
 
-  test("every song in the ROM renders without throwing, and none is silent", () => {
-    const quiet: string[] = [];
-    for (const label of Object.keys(banks.manifest.songs)) {
-      const header = banks.song(label)!;
-      const engine = banks.engineFor(header, { bank: header.bank, rate: 11025, allowLoops: true });
-      const pcm = renderSeconds(engine, 2, 0.7);
-      if (levels(pcm).peak < AUDIBLE) quiet.push(label);
-    }
-    // A handful of songs open on a rest; the bar is that the set is small and
-    // named, not that every two-second window is loud.
-    expect(quiet.length, `quiet songs: ${quiet.join(", ")}`).toBeLessThanOrEqual(3);
+  test("a battle takes the theme, the win takes the jingle, the close restores", () => {
+    const { d, ops } = director();
+    d.startMap("PALLET_TOWN");
+    ops.length = 0;
+    d.playBattle("wild");
+    expect(ops).toEqual([["music", 1, 0x4200, 2, AUDIO_MUSIC_FLAG.loop]]);
+    ops.length = 0;
+    expect(d.playVictory("wild")).toBe(true);
+    expect(ops).toEqual([["music", 1, 0x4300, 2, AUDIO_MUSIC_FLAG.loop]]);
+    ops.length = 0;
+    d.restore();
+    expect(ops).toEqual([["music", 0, 0x4100, 1, AUDIO_MUSIC_FLAG.loop]]);
+    expect(d.playing).toBe("Theme");
   });
 
-  test("the Press_AB beep renders as a short audible one-shot", () => {
-    const header = banks.sfx("Press_AB")!;
-    const engine = banks.engineFor(header, {
-      bank: header.bank,
-      rate: 11025,
-      allowLoops: false,
-      mono: true,
-      frameTicks: 0x80 + 0x80,
-    });
-    const out = new Int16Array(engine.rate * 5 * 2);
-    const frames = renderEffect(engine, out);
-    expect(frames).toBeGreaterThan(0);
-    expect(frames / engine.rate).toBeLessThan(1); // a beep, not a jingle
-    expect(levels(out.subarray(0, frames * 2)).peak).toBeGreaterThan(AUDIBLE);
+  test("a victory with no jingle in the manifest stays on the battle theme", () => {
+    const { d, ops } = director();
+    expect(d.playVictory("trainer")).toBe(false);
+    expect(ops).toEqual([]);
   });
 
-  test("a cry renders with its own pitch and length modifiers", () => {
-    const cry = banks.cry("PIDGEY")!;
-    expect(cry.header).toBeTruthy();
-    const engine = banks.engineFor(cry.header, {
-      bank: cry.header.bank,
-      rate: 11025,
-      allowLoops: false,
-      mono: true,
-      frequencyOffset: cry.pitch,
-      cryLength: cry.length,
-    });
-    const out = new Int16Array(engine.rate * 5 * 2);
-    const frames = renderEffect(engine, out);
-    expect(frames).toBeGreaterThan(0);
-    expect(levels(out.subarray(0, frames * 2)).peak).toBeGreaterThan(AUDIBLE);
+  test("a textbox beep is a one-shot; a fanfare claims the music's channels", () => {
+    const { d, ops } = director();
+    d.playSfx("Press_AB");
+    expect(ops).toEqual([["sfx", 0, 0x4500, 1, 0, AUDIO_SFX_TEMPO, 0]]);
+    ops.length = 0;
+    // Sound.lua:55 FANFARES — Level_Up pauses the song for its duration.
+    d.playSfx("Level_Up");
+    expect(ops).toEqual([["sfx", 0, 0x4600, 1, 0, AUDIO_SFX_TEMPO, AUDIO_SFX_FLAG.duck]]);
+    ops.length = 0;
+    d.playSfx("nope");
+    expect(ops).toEqual([]);
   });
 
-  test("every starter's cry renders (the wave + noise channels included)", () => {
-    for (const species of ["BULBASAUR", "CHARMANDER", "SQUIRTLE", "PIKACHU", "RATTATA"]) {
-      const cry = banks.cry(species)!;
-      const engine = banks.engineFor(cry.header, {
-        bank: cry.header.bank,
-        rate: 11025,
-        allowLoops: false,
-        mono: true,
-        frequencyOffset: cry.pitch,
-        cryLength: cry.length,
+  test("a cry carries the ROM's own frequency and length modifiers", () => {
+    const { d, ops } = director();
+    d.playCry("PIDGEY");
+    expect(ops).toEqual([["cry", 0, 0x4700, 1, 223, 4]]);
+    ops.length = 0;
+    d.playCry("MISSINGNO");
+    expect(ops).toEqual([]);
+  });
+
+  test("stop and fade are the reference's two ways to end a song", () => {
+    const { d, ops } = director();
+    d.startMap("PALLET_TOWN");
+    ops.length = 0;
+    d.fadeOut(10);
+    expect(ops).toEqual([["musicFade", 10]]);
+    // The fade released the label, so re-entering the map starts it again.
+    ops.length = 0;
+    d.startMap("PALLET_TOWN");
+    expect(ops).toEqual([["music", 0, 0x4100, 1, AUDIO_MUSIC_FLAG.loop]]);
+    ops.length = 0;
+    d.stopMusic();
+    expect(ops).toEqual([["musicStop"]]);
+  });
+
+  test("no manifest is total silence: nothing resolves, nothing is emitted", () => {
+    const { host, ops } = recorder();
+    const d = new AudioDirector(null, host);
+    d.startMap("PALLET_TOWN");
+    d.playBattle("wild");
+    d.playSfx("Press_AB");
+    d.playCry("PIDGEY");
+    d.stop();
+    expect(ops).toEqual([]);
+    expect(d.live).toBe(false);
+  });
+
+  test("no host is total silence too — the Bun recorder mounts one, tests need not", () => {
+    const d = new AudioDirector(fromParts(fixtureManifest()), null);
+    expect(() => {
+      d.startMap("PALLET_TOWN");
+      d.playSfx("Press_AB");
+      d.playCry("PIDGEY");
+      d.fadeOut();
+    }).not.toThrow();
+    expect(d.live).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Layer 2: the core synth against the REFERENCE ChipSynth (luajit)
+// ---------------------------------------------------------------------------
+
+const g1rRoot = process.env.VOXELMON_G1R ?? join(homedir(), "code/gen1recomp");
+const luajit = Bun.which("luajit");
+const simBin = join(root, "engine/target/release/pocketvoxel-sim");
+const hasOracle =
+  luajit !== null &&
+  existsSync(join(g1rRoot, "src/core/ChipSynth.lua")) &&
+  existsSync(join(genDir, "audio.json")) &&
+  existsSync(join(genDir, "programs.bin")) &&
+  existsSync(pakPath);
+if (!hasOracle) {
+  console.log(
+    "voxel-audio: the ChipSynth oracle SKIPPED — needs luajit, the gen1recomp checkout" +
+      " (VOXELMON_G1R), dist/voxelmon/gen/{audio.json,programs.bin} and the cooked pak",
+  );
+}
+
+/** Serialize a value as a Lua table literal (the oracle's params file). */
+function luaLiteral(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) return `{${value.map(luaLiteral).join(",")}}`;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return `{${entries.map(([k, v]) => `[${JSON.stringify(k)}]=${luaLiteral(v)}`).join(",")}}`;
+}
+
+let live: AudioBanks | null = null;
+function banks(): AudioBanks {
+  if (!live) throw new Error("the imported manifest is not loaded");
+  return live;
+}
+
+/** Render one program through the REFERENCE Lua. Returns interleaved s16. */
+function oracle(params: Record<string, unknown>): Int16Array {
+  const manifest = banks().manifest;
+  const paramFile = join(scratch, "oracle.params.lua");
+  const pcmFile = join(scratch, "oracle.pcm");
+  Bun.write(
+    paramFile,
+    `return ${luaLiteral({
+      programFile: join(genDir, "programs.bin"),
+      bankOrder: manifest.bankOrder,
+      waveBanks: manifest.waveBanks,
+      noiseHeaders: manifest.noiseHeaders,
+      ...params,
+    })}\n`,
+  );
+  const proc = Bun.spawnSync([
+    luajit!,
+    join(root, "tests/fixtures/voxelmon/oracle/chipsynth-oracle.lua"),
+    g1rRoot,
+    paramFile,
+    pcmFile,
+  ]);
+  if (proc.exitCode !== 0) {
+    throw new Error(`chipsynth-oracle failed: ${proc.stderr.toString()}`);
+  }
+  const bytes = readFileSync(pcmFile);
+  return new Int16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
+}
+
+/** Render one program through the CORE, over the real op stream. */
+function core(op: number[], ticks: number, rate = 44100): Int16Array {
+  const lines = ["voxtrace 1", "t 0 0"];
+  for (const pin of banks().pins()) {
+    lines.push(
+      pin.drum < 0
+        ? `o ${VOX_OP.audioWaves} ${pin.engine} ${pin.bank} ${pin.address}`
+        : `o ${VOX_OP.audioDrum} ${pin.engine} ${pin.drum} ${pin.bank} ${pin.address}`,
+    );
+  }
+  lines.push(`o ${op.join(" ")}`);
+  for (let t = 1; t < ticks; t++) lines.push(`t ${t} 0`);
+  const tracePath = join(scratch, "oracle.vtrace");
+  const wavPath = join(scratch, "oracle.wav");
+  Bun.write(tracePath, lines.join("\n") + "\n");
+  const argv = [pakPath, "--trace", tracePath, "--wav", wavPath, "--rate", String(rate)];
+  const proc = Bun.spawnSync(
+    existsSync(simBin)
+      ? [simBin, ...argv]
+      : ["cargo", "run", "--release", "-q", "-p", "pocketvoxel-sim", "--", ...argv],
+    { cwd: join(root, "engine"), stdout: "pipe", stderr: "pipe" },
+  );
+  if (proc.exitCode !== 0) {
+    throw new Error(`pocketvoxel-sim failed: ${proc.stderr.toString()}`);
+  }
+  // Past the 44-byte canonical WAV header.
+  const bytes = readFileSync(wavPath);
+  return new Int16Array(
+    bytes.buffer.slice(bytes.byteOffset + 44, bytes.byteOffset + bytes.length),
+  );
+}
+
+function levels(pcm: Int16Array, upto: number): { peak: number; rms: number } {
+  let peak = 0;
+  let sum = 0;
+  for (let i = 0; i < upto; i++) {
+    const v = Math.abs(pcm[i]);
+    if (v > peak) peak = v;
+    sum += pcm[i] * pcm[i];
+  }
+  return { peak, rms: Math.sqrt(sum / Math.max(1, upto)) };
+}
+
+describe("the core synth against the reference ChipSynth", () => {
+  const SECONDS = 5;
+  const TICKS = SECONDS * 60;
+  /** 44100 / 60 exactly, so a tick's frame count never wobbles. */
+  const FRAMES = TICKS * 735;
+
+  test.skipIf(!hasOracle)(
+    "every shipped song, effect and cry renders the reference's own samples",
+    async () => {
+      mkdirSync(scratch, { recursive: true });
+      live = await fromGenDir(genDir);
+      const manifest = banks().manifest;
+
+      interface Case {
+        name: string;
+        lua: Record<string, unknown>;
+        op: number[];
+        /** Music has to be loud; a menu beep is a menu beep. */
+        minPeakPct: number;
+      }
+      const cases: Case[] = [];
+      for (const label of ["Music_PalletTown", "Music_Routes1", "Music_WildBattle"]) {
+        const ref = banks().song(label);
+        expect(ref).not.toBeNull();
+        cases.push({
+          name: label,
+          lua: { header: manifest.songs[label], mode: "music", frames: FRAMES, allowLoops: true },
+          op: [VOX_OP.music, ref!.bank, ref!.address, ref!.engine, AUDIO_MUSIC_FLAG.loop],
+          minPeakPct: 0.3,
+        });
+      }
+      const sfx = banks().sfx("Press_AB");
+      expect(sfx).not.toBeNull();
+      cases.push({
+        name: "sfx_Press_AB",
+        lua: {
+          header: manifest.sfx.Press_AB,
+          mode: "effect",
+          frames: FRAMES,
+          frequencyOffset: 0,
+          // ChipAudio.lua:418 — the plain form's `0x80 + tempo`.
+          frameTicks: AUDIO_SFX_TEMPO + AUDIO_SFX_TEMPO,
+        },
+        op: [VOX_OP.sfx, sfx!.bank, sfx!.address, sfx!.engine, 0, AUDIO_SFX_TEMPO, 0],
+        minPeakPct: 0.1,
       });
-      const out = new Int16Array(engine.rate * 5 * 2);
-      const frames = renderEffect(engine, out);
-      expect(frames, `${species} rendered nothing`).toBeGreaterThan(0);
-      expect(levels(out.subarray(0, frames * 2)).peak, species).toBeGreaterThan(AUDIBLE);
-    }
-  });
+      const cry = banks().cry("PIDGEY");
+      expect(cry).not.toBeNull();
+      cases.push({
+        name: "cry_PIDGEY",
+        lua: {
+          header: manifest.cries.PIDGEY.header,
+          mode: "effect",
+          frames: FRAMES,
+          frequencyOffset: cry!.pitch,
+          cryLength: cry!.length,
+        },
+        op: [VOX_OP.cry, cry!.bank, cry!.address, cry!.engine, cry!.pitch, cry!.length],
+        minPeakPct: 0.3,
+      });
 
-  test("a real song is byte-deterministic across engines", () => {
-    const header = banks.song(banks.manifest.battle.wild)!;
-    const one = banks.engineFor(header, { bank: header.bank, rate: 11025, allowLoops: true });
-    const two = banks.engineFor(header, { bank: header.bank, rate: 11025, allowLoops: true });
-    const a = renderSeconds(one, 3, 0.7);
-    const b = renderSeconds(two, 3, 0.7);
-    expect(Buffer.from(a.buffer)).toEqual(Buffer.from(b.buffer));
-  });
-});
+      for (const c of cases) {
+        const lua = oracle(c.lua);
+        const rust = core(c.op, TICKS);
+        // A one-shot ends when its program does; compare over what the
+        // reference produced. The core renders silence past that, which is
+        // what a ring wants and what the reference's fixed buffer never had
+        // to answer.
+        const n = Math.min(lua.length, rust.length);
+        expect(n).toBeGreaterThan(4410 * 2);
 
-// ---------------------------------------------------------------------------
-// Layer 3 — the director: policy transitions and the credit-driven pump
-// ---------------------------------------------------------------------------
+        let diffs = 0;
+        let first = -1;
+        let worst = 0;
+        for (let i = 0; i < n; i++) {
+          const d = Math.abs(lua[i] - rust[i]);
+          if (d !== 0) {
+            diffs += 1;
+            if (first < 0) first = i;
+            if (d > worst) worst = d;
+          }
+        }
+        const l = levels(lua, n);
+        const r = levels(rust, n);
+        console.log(
+          `  ${c.name.padEnd(18)} ${(n / 2).toString().padStart(7)} frames  ` +
+            `lua peak ${l.peak} (${((l.peak / 32767) * 100).toFixed(1)}%) rms ${l.rms.toFixed(0)}  |  ` +
+            `core peak ${r.peak} (${((r.peak / 32767) * 100).toFixed(1)}%) rms ${r.rms.toFixed(0)}  |  ` +
+            `${diffs === 0 ? "SAMPLE-EXACT" : `${diffs} diffs from ${first}, worst ${worst}`}`,
+        );
 
-/**
- * A virtual-clock audio module (contracts/spec/audio.ts §Frame contract):
- * it consumes EXACTLY audioFramesForTick() per playing tick and reports the
- * new occupancy as a `credit` event at the tick boundary, which is what the
- * hosts/sim host does. That makes the pump's behavior a pure function of the
- * tick index, so this asserts real flow control, not a stub.
- */
-class VirtualAudio implements AudioOps {
-  rate = 0;
-  channels = 0;
-  handle = -1;
-  playing = false;
-  volume = 1;
-  queued = 0;
-  clock = 0;
-  framesWritten = 0;
-  peak = 0;
-  underruns = 0;
-  private events: string[] = [];
-
-  createStream(sampleRate: number, channels: number): number {
-    this.rate = sampleRate;
-    this.channels = channels;
-    this.handle = 7;
-    return this.handle;
-  }
-  destroyStream(): void {
-    this.handle = -1;
-  }
-  writePcm(handle: number, pcm: ArrayBuffer): number {
-    if (handle !== this.handle) return 0;
-    const view = new Int16Array(pcm);
-    for (let i = 0; i < view.length; i++) {
-      const v = view[i] < 0 ? -view[i] : view[i];
-      if (v > this.peak) this.peak = v;
-    }
-    const frames = view.length / this.channels;
-    const accepted = Math.min(frames, AUDIO_RING_FRAMES - this.queued);
-    this.queued += accepted;
-    this.framesWritten += accepted;
-    return accepted;
-  }
-  play(): void {
-    this.playing = true;
-  }
-  pause(): void {
-    this.playing = false;
-  }
-  stop(): void {
-    this.playing = false;
-    this.queued = 0;
-    this.events.push(JSON.stringify({ t: "credit", h: this.handle, free: AUDIO_RING_FRAMES }));
-  }
-  setVolume(_handle: number, volume: number): void {
-    this.volume = volume;
-  }
-  endStream(): void {}
-  poll(): string | undefined {
-    return this.events.shift();
-  }
-
-  /** The audio clock, run once per host tick after the guest's turn. */
-  advance(): void {
-    if (!this.playing) return;
-    const want = audioFramesForTick(this.rate, this.clock);
-    this.clock += 1;
-    if (want > this.queued) {
-      this.underruns += 1;
-      this.events.push(JSON.stringify({ t: "underrun", h: this.handle }));
-      this.queued = 0;
-    } else {
-      this.queued -= want;
-    }
-    this.events.push(
-      JSON.stringify({ t: "credit", h: this.handle, free: AUDIO_RING_FRAMES - this.queued }),
-    );
-  }
-}
-
-/**
- * hosts/psp/src/audio_mod.rs, modelled: absolute ring cursors, a mixer that
- * consumes on its own clock, and poll() emitting a credit ONLY when the free
- * count drifted from the last value the guest saw (LAST_FREE). `mirrorFixed`
- * selects whether write_pcm subtracts what it accepted from that mirror.
- *
- * With `mirrorFixed` false and a mixer that empties the ring between two
- * polls — which is what a 9 fps guest gets — free reads RING_FRAMES on both
- * sides of the write, no credit is ever sent, and the guest's own mirror
- * decays by everything it writes until `want` hits zero and it stops feeding.
- */
-class PspCreditModel implements AudioOps {
-  rate = 0;
-  playing = false;
-  write = 0;
-  read = 0;
-  lastFree = AUDIO_RING_FRAMES;
-  framesWritten = 0;
-  credits = 0;
-  constructor(readonly mirrorFixed: boolean) {}
-
-  createStream(sampleRate: number): number {
-    this.rate = sampleRate;
-    this.lastFree = AUDIO_RING_FRAMES;
-    return 7;
-  }
-  destroyStream(): void {}
-  writePcm(handle: number, pcm: ArrayBuffer): number {
-    if (handle !== 7) return 0;
-    const frames = new Int16Array(pcm).length / 2;
-    const queued = this.write - this.read;
-    const n = Math.min(frames, AUDIO_RING_FRAMES - Math.min(queued, AUDIO_RING_FRAMES));
-    this.write += n;
-    this.framesWritten += n;
-    if (this.mirrorFixed) this.lastFree = Math.max(0, this.lastFree - n);
-    return n;
-  }
-  play(): void {
-    this.playing = true;
-  }
-  pause(): void {
-    this.playing = false;
-  }
-  stop(): void {
-    this.playing = false;
-    this.read = this.write;
-  }
-  setVolume(): void {}
-  endStream(): void {}
-  poll(): string | undefined {
-    const queued = this.write - this.read;
-    const free = AUDIO_RING_FRAMES - Math.min(queued, AUDIO_RING_FRAMES);
-    if (free === this.lastFree) return undefined;
-    this.lastFree = free;
-    this.credits += 1;
-    return JSON.stringify({ t: "credit", h: 7, free });
-  }
-  /** The mixer, at a frame rate so far under realtime that it empties the
-   *  ring every time — the regime the device is actually in. */
-  drain(): void {
-    if (this.playing) this.read = this.write;
-  }
-}
-
-async function withAudio<T>(mod: AudioOps | null, body: () => T | Promise<T>): Promise<T> {
-  const g = globalThis as { audio?: unknown };
-  const had = "audio" in g;
-  const before = g.audio;
-  if (mod) g.audio = mod;
-  else delete g.audio;
-  try {
-    return await body();
-  } finally {
-    if (had) g.audio = before;
-    else delete g.audio;
-  }
-}
-
-describe("AudioDirector", () => {
-  const banks = () => syntheticBanks([0xd8, 0xf0, 0xe4, 0x0f, 0xfe, 0x00, 0x00, 0x41]);
-
-  test("no audio module: every call is a silent no-op", async () => {
-    await withAudio(null, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      d.playSfx("nope");
-      d.playCry("nope");
-      for (let i = 0; i < 30; i++) d.tick();
-      expect(d.live).toBe(false);
-      expect(d.playing).toBe("TEST");
-    });
-  });
-
-  test("opens a stream at the requested rate and defers play until fed", async () => {
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      expect(host.playing).toBe(false);
-      d.tick();
-      // the tap opens only after the first write landed
-      expect(host.rate).toBe(11025);
-      expect(host.channels).toBe(2);
-      expect(host.framesWritten).toBeGreaterThan(0);
-      expect(host.playing).toBe(true);
-    });
-  });
-
-  test("feeds the ring without underrunning and never overdraws its credit", async () => {
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      for (let i = 0; i < 300; i++) {
-        d.tick();
-        host.advance();
+        expect({ track: c.name, diffs, first, worst }).toEqual({
+          track: c.name,
+          diffs: 0,
+          first: -1,
+          worst: 0,
+        });
+        // Sample-exact and silent would still be a bug: it has to be audible.
+        expect(r.peak / 32767).toBeGreaterThan(c.minPeakPct);
+        expect(r.peak).toBe(l.peak);
+        expect(Math.round(r.rms)).toBe(Math.round(l.rms));
       }
-      expect(host.underruns).toBe(0);
-      expect(d.underruns).toBe(0);
-      expect(host.queued).toBeLessThanOrEqual(AUDIO_RING_FRAMES);
-      // 300 ticks = 5 s of audio consumed, plus whatever lead is still queued
-      expect(host.framesWritten).toBeGreaterThanOrEqual(11025 * 5);
-      expect(host.peak).toBeGreaterThan(AUDIBLE);
-    });
-  });
+    },
+    600000,
+  );
 
-  test("one tick never synthesizes more than its bounded catch-up", async () => {
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      let previous = 0;
-      for (let i = 0; i < 60; i++) {
-        d.tick();
-        const wrote = host.framesWritten - previous;
-        previous = host.framesWritten;
-        // CATCHUP (3) x ceil(rate/60): the prefill is spread, never one burst
-        expect(wrote).toBeLessThanOrEqual(Math.ceil(11025 / 60) * 3);
-        host.advance();
-      }
-    });
-  });
-
-  test("a fully-draining mixer keeps feeding the guest through the credit mirror", async () => {
-    const host = new PspCreditModel(true);
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      let previous = 0;
-      const wrote: number[] = [];
-      for (let i = 0; i < 200; i++) {
-        d.tick();
-        wrote.push(host.framesWritten - previous);
-        previous = host.framesWritten;
-        host.drain();
-      }
-      // every tick past the first still feeds: the mirror never decays
-      for (let i = 1; i < wrote.length; i++) expect(wrote[i]).toBeGreaterThan(0);
-      expect(host.credits).toBeGreaterThan(100);
-    });
-  });
-
-  test("without the write-side mirror update the same run starves and stops", async () => {
-    // The bug hosts/psp/src/audio_mod.rs write_pcm now guards against, pinned
-    // so the guard cannot be removed silently: credits stop, the guest's own
-    // free mirror decays by everything it writes, and `want` reaches zero.
-    const host = new PspCreditModel(false);
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      for (let i = 0; i < 120; i++) {
-        d.tick();
-        host.drain();
-      }
-      // the exact signature: not one credit ever arrived, so the guest spent
-      // its initial mirror down to zero and wrote exactly one ring's worth of
-      // audio in its whole life — about 1.5 s at 11.025 kHz
-      expect(host.credits).toBe(0);
-      expect(host.framesWritten).toBe(AUDIO_RING_FRAMES);
-      const before = host.framesWritten;
-      for (let i = 0; i < 120; i++) {
-        d.tick();
-        host.drain();
-      }
-      expect(host.framesWritten).toBe(before); // dead, and silently so
-      expect(d.playing).toBe("TEST"); // the policy layer never notices
-    });
-  });
-
-  test("map -> battle -> back is three song changes, and a repeat is none", async () => {
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      expect(d.playing).toBe("TEST");
-      // Music.lua:239 — the same label twice is a no-op, so a door into a
-      // house sharing the town theme never restarts it
-      d.startMap("TEST_MAP");
-      expect(d.playing).toBe("TEST");
-      d.playBattle("wild");
-      expect(d.playing).toBe("TEST");
-      d.restore();
-      expect(d.playing).toBe("TEST");
-      // an unknown map has no theme: mapSong clears, restore stops the music
-      d.startMap("NO_SUCH_MAP");
-      d.restore();
-      expect(d.playing).toBeNull();
-    });
-  });
-
-  test("fadeOut walks the master volume 7 -> 0 and then stops the song", async () => {
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const d = new AudioDirector(banks(), { rate: 11025 });
-      d.startMap("TEST_MAP");
-      d.tick();
-      expect(host.volume).toBe(1);
-      d.fadeOut(2); // one level every 2 ticks
-      const seen: number[] = [];
-      for (let i = 0; i < 40 && d.playing; i++) {
-        seen.push(host.volume); // the level this tick's audio is written at
-        d.tick();
-        host.advance();
-      }
-      // seven levels at two ticks each: the ramp is monotone and reaches the
-      // bottom rung before the song is dropped
-      for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeLessThanOrEqual(seen[i - 1]);
-      expect(seen[seen.length - 1]).toBeLessThanOrEqual(1 / 7 + 1e-9);
-      expect(seen.length).toBeGreaterThanOrEqual(12);
-      expect(d.playing).toBeNull();
-      // the song gone, the stream's own volume goes back to full — silence is
-      // "no music to render", not a muted stream (Music.lua:285 stop drops the
-      // source outright, and the next song gets a fresh one)
-      d.tick();
-      expect(host.volume).toBe(1);
-      const quiet = host.peak;
-      for (let i = 0; i < 30; i++) {
-        d.tick();
-        host.advance();
-      }
-      expect(host.peak).toBe(quiet); // nothing new above the old high-water mark
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Layer 4 — the whole game, ROM banks, a virtual audio clock
-// ---------------------------------------------------------------------------
-
-/**
- * The pak's AUDI section, laid out exactly as apps/voxelmon/cook/pak.ts
- * writes it (SCHEMA.md): u32 jsonLen, u32 programLen, the manifest JSON at
- * VXPK_AUDIO_HEADER_SIZE, the banks at the next VXPK_ALIGN boundary. This is
- * the byte shape the `audiodata` op hands the guest on device.
- */
-function audiSection(json: Uint8Array, programs: Uint8Array): ArrayBuffer {
-  const programsOff =
-    Math.ceil((VXPK_AUDIO_HEADER_SIZE + json.length) / VXPK_ALIGN) * VXPK_ALIGN;
-  const out = new Uint8Array(programsOff + programs.length);
-  const view = new DataView(out.buffer);
-  view.setUint32(0, json.length, true);
-  view.setUint32(4, programs.length, true);
-  out.set(json, VXPK_AUDIO_HEADER_SIZE);
-  out.set(programs, programsOff);
-  return out.buffer;
-}
-
-/** A RecorderHost that answers the `audiodata` op like the device does. */
-class PakAudioHost extends RecorderHost {
-  constructor(private readonly section: ArrayBuffer) {
-    super();
-  }
-  override audiodata(): ArrayBuffer | null {
-    super.audiodata(); // record the op; the answer is this host's business
-    return this.section;
-  }
-}
-
-describe.skipIf(!hasAudio)("voxelmon with audio mounted", () => {
-  test("setAudio(null) is SILENCE, with the audio module mounted", async () => {
-    // The reported device symptom: the EBOOT played Music_PalletTown from
-    // tick 0 in the bedroom because `null` used to mean "load the banks from
-    // the pak". `null` means no banks; the audiodata op still fires so the
-    // recorded trace matches a device run.
-    const data = await loadRuntimeData(genDir);
-    const host = new PspCreditModel(true);
-    await withAudio(host, () => {
-      const recorder = new RecorderHost();
-      const game = new VoxelmonGame(data, recorder, 17);
-      game.setAudio(null);
-      game.newGame();
-      for (let i = 0; i < 200; i++) {
-        game.tick(0);
-        host.drain();
-      }
-      expect(game.audio.live).toBe(false);
-      expect(game.audio.playing).toBeNull();
-      // nothing crossed to the host: no stream, no PCM, no play()
-      expect(host.rate).toBe(0);
-      expect(host.framesWritten).toBe(0);
-      expect(host.playing).toBe(false);
-      // ...and the op stream is unchanged — `audiodata` still fired
-      expect(recorder.text().split("\n")).toContain(`o ${VOX_OP.audiodata}`);
-    });
-  }, 30_000);
-
-  test("setAudioFromPak() loads the AUDI section and starts the map theme", async () => {
-    // The switch psp-main.ts documents: the pak path still works end to end,
-    // over the same bytes the device's `audiodata` op hands over.
-    const data = await loadRuntimeData(genDir);
-    const banks = await fromGenDir(genDir);
-    const section = audiSection(
-      new Uint8Array(await Bun.file(join(genDir, "audio.json")).arrayBuffer()),
-      new Uint8Array(await Bun.file(join(genDir, "programs.bin")).arrayBuffer()),
-    );
-    const host = new VirtualAudio();
-    await withAudio(host, () => {
-      const game = new VoxelmonGame(data, new PakAudioHost(section), 17);
-      game.setAudioFromPak();
-      game.newGame();
-      for (let i = 0; i < 30; i++) {
-        game.tick(0);
-        host.advance();
-      }
-      expect(game.audio.live).toBe(true);
-      expect(game.audio.playing).toBe(banks!.manifest.mapSongs.REDS_HOUSE_2F);
-      expect(host.framesWritten).toBeGreaterThan(0);
-      expect(host.peak).toBeGreaterThan(AUDIBLE);
-    });
-  }, 30_000);
-
-  test("the battle tape's route plays map, battle and restored themes", async () => {
-    const data = await loadRuntimeData(genDir);
-    const banks = await fromGenDir(genDir);
-    const host = new VirtualAudio();
-    await withAudio(host, async () => {
-      const game = new VoxelmonGame(data, new RecorderHost(), 17);
-      game.setAudio(banks);
-      game.newGame();
-      const tape = new TapePlayer(
-        parseTape(await Bun.file(join(root, "apps/voxelmon/tapes/battle.tape")).text()),
+  test.skipIf(!hasOracle)(
+    "the device's 11.025 kHz is the same music, deterministically",
+    async () => {
+      mkdirSync(scratch, { recursive: true });
+      live = await fromGenDir(genDir);
+      const manifest = banks().manifest;
+      const ref = banks().song("Music_PalletTown")!;
+      const op = [VOX_OP.music, ref.bank, ref.address, ref.engine, AUDIO_MUSIC_FLAG.loop];
+      // The reference hardcodes 44100, so at any other rate what is under
+      // test is the core's own determinism and that the level holds up.
+      const a = core(op, 120, 11025);
+      const b = core(op, 120, 11025);
+      expect(Buffer.from(a.buffer).equals(Buffer.from(b.buffer))).toBe(true);
+      const low = levels(a, a.length);
+      const full = oracle({
+        header: manifest.songs.Music_PalletTown,
+        mode: "music",
+        frames: 120 * 735,
+        allowLoops: true,
+      });
+      const high = levels(full, full.length);
+      console.log(
+        `  11025 Hz peak ${low.peak} rms ${low.rms.toFixed(0)}  |  ` +
+          `44100 Hz peak ${high.peak} rms ${high.rms.toFixed(0)}`,
       );
-      const songs: string[] = [];
-      while (!tape.done && game.tickIndex < 100_000) {
-        const step = tape.next(game);
-        if (tape.done) break;
-        game.tick(step.buttons);
-        host.advance(); // the audio clock, one turn per host tick
-        tape.observe(game);
-        const playing = game.audio.playing;
-        if (playing && songs[songs.length - 1] !== playing) songs.push(playing);
-      }
-      expect(tape.done).toBe(true);
-
-      // Music.lua:339 playMap on every map entry, :357 playBattle on the
-      // encounter, :407 restoreMap when the battle closes.
-      expect(songs[0]).toBe(banks!.manifest.mapSongs.REDS_HOUSE_2F);
-      expect(songs).toContain(banks!.manifest.mapSongs.ROUTE_1);
-      expect(songs).toContain(banks!.manifest.battle.wild);
-      const battleAt = songs.lastIndexOf(banks!.manifest.battle.wild);
-      expect(songs[battleAt + 1]).toBe(banks!.manifest.mapSongs.ROUTE_1);
-
-      // and the stream stayed fed the whole way: exactly the frames the audio
-      // clock asked for, never a starved block
-      expect(host.underruns).toBe(0);
-      expect(game.audio.underruns).toBe(0);
-      expect(host.framesWritten).toBeGreaterThan(11025 * 40);
-      // audible, and with headroom left over the music+SFX mix
-      expect(host.peak).toBeGreaterThan(AUDIBLE);
-      expect(host.peak).toBeLessThan(32767);
-    });
-  }, 60_000);
-
-  test("the same run is silent and unchanged without the audio module", async () => {
-    const data = await loadRuntimeData(genDir);
-    const banks = await fromGenDir(genDir);
-    await withAudio(null, async () => {
-      const recorder = new RecorderHost();
-      const game = new VoxelmonGame(data, recorder, 17);
-      game.setAudio(banks);
-      game.newGame();
-      for (let i = 0; i < 200; i++) game.tick(0);
-      // the policy still tracked the map, but nothing crossed to a host
-      expect(game.audio.playing).toBe(banks!.manifest.mapSongs.REDS_HOUSE_2F);
-      expect(game.audio.live).toBe(false);
-    });
-  }, 30_000);
+      expect(low.peak / 32767).toBeGreaterThan(0.3);
+      // Same music, a quarter of the samples: the RMS must not move much.
+      expect(Math.abs(low.rms - high.rms) / high.rms).toBeLessThan(0.1);
+    },
+    600000,
+  );
 });

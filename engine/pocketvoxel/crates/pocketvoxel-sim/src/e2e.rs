@@ -4,10 +4,15 @@
 
 use pocketvoxel_core::pak::builder::{ChunkDef, PakBuilder};
 use pocketvoxel_core::pak::{self, AlignedBlob, MeshRange, PakVert};
-use pocketvoxel_core::spec::atlas_kind;
+use pocketvoxel_core::spec::{atlas_kind, quality_tier};
 
 use crate::raster::AtlasCache;
 use crate::trace;
+
+/// The rung these fixtures replay on. The e2e pak's chunk carries terrain
+/// only, so no dial of any rung can move its pixels — the rung is stated
+/// anyway so a later dial that WOULD move them shows up here as a diff.
+const QUALITY: u8 = quality_tier::DESKTOP;
 
 /// A small but complete pak: ground chunk, walk-sheet page, UI glyphs.
 fn build_pak() -> Vec<u8> {
@@ -96,8 +101,8 @@ fn tape_replay_is_deterministic() {
     let cache = AtlasCache::new(&pak);
     let entries = trace::parse(TAPE).unwrap();
 
-    let run1 = trace::run(&pak, &cache, &entries, |_, _| {}).unwrap();
-    let run2 = trace::run(&pak, &cache, &entries, |_, _| {}).unwrap();
+    let run1 = trace::run(&pak, &cache, &entries, QUALITY, None, |_, _| {}).unwrap();
+    let run2 = trace::run(&pak, &cache, &entries, QUALITY, None, |_, _| {}).unwrap();
     assert_eq!(run1, run2, "same tape, same hashes — the golden contract");
     assert_eq!(run1.len(), 2);
     assert_eq!(run1[0].0, "boot");
@@ -106,7 +111,7 @@ fn tape_replay_is_deterministic() {
 
     // The ops changed the frame relative to an empty scene.
     let empty = trace::parse("voxtrace 1\nt 0 0\nm boot\n").unwrap();
-    let base = trace::run(&pak, &cache, &empty, |_, _| {}).unwrap();
+    let base = trace::run(&pak, &cache, &empty, QUALITY, None, |_, _| {}).unwrap();
     assert_ne!(base[0].1, run1[0].1, "the diorama actually rendered");
 }
 
@@ -118,7 +123,7 @@ fn sgb_palette_recolors_non_ui_kinds() {
     let cache = AtlasCache::new(&pak);
     let hash = |tape: &str| {
         let entries = trace::parse(tape).unwrap();
-        trace::run(&pak, &cache, &entries, |_, _| {}).unwrap()[0].1
+        trace::run(&pak, &cache, &entries, QUALITY, None, |_, _| {}).unwrap()[0].1
     };
 
     let gray = hash("voxtrace 1\nt 0 0\no 10 0 7 0 0\no 12 1024 1088\nm f\n");
@@ -153,6 +158,9 @@ fn cli_hashes_shots_and_assert() {
         hashes: Some(hashes_path.clone()),
         assert,
         validate: false,
+        wav: None,
+        rate: 44100,
+        quality: QUALITY,
     };
     assert_eq!(crate::run(&args(false)), Ok(true), "record run succeeds");
     let png = std::fs::read(shots_dir.join("boot.png")).expect("shot written");

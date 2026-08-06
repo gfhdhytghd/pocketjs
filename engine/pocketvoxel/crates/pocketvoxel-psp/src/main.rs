@@ -7,8 +7,13 @@
 //! Per frame (one guest turn per tick, §3/§7):
 //!   pad → `frame(buttons)` in QuickJS (the TypeScript gameplay port; its
 //!   ops apply synchronously into the shared Scene through `voxel.*`) →
-//!   microtasks → `scene.tick()` → `draw::build` → [pipelined present] →
-//!   sceGuStart → gu renderer → sceGuFinish.
+//!   microtasks → `audio_pump` → `scene.tick()` → `draw::build` →
+//!   [pipelined present] → sceGuStart → gu renderer → sceGuFinish.
+//!
+//! Sound leaves through the audio MODULE (contracts/spec/audio.ts), not the
+//! `voxel` surface: the guest emits audio intent as ops, the core's chip
+//! synth interprets the pak's channel programs, and `audio_pump` renders the
+//! ring's frames on this side of the JS boundary.
 //!
 //! Boot skeleton follows openstrike-psp/main.rs (1 MB VFPU worker thread,
 //! arena allocator installed by linking pocketjs-psp, full 333 MHz clocks —
@@ -36,9 +41,11 @@ mod capture;
 use core::ffi::c_void;
 
 use libquickjs_sys::*;
-use pocketjs_psp::{arena, host};
+use pocketjs_core::spec::audio as audio_spec;
+use pocketjs_psp::{arena, audio_mod, host};
 use pocketvoxel_core::draw;
 use pocketvoxel_core::pak;
+use pocketvoxel_core::scene::Scene;
 use pocketvoxel_core::spec;
 use pocketvoxel_gu as gu;
 use psp::sys::{
@@ -62,6 +69,66 @@ const PAK_PATHS: [&[u8]; 2] = [
 /// The analog stick reads 0..255 with 128 at rest; this much off-centre
 /// counts as a direction (a well-used nub does not sit exactly at centre).
 const NUB_DEADZONE: i32 = 48;
+
+// ---------------------------------------------------------------------------
+// Audio: the chip synth's output rate and the ring pump's budget
+// ---------------------------------------------------------------------------
+
+/// The rate the core interprets channel programs at, and the rate this EBOOT
+/// pumps the audio module's ring at.
+///
+/// 11025 divides 44100 exactly, so the module's mixer upsamples it x4 with
+/// integer steps and the PSP's own resampler (which sizzles — hosts/psp/src/
+/// audio.rs) never runs. Of the three AUDIO_RATES it is also the cheapest by
+/// a factor of four: the synth's cost is per SAMPLE, 184 frames a tick
+/// against 44.1 kHz's 735. A tick's worth measures ~6.5 us on desktop, which
+/// extrapolates to 0.2-0.4 ms on the 333 MHz part — 1-2.5% of the 16.7 ms
+/// frame, and not yet timed on hardware. What it costs is bandwidth above
+/// 5.5 kHz;
+/// tests/voxel-audio.test.ts pins that the same song at 11.025 kHz holds its
+/// RMS within 10% of the 44.1 kHz reference render, so the trade is measured
+/// rather than assumed. (Sample-exactness against gen1recomp is a 44.1 kHz
+/// claim — the reference hardcodes that rate — and the sim's `--wav` captures
+/// there; this is the device rate, not the oracle's.)
+const AUDIO_RATE: u32 = 11025;
+
+/// Frames the audio clock eats per tick, rounded up (11025/60 = 183.75).
+const AUDIO_FRAMES_PER_TICK: usize = (AUDIO_RATE as usize).div_ceil(60);
+
+/// How far ahead of the audio clock the ring is kept: 100 ms absorbs a slow
+/// tick (a map load, a GC) without wasting synthesis on music the next map
+/// change discards. The ring holds 16384 frames — 1.5 s at this rate — so
+/// this is a lead, not a limit.
+const AUDIO_LEAD_FRAMES: usize = AUDIO_RATE as usize / 10;
+
+/// Ceiling on frames rendered in ONE tick: three ticks' worth, 552 frames.
+/// Reaching the lead then takes a few ticks instead of one, which is what
+/// bounds the worst tick — at the extrapolated 1.1-2.2 us per frame that is
+/// 0.6-1.2 ms, where an uncapped catch-up after a long stall could ask for
+/// the ring's whole 16384.
+const AUDIO_CATCHUP_TICKS: usize = 3;
+const AUDIO_MAX_FRAMES: usize = AUDIO_FRAMES_PER_TICK * AUDIO_CATCHUP_TICKS;
+
+/// The render buffer, sized for the worst tick and living in bss — the frame
+/// loop must not allocate, and the arena's bump is what the GC heuristic
+/// watches. 552 stereo frames = 2208 bytes.
+static mut AUDIO_PCM: [i16; AUDIO_MAX_FRAMES * 2] = [0; AUDIO_MAX_FRAMES * 2];
+/// The module stream, or -1 before it is opened.
+static mut AUDIO_HANDLE: i32 = -1;
+/// A refused stream is refused for the run (no channel to reserve): asking
+/// again every tick would reserve-and-fail 60 times a second.
+static mut AUDIO_REFUSED: bool = false;
+/// This side's mirror of the ring's free frames (contracts/spec/audio.ts
+/// §frame contract): reset by every `credit` event, decremented by what each
+/// write accepts, so the hot path never queries the module.
+static mut AUDIO_FREE: usize = audio_spec::RING_FRAMES;
+/// Ticks the stream has been fed — the `audioFramesForTick` index.
+static mut AUDIO_CLOCK: u32 = 0;
+/// The tap opens only once the ring has something in it (the
+/// play-deferred-until-fed rule, framework/src/audio-api.ts).
+static mut AUDIO_STARTED: bool = false;
+/// Starved episodes, edge-counted. Reported once, the first time.
+static mut AUDIO_UNDERRUNS: u32 = 0;
 
 // The linked QuickJS C library provides these; libquickjs-sys omits them
 // (the established local-extern pattern, hosts/psp/src/main.rs).
@@ -202,11 +269,16 @@ unsafe fn run() {
     // 'static it carries is honest.
     voxel::init(pak.game);
     // The chip synth's banks (pak AUDI section) reach the guest through the
-    // `audiodata` op. The op always answers; the guest decides whether to
-    // decode it, and psp-main.ts does not (audio is off on device — the
-    // interpreted synth cannot reach realtime here). Mounting the data is a
-    // host capability, not a host policy.
+    // `audiodata` op: the manifest half tells the guest which bank and address
+    // a song lives at, and the program half stays in the pak, where the core
+    // reads it. Mounting the data is a host capability, not a host policy —
+    // the guest decides whether to decode it.
     voxel::set_audio(pak.audio);
+    // The synth's output rate for the whole run, set before any audio op can
+    // reach the core (changing it later drops what is playing, because every
+    // event's span is measured in samples). Cannot fail for a rate that
+    // divides 44100, which AUDIO_RATE does by construction.
+    let _ = voxel::scene().audio.set_rate(AUDIO_RATE);
 
     // ---- QuickJS ----
     let rt = pocketjs_psp::qjs_alloc::new_runtime();
@@ -289,8 +361,13 @@ unsafe fn run() {
         let _ = gc_us; // a capture build keeps no telemetry
 
         // Core frame: the ops applied during frame() already sit in the
-        // scene; advance the tick clock once.
+        // scene. This tick's PCM first — the audio ops of the tick that just
+        // ran are applied by the render, and the fade walks on the clock —
+        // then advance the tick clock once. Same order as the sim's replay
+        // (pocketvoxel-sim/src/trace.rs `close!`), so what a .vtrace records
+        // and what the console plays come from the same sequence.
         let scene = voxel::scene();
+        audio_pump(scene, &pak);
         scene.tick();
 
         // ---- PIPELINED PRESENT: the GE has been executing frame N-1's
@@ -315,6 +392,20 @@ unsafe fn run() {
             sys::sceKernelDcacheWritebackAll();
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
             let t_kicked = sys::sceKernelGetSystemTimeLow();
+            #[cfg(feature = "telemetry")]
+            {
+                let (mut tris, mut draws) = (0u32, 0u32);
+                for it in &list.items {
+                    if let pocketvoxel_core::draw::Item::ChunkMesh { mesh, .. }
+                        | pocketvoxel_core::draw::Item::StampMesh { mesh, .. } = it
+                    {
+                        tris += mesh.index_count as u32 / 3;
+                        draws += 1;
+                    }
+                }
+                GEO_TRIS = tris;
+                GEO_DRAWS = draws;
+            }
             #[cfg(feature = "telemetry")]
             perf_sample(
                 frame,
@@ -359,6 +450,122 @@ unsafe fn run() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The PCM pump — one call per tick, between the guest's turn and the clock
+// ---------------------------------------------------------------------------
+
+/// contracts/spec/audio.ts:149 `audioFramesForTick` — the frames the audio
+/// clock consumes during tick `tick`. The floor difference distributes
+/// 11025/60 = 183.75 as 183/184/184/184… with zero drift: any 60 consecutive
+/// ticks sum to exactly the rate. u64 throughout, because `tick * rate`
+/// overflows u32 after under two hours of play.
+fn audio_frames_for_tick(tick: u32) -> usize {
+    let rate = AUDIO_RATE as u64;
+    let tick = tick as u64;
+    (((tick + 1) * rate) / 60 - (tick * rate) / 60) as usize
+}
+
+/// Read a numeric field out of one audio-module event. The module publishes
+/// its facts as the spec's JSON (`{"t":"credit","h":8,"free":16384}`) because
+/// its usual reader is a guest; this pump is native and needs two numbers out
+/// of one shape, so it probes the key rather than linking a parser.
+fn audio_event_number(line: &str, key: &str) -> Option<usize> {
+    let at = line.find(key)? + key.len();
+    let mut value = 0usize;
+    let mut any = false;
+    for &b in &line.as_bytes()[at..] {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        value = value * 10 + (b - b'0') as usize;
+        any = true;
+    }
+    any.then_some(value)
+}
+
+/// Feed this tick's chip-synth PCM to the audio module (hosts/psp/src/
+/// audio_mod.rs), obeying the credit contract in contracts/spec/audio.ts.
+///
+/// The EBOOT is the module's client here, not the guest: psp-main.ts emits
+/// audio INTENT as `voxel.*` ops and never touches `globalThis.audio`, so
+/// there is no PCM on the JS boundary at all. What crosses per tick is a
+/// render straight from the core into a bss buffer and one `write_pcm`.
+///
+/// Shape of a tick:
+///   1. drain the event batch — `credit` resets the free-frame mirror,
+///      `underrun` says the ring starved (the mixer emitted silence for the
+///      gap and resumes on its own when data lands);
+///   2. want = this tick's frames + whatever it takes to reach the 100 ms
+///      lead, capped at three ticks and at the mirror;
+///   3. render exactly `want` frames and write them; the tap opens after the
+///      first accepted write, never before (an empty playing ring is an
+///      underrun by construction).
+///
+/// The stream is opened on the first tick after the guest emits any audio op
+/// — no op, no hardware channel and no mixer thread, so a run with audio off
+/// costs one predictable branch per tick.
+unsafe fn audio_pump(scene: &mut Scene, pak: &pak::Pak<'_>) {
+    // A capture build stays silent: its marks are pixels, its run has to be a
+    // pure function of the tick index, and PPSSPPHeadless has no speaker to
+    // pace a mixer thread against. `cfg!` rather than `#[cfg]` so the pump
+    // still compiles in that build and cannot rot behind the feature.
+    if cfg!(feature = "capture") || AUDIO_REFUSED || !voxel::audio_wanted() {
+        return;
+    }
+    if AUDIO_HANDLE < 0 {
+        AUDIO_HANDLE = audio_mod::create_stream(AUDIO_RATE, 2);
+        if AUDIO_HANDLE < 0 {
+            // No free channel or a rate the module rejects: run silent for
+            // the rest of the session rather than retry 60 times a second.
+            AUDIO_REFUSED = true;
+            psp::dprintln!("[voxelmon] audio: stream refused, running silent");
+            return;
+        }
+        AUDIO_FREE = audio_spec::RING_FRAMES;
+        psp::dprintln!("[voxelmon] audio: {} Hz stereo stream open", AUDIO_RATE);
+    }
+
+    while let Some(event) = audio_mod::poll() {
+        // Every event names its stream, and `globalThis.audio` is mounted for
+        // this realm too: a future guest that opens its own stream must not
+        // reset this pump's mirror with its credit.
+        if audio_event_number(&event, "\"h\":") != Some(AUDIO_HANDLE as usize) {
+            continue;
+        }
+        if let Some(free) = audio_event_number(&event, "\"free\":") {
+            AUDIO_FREE = free;
+        } else if event.contains(audio_spec::EVENT_UNDERRUN) {
+            AUDIO_UNDERRUNS += 1;
+            if AUDIO_UNDERRUNS == 1 {
+                // Once per boot: the first starve is the diagnosis (the pump
+                // fell behind the audio clock), the rest are its echo.
+                psp::dprintln!("[voxelmon] audio: ring starved, refilling");
+            }
+        }
+    }
+
+    let per_tick = audio_frames_for_tick(AUDIO_CLOCK);
+    AUDIO_CLOCK = AUDIO_CLOCK.wrapping_add(1);
+    let queued = audio_spec::RING_FRAMES - AUDIO_FREE.min(audio_spec::RING_FRAMES);
+    let want = (per_tick + AUDIO_LEAD_FRAMES.saturating_sub(queued))
+        .min(AUDIO_MAX_FRAMES)
+        .min(AUDIO_FREE);
+    if want == 0 {
+        return; // the ring is full: this tick's frames are already in it
+    }
+
+    scene.render_audio(pak, want, &mut AUDIO_PCM[..want * 2]);
+    // write_pcm BORROWS the buffer for the call (contracts/spec/audio.ts): it
+    // copies into the ring before returning, so the bss buffer is reused next
+    // tick with no ownership question.
+    let accepted = audio_mod::write_pcm(AUDIO_HANDLE, &AUDIO_PCM[..want * 2]).max(0) as usize;
+    AUDIO_FREE = AUDIO_FREE.saturating_sub(accepted);
+    if !AUDIO_STARTED && accepted > 0 {
+        AUDIO_STARTED = true;
+        audio_mod::play(AUDIO_HANDLE);
+    }
+}
+
 /// Frame-time telemetry, appended to host0:/voxperf.txt (PSPLINK serves it;
 /// an absent host0: fails silently). Two records, because a mean answers a
 /// different question than a frame does:
@@ -383,6 +590,10 @@ unsafe fn run() {
 #[cfg_attr(feature = "capture", allow(dead_code))]
 const BOOT_FRAMES: usize = 120;
 #[cfg_attr(feature = "capture", allow(dead_code))]
+#[cfg(feature = "telemetry")]
+static mut GEO_TRIS: u32 = 0;
+#[cfg(feature = "telemetry")]
+static mut GEO_DRAWS: u32 = 0;
 static mut PERF_WORK: u64 = 0;
 #[cfg_attr(feature = "capture", allow(dead_code))]
 static mut PERF_FRAME: u64 = 0;
@@ -446,8 +657,8 @@ unsafe fn perf_sample(frame: u32, work_us: u32, frame_us: u32, gc_us: u32) {
     let _ = core::fmt::write(
         &mut line,
         format_args!(
-            "f{} work {}us frame {}us max {}us\n",
-            frame, work_mean, frame_mean, worst,
+            "f{} work {}us frame {}us max {}us tris {} draws {}\n",
+            frame, work_mean, frame_mean, worst, GEO_TRIS, GEO_DRAWS,
         ),
     );
     PERF_WORK = 0;

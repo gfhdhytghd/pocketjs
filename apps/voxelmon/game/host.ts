@@ -56,6 +56,27 @@ export interface VoxelHost {
   /** Q8 fixed 0..256 = 0..1 (zoom Q8 x). */
   battleCam(orbit: number, pitch: number, zoom: number): void;
   arenaEnd(): void;
+  // audio (the chip synth: the core interprets the ROM's channel programs)
+  /** `bank` is a BANK SLOT — the index of that ROM bank in the manifest's
+   *  bankOrder — and `addr` the program's GB address inside it. Every
+   *  argument is a number the guest resolved out of the manifest. */
+  music(bank: number, addr: number, engine: number, flags: number): void;
+  musicStop(): void;
+  /** One rAUDVOL level every `ticks` ticks, then the song stops. */
+  musicFade(ticks: number): void;
+  sfx(
+    bank: number,
+    addr: number,
+    engine: number,
+    pitch: number,
+    tempo: number,
+    flags: number,
+  ): void;
+  cry(bank: number, addr: number, engine: number, pitch: number, length: number): void;
+  /** Boot-time: a sound engine's wave-instrument table. */
+  audioWaves(engine: number, bank: number, addr: number): void;
+  /** Boot-time: one drum program of a sound engine. */
+  audioDrum(engine: number, drum: number, bank: number, addr: number): void;
   /** End of one guest turn: exactly once per host tick. */
   frameDone(tick: number, buttons: number): void;
 }
@@ -162,6 +183,34 @@ export class RecorderHost implements VoxelHost {
   }
   arenaEnd(): void {
     this.op(VOX_OP.arenaEnd);
+  }
+  music(bank: number, addr: number, engine: number, flags: number): void {
+    this.op(VOX_OP.music, bank, addr, engine, flags);
+  }
+  musicStop(): void {
+    this.op(VOX_OP.musicStop);
+  }
+  musicFade(ticks: number): void {
+    this.op(VOX_OP.musicFade, ticks);
+  }
+  sfx(
+    bank: number,
+    addr: number,
+    engine: number,
+    pitch: number,
+    tempo: number,
+    flags: number,
+  ): void {
+    this.op(VOX_OP.sfx, bank, addr, engine, pitch, tempo, flags);
+  }
+  cry(bank: number, addr: number, engine: number, pitch: number, length: number): void {
+    this.op(VOX_OP.cry, bank, addr, engine, pitch, length);
+  }
+  audioWaves(engine: number, bank: number, addr: number): void {
+    this.op(VOX_OP.audioWaves, engine, bank, addr);
+  }
+  audioDrum(engine: number, drum: number, bank: number, addr: number): void {
+    this.op(VOX_OP.audioDrum, engine, drum, bank, addr);
   }
 
   frameDone(tick: number, buttons: number): void {

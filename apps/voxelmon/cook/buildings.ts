@@ -15,7 +15,7 @@
 
 import type { Shape } from "./classify.ts";
 import { type Art, type GameMap, mod, type BuildingTemplate, type Profile } from "./data.ts";
-import { keyOf, type Quad, type SGrid } from "./geom.ts";
+import { FACE, type Facing, keyOf, type Quad, type SGrid } from "./geom.ts";
 
 // VoxelMod Buildings.lua:58 — the four GB shades, lightest first.
 const WHITE = 0;
@@ -451,8 +451,9 @@ function emit(m: Model, sp: Sprite): BuiltModel {
     c4: [number, number, number],
     uv: [number, number][],
     shade: number,
+    f: Facing,
   ): void => {
-    quads.push({ c: [c1, c2, c3, c4], uv, shade, own: true });
+    quads.push({ c: [c1, c2, c3, c4], uv, shade, f, own: true });
   };
 
   // How far a run of exposed faces reaches from `x` (Buildings.lua:1055).
@@ -490,6 +491,9 @@ function emit(m: Model, sp: Sprite): BuiltModel {
   // faces along +-Z (the facade, the roof's rims): merge along x
   for (const d of [1, -1]) {
     const shade = d === 1 ? SHADE.south : SHADE.north;
+    // The model's z translates straight to world z at placement (+mz), so a
+    // +z model face IS a south face.
+    const face = d === 1 ? FACE.south : FACE.north;
     for (let y = 0; y <= ytop; y++) {
       for (let z = zmin; z <= zmax; z++) {
         let x = 0;
@@ -511,6 +515,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u0, v0],
                 ],
                 shade,
+                face,
               );
             } else {
               put(
@@ -525,6 +530,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u1, v0],
                 ],
                 shade,
+                face,
               );
             }
             x += n;
@@ -537,6 +543,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
   // faces along +-Y (roof surfaces, undersides): merge along x
   for (const d of [1, -1]) {
     const shade = d === 1 ? SHADE.top : SHADE.bottom;
+    const face = d === 1 ? FACE.up : FACE.down;
     for (let y = 0; y <= ytop; y++) {
       if (d === -1 && y === 0) continue; // the underside of the bottom layer
       for (let z = zmin; z <= zmax; z++) {
@@ -559,6 +566,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u0, v1],
                 ],
                 shade,
+                face,
               );
             } else {
               put(
@@ -573,6 +581,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u0, v0],
                 ],
                 shade,
+                face,
               );
             }
             x += n;
@@ -612,6 +621,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u0, v0],
                 ],
                 SHADE.side,
+                FACE.east,
               );
             } else {
               put(
@@ -626,6 +636,7 @@ function emit(m: Model, sp: Sprite): BuiltModel {
                   [u0, v0],
                 ],
                 SHADE.side,
+                FACE.west,
               );
             }
             z += n;
@@ -810,6 +821,7 @@ function stampBuilding(
       ],
       uv: q.uv,
       shade: q.shade,
+      f: q.f,
       own: true,
     });
   }

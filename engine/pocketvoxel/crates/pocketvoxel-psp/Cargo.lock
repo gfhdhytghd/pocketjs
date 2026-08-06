@@ -124,6 +124,7 @@ name = "pocketvoxel-psp"
 version = "0.1.0"
 dependencies = [
  "libquickjs-sys",
+ "pocketjs-core",
  "pocketjs-psp",
  "pocketvoxel-core",
  "pocketvoxel-gu",

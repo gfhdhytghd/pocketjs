@@ -7,6 +7,24 @@
 
 import type { Shape } from "./classify.ts";
 
+/**
+ * Face direction ids, the terrain mesher's `SIDES` numbering (VoxelMod
+ * Voxel3D.lua:63, the same order as spec `FACE_SHADE`). Every emitted quad
+ * names the direction its FRONT points in, independent of corner winding —
+ * the cooked streams do not share one winding (docs/VOXEL.md §6), so the
+ * outward direction has to be stated, not derived.
+ */
+export const FACE = {
+  east: 1, // +X
+  west: 2, // -X
+  up: 3, // +Y
+  down: 4, // -Y
+  south: 5, // +Z
+  north: 6, // -Z
+} as const;
+
+export type Facing = (typeof FACE)[keyof typeof FACE];
+
 export interface Quad {
   /** Four corners, [x, y, z] world px. */
   c: [number, number, number][];
@@ -16,8 +34,73 @@ export interface Quad {
   v?: number;
   /** Flat shade, or per-corner shades (AO-folded). */
   shade: number | number[];
+  /** Which way this face points (see FACE). Required: it drives the cull. */
+  f: Facing;
   /** A body-anchored building's own quad — exempt from edge keep-rules. */
   own?: boolean;
+}
+
+/**
+ * The hidden-face cull: faces no camera this runtime can build will ever see
+ * from the front, dropped at cook time. `VOXEL_KEEP_HIDDEN=1` restores every
+ * face, which is the A/B control the acceptance runs use.
+ *
+ * **What the cameras can reach.** The field camera has a FIXED AZIMUTH
+ * (pocketvoxel-core/src/cam.rs `orbit`): the eye is always
+ * `(cx, dist*cos a, cy + dist*sin a)` looking at `(cx, 0, cy)` — due south of
+ * the focus, looking north, with only the pitch `a` varying over PITCH_RUNGS
+ * (0..75 degrees from straight down) and its tween. The battle rig
+ * (cam.rs `battle`) does orbit, and it draws the SAME chunk meshes.
+ *
+ * **-Y (down) faces below the eye-height floor are unreachable.** A downward
+ * face at world y is front-facing only when the eye is BELOW it. Eye height
+ * is a function of the rung / rig alone, never of where the player stands:
+ * `WORLD_VIEW_H * cos 75deg` = 35.20 px for the field camera, 37.12 px for the
+ * tele rig and 27.91 px for the wide rig (both at minimum dolly and zero pitch
+ * steer, which only raises the eye). `DOWN_CULL_Y` sits under all three.
+ *
+ * **-Z (north) faces are NOT unreachable — measured, not assumed.** A
+ * north-facing wall is front-facing wherever `z > eye.z = cy + dist*sin a`,
+ * and at rung 0 `eye.z` IS the middle of the frame: the southern half of a
+ * top-down frame shows the north walls of everything in it. Dropping them
+ * moves 16 of the 30 pitch-ladder frames (20916 pixels, worst 7076 in one
+ * frame) and breaks the `route-1` story golden. The facing is tagged anyway
+ * so the next camera change can be re-measured against it, but it is kept.
+ *
+ * **Pulled streams are exempt.** draw.rs draws GRASS and FLOWER with a
+ * camera-ward `pull` (46 px at rung 0), displacing each vertex along its OWN
+ * eye ray — not a rigid transform, so a quad's cooked facing is not its drawn
+ * facing. TERRAIN, WATER and the stamps draw with `pull = 0.0` and keep
+ * theirs. Culling the pulled streams costs 4380 (grass) + 415 (flower) pixels
+ * over the ladder and breaks six story and two battle goldens.
+ *
+ * A free-roam or orbiting FIELD camera (docs/VOXEL.md §6, "first/third-person
+ * free-roam ... are later rungs") must DELETE this optimisation rather than
+ * work around it: the pak would be missing faces that camera can reach.
+ * Anything that lowers a camera's eye under `DOWN_CULL_Y` — a new rig, a
+ * lower `RIG.*.height`, a sixth pitch rung past 75 degrees — invalidates the
+ * cooked pak, not just this file.
+ */
+export const KEEP_HIDDEN = process.env.VOXEL_KEEP_HIDDEN === "1";
+
+/** Eye-height floor in world px, held under the runtime's lowest camera
+ * (27.91, the wide battle rig). A -Y face topping out at or below this is
+ * back-facing for every camera. */
+export const DOWN_CULL_Y = 24;
+
+/** Streams draw.rs displaces per-vertex toward the camera: facing-exempt. */
+export const PULLED = true;
+
+/** True when a quad of this facing, whose highest corner is at `topY`, can be
+ * front-facing for some camera this runtime can build. */
+export function visibleFacing(f: Facing, topY: number): boolean {
+  return f !== FACE.down || topY > DOWN_CULL_Y;
+}
+
+/** Drop the faces `visibleFacing` rules out. THE one drop site. */
+export function cullHidden(quads: Quad[], pulled = false): Quad[] {
+  if (KEEP_HIDDEN || pulled) return quads;
+  return quads.filter((q) => visibleFacing(q.f, Math.max(...q.c.map((c) => c[1]))));
 }
 
 /** One measured volume run (VoxelMod Structures.lua:2208/2271). */

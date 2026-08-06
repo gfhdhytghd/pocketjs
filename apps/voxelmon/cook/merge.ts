@@ -69,7 +69,10 @@ export function mergeQuads(quads: Quad[], sample: (u: number, v: number) => numb
     const v1 = [q.c[2][aAx] - q.c[0][aAx], q.c[2][bAx] - q.c[0][bAx]];
     const sign = Math.sign(u1[0] * v1[1] - u1[1] * v1[0]);
     const byte = sample(q.u, q.v);
-    const key = `${axis}|${q.c[0][axis]}|${sign}|${q.shade}|${byte}`;
+    // `f` joins the key so a merge can never span two facings even where a
+    // winding accident makes their projected signs agree — the merged quad
+    // carries one facing to the cull (geom.ts `cullHidden`).
+    const key = `${axis}|${q.c[0][axis]}|${sign}|${q.f}|${q.shade}|${byte}`;
     let list = groups.get(key);
     if (!list) groups.set(key, (list = []));
     list.push({
@@ -119,7 +122,7 @@ export function mergeQuads(quads: Quad[], sample: (u: number, v: number) => numb
         next[bAx] = r.pattern[i][1] ? r.b0 : r.b1;
         return next;
       }) as [number, number, number][];
-      out.push({ c, u: t.u, v: t.v, shade: t.shade, own: t.own });
+      out.push({ c, u: t.u, v: t.v, shade: t.shade, f: t.f, own: t.own });
     }
   }
   return out;

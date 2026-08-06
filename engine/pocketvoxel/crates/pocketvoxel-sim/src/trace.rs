@@ -174,19 +174,82 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+/// Interleaved-stereo PCM captured while a trace replays (`--wav`).
+///
+/// The sim is a VIRTUAL-CLOCK host, so it consumes exactly
+/// `audioFramesForTick` frames per tick (contracts/spec/audio.ts §frame
+/// contract). That is what makes the captured audio a pure function of the
+/// tick index and the op stream — the same determinism story the pixel
+/// goldens have.
+pub struct Capture {
+    pub rate: u32,
+    pub pcm: Vec<i16>,
+    scratch: Vec<i16>,
+}
+
+impl Capture {
+    pub fn new(rate: u32) -> Self {
+        Capture {
+            rate,
+            pcm: Vec::new(),
+            scratch: Vec::new(),
+        }
+    }
+
+    /// contracts/spec/audio.ts:149 audioFramesForTick — the frames the audio
+    /// clock consumes during tick `tick`, exactly.
+    fn frames_for_tick(&self, tick: u32) -> usize {
+        let rate = self.rate as u64;
+        (((tick as u64 + 1) * rate) / 60 - (tick as u64 * rate) / 60) as usize
+    }
+
+    fn pump(&mut self, scene: &mut Scene, pak: &Pak, tick: u32) {
+        let frames = self.frames_for_tick(tick);
+        self.scratch.clear();
+        self.scratch.resize(frames * 2, 0);
+        scene.render_audio(pak, frames, &mut self.scratch);
+        self.pcm.extend_from_slice(&self.scratch);
+    }
+}
+
 /// Replay a parsed trace through the real core + rasterizer. Returns the
 /// checkpoint hashes in tape order; `shot` fires per checkpoint with the
-/// rendered frame (for `--shots`).
+/// rendered frame (for `--shots`), and `audio` captures the synth's PCM tick
+/// by tick (for `--wav`).
+///
+/// `quality` is the ladder rung the replay stands on (`spec::quality_tier`),
+/// the sim's stand-in for the `quality` op a real host emits at boot: the
+/// tape is a GUEST op stream and the rung is a HOST decision, so it arrives
+/// on the side, not in the tape. That is what lets one recorded trace produce
+/// both the shipped goldens and the max-tier identity goldens.
 pub fn run(
     pak: &Pak,
     cache: &AtlasCache,
     entries: &[Entry],
+    quality: u8,
+    mut audio: Option<&mut Capture>,
     mut shot: impl FnMut(&str, &Frame),
 ) -> Result<Vec<(String, u64)>, String> {
     let mut scene = Scene::new();
+    scene.op(pocketvoxel_core::spec::op::QUALITY, &[quality as i32], None);
+    if let Some(cap) = audio.as_deref() {
+        scene.audio.set_rate(cap.rate);
+    }
     let mut hashes = Vec::new();
     let mut current: Option<u32> = None;
     let mut ticked = false;
+
+    // Closing a tick block is: this tick's audio, then the scene clock. Both
+    // happen exactly once per tick, whether a checkpoint closed the block or
+    // the next `t` line did.
+    macro_rules! close {
+        ($tick:expr) => {
+            if let Some(cap) = audio.as_deref_mut() {
+                cap.pump(&mut scene, pak, $tick);
+            }
+            scene.tick();
+        };
+    }
 
     for entry in entries {
         match entry {
@@ -202,7 +265,7 @@ pub fn run(
                             return Err(format!("non-contiguous tick {tick} after {prev}"));
                         }
                         if !ticked {
-                            scene.tick();
+                            close!(prev);
                         }
                     }
                 }
@@ -216,11 +279,11 @@ pub fn run(
                 scene.op(*code, args, s.as_deref());
             }
             Entry::Mark(name) => {
-                if current.is_none() {
+                let Some(tick) = current else {
                     return Err("checkpoint before the first tick".into());
-                }
+                };
                 if !ticked {
-                    scene.tick();
+                    close!(tick);
                     ticked = true;
                 }
                 let list = draw::build(&scene, pak);
@@ -229,6 +292,13 @@ pub fn run(
                 shot(name, &frame);
             }
         }
+    }
+    // The tape's last block gets its tick too, so `--wav` covers every tick
+    // the tape states and not one less.
+    if let Some(tick) = current
+        && !ticked
+    {
+        close!(tick);
     }
     Ok(hashes)
 }

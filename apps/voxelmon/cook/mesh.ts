@@ -17,7 +17,7 @@ import {
   VOLUME_TOP_SHADE,
 } from "../../../contracts/spec/voxel-spec.ts";
 import type { GameMap } from "./data.ts";
-import { keyOf, type Quad, type SGrid } from "./geom.ts";
+import { cullHidden, FACE, keyOf, PULLED, type Quad, type SGrid } from "./geom.ts";
 import { RING } from "./structures.ts";
 
 // VoxelMod ChunkMesher.lua:86 INSET — a sliver of a texel, deliberately not
@@ -143,6 +143,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         [u0, v1],
       ],
       shade: aoShades(x0 / 8, z0 / 8, h, shade),
+      f: FACE.up,
     });
   };
 
@@ -200,6 +201,9 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         [u0, v0],
       ],
       shade,
+      // `d` IS the direction id: SIDES carries 1/2/5/6 and no other face
+      // direction ever reaches sideQuad.
+      f: d as 1 | 2 | 5 | 6,
     });
   };
 
@@ -300,6 +304,9 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
             [u0, v0],
           ],
           shade: GABLE_TOP_SHADE,
+          // A pitched roof plane: tilted, but +Y dominant at every gable
+          // rise the volume measurer produces.
+          f: FACE.up,
         });
       } else if (run) {
         const m = Math.min(2, run.extent);
@@ -412,6 +419,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         u: q.u,
         v: q.v,
         shade: q.shade,
+        f: q.f,
       };
       terrain.push({ ...moved, shade: groundShades(moved) });
     }
@@ -425,11 +433,17 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
     );
   }
 
+  // THE drop site: every stream this cooker produces funnels through
+  // cullHidden here, so the camera rule (geom.ts) is applied exactly once,
+  // after the shading and ground votes that read the full face set. Grass
+  // and flower pass PULLED — the backend displaces their vertices toward the
+  // camera, so their cooked facing is not their drawn facing.
+  for (const [key, quads] of stamps) stamps.set(key, cullHidden(quads));
   return {
-    terrain,
-    water,
-    grass: S.grassQuads.map((q) => ({ ...q, shade: groundShades(q) })),
-    flower: S.flowerQuads.map((q) => ({ ...q, shade: groundShades(q) })),
+    terrain: cullHidden(terrain),
+    water: cullHidden(water),
+    grass: cullHidden(S.grassQuads.map((q) => ({ ...q, shade: groundShades(q) })), PULLED),
+    flower: cullHidden(S.flowerQuads.map((q) => ({ ...q, shade: groundShades(q) })), PULLED),
     stamps,
   };
 }

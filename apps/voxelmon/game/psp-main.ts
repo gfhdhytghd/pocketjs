@@ -55,6 +55,22 @@ interface VoxelNative {
   cardHide(side: number): void;
   battleCam(orbit: number, pitch: number, zoom: number): void;
   arenaEnd(): void;
+  // audio — optional on the binding: an EBOOT built before the ops existed
+  // simply has no such function, and the guest must not crash on it.
+  music?(bank: number, addr: number, engine: number, flags: number): void;
+  musicStop?(): void;
+  musicFade?(ticks: number): void;
+  sfx?(
+    bank: number,
+    addr: number,
+    engine: number,
+    pitch: number,
+    tempo: number,
+    flags: number,
+  ): void;
+  cry?(bank: number, addr: number, engine: number, pitch: number, length: number): void;
+  audioWaves?(engine: number, bank: number, addr: number): void;
+  audioDrum?(engine: number, drum: number, bank: number, addr: number): void;
 }
 
 const native = (globalThis as unknown as { voxel: VoxelNative }).voxel;
@@ -71,9 +87,10 @@ class QuickJsHost implements VoxelHost {
     return null;
   }
   audiodata(): ArrayBuffer | null {
-    // One cold read at boot, like gamedata(). The boot path below discards
-    // the answer (audio is off on device, see the note there); only
-    // setAudioFromPak() decodes it. undefined = a pak cooked without audio.
+    // One cold read at boot, like gamedata(): setAudioFromPak() parses the
+    // manifest half and leaves the programs in the pak, where the core reads
+    // them. undefined = a pak cooked without audio, and the director then
+    // resolves nothing and emits no op.
     return native.audiodata ? (native.audiodata() ?? null) : null;
   }
   stats(): ArrayBuffer | null {
@@ -151,6 +168,34 @@ class QuickJsHost implements VoxelHost {
   arenaEnd(): void {
     native.arenaEnd();
   }
+  music(bank: number, addr: number, engine: number, flags: number): void {
+    native.music?.(bank, addr, engine, flags);
+  }
+  musicStop(): void {
+    native.musicStop?.();
+  }
+  musicFade(ticks: number): void {
+    native.musicFade?.(ticks);
+  }
+  sfx(
+    bank: number,
+    addr: number,
+    engine: number,
+    pitch: number,
+    tempo: number,
+    flags: number,
+  ): void {
+    native.sfx?.(bank, addr, engine, pitch, tempo, flags);
+  }
+  cry(bank: number, addr: number, engine: number, pitch: number, length: number): void {
+    native.cry?.(bank, addr, engine, pitch, length);
+  }
+  audioWaves(engine: number, bank: number, addr: number): void {
+    native.audioWaves?.(engine, bank, addr);
+  }
+  audioDrum(engine: number, drum: number, bank: number, addr: number): void {
+    native.audioDrum?.(engine, drum, bank, addr);
+  }
   frameDone(_tick: number, _buttons: number): void {
     // host-side: the EBOOT ticks the scene after frame() returns
   }
@@ -160,23 +205,26 @@ class QuickJsHost implements VoxelHost {
 const host = new QuickJsHost();
 const source = JSON.parse(native.gamedata()) as Record<string, unknown>;
 const game = new VoxelmonGame(fromObject(source), host, SEED);
-// AUDIO IS OFF ON DEVICE, and `null` is what turns it off: the director is
-// built with no banks, so its tick returns on the first line and it never
-// opens a host stream. The `audiodata` op still fires, so this run's op
-// stream matches the recorded .vtrace.
+// AUDIO ON. This loads the pak's AUDI manifest, which is what lets the
+// director resolve a song name to (bank, address, engine) and emit the audio
+// ops; the ROM's channel programs stay in the pak and the chip synth that
+// interprets them is the core's (engine/pocketvoxel/.../audio.rs), compiled.
+// The EBOOT pumps `Scene::render_audio` into the audio module's ring once
+// per tick (pocketvoxel-psp/src/main.rs `audio_pump`).
 //
-// The cost was measured, not guessed: one PCM frame of the four-channel
-// interpreter costs ~0.21 ms on this MIPS part, so 11.025 kHz needs ~2.3
-// seconds of CPU per second of audio. The guest can never reach the ring's
-// lead, `want` pins at the three-tick catch-up cap (552 frames) on every
-// tick, and the frame collapses to ~9 fps while the music plays slow and
-// gapped. Device playback is arithmetically out of reach for an interpreted
-// synth, not merely over budget.
+// The cost is why this can be on. The synth was TypeScript here until it
+// moved into the core, and interpreted it cost ~0.21 ms per PCM frame on
+// this MIPS part — 11.025 kHz wanted ~2.3 seconds of CPU per second of
+// audio, so the guest could never reach the ring's lead and the frame
+// collapsed to ~9 fps. The compiled synth costs ~6.5 us per tick's worth of
+// frames on desktop, which extrapolates to 0.2-0.4 ms on the 333 MHz part:
+// 1-2.5% of the 16.7 ms frame.
 //
-// THE SWITCH: replace this line with `game.setAudioFromPak();` to A/B it on
-// hardware — that loads the pak's AUDI banks and starts the map theme, which
-// is exactly what shipped before this was fixed.
-game.setAudio(null);
+// THE SWITCH: put `game.setAudio(null);` back here and the run goes silent
+// end to end — no manifest, so no audio op, so the EBOOT never opens a
+// hardware stream (main.rs gates the pump on the first op). The `audiodata`
+// op fires either way, so the op stream still matches the recorded .vtrace.
+game.setAudioFromPak();
 game.newGame();
 
 (globalThis as unknown as { frame: (buttons: number) => void }).frame = (

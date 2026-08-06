@@ -32,7 +32,29 @@ import {
   PX_CLEAR,
 } from "../apps/voxelmon/cook/data.ts";
 import { buildCharmap, buildMapPalette } from "../apps/voxelmon/cook/gamedata.ts";
+import {
+  cullHidden,
+  DOWN_CULL_Y,
+  FACE,
+  PULLED,
+  type Quad,
+} from "../apps/voxelmon/cook/geom.ts";
 import { Redpp, ROOF_GROUP } from "../apps/voxelmon/cook/redpp.ts";
+import {
+  CAM_FOCAL,
+  PITCH_RUNGS,
+  RIG,
+  RIG_DOLLY,
+  WORLD_VIEW_H,
+} from "../contracts/spec/voxel-spec.ts";
+
+/** A 1x1 axis-aligned quad at (x, y, z) — corner set only; facing is stated. */
+const box = (x: number, y: number, z: number): [number, number, number][] => [
+  [x, y, z],
+  [x + 1, y, z],
+  [x + 1, y, z + 1],
+  [x, y, z + 1],
+];
 
 const root = join(import.meta.dir, "..");
 const scratch = join(root, "dist/voxelmon");
@@ -85,6 +107,39 @@ describe.skipIf(reason !== null)("voxel cook", () => {
       expect(m.chunks).toBeGreaterThan(0);
       expect(m.verts).toBeGreaterThan(0);
     }
+  });
+
+  // The hidden-face cull (docs/VOXEL.md §5, cook/geom.ts): -Y faces at or
+  // below DOWN_CULL_Y are dropped because no camera's eye ever gets that low.
+  // The threshold is only sound while that stays true, and the two numbers
+  // that could silently break it live in the spec, not in the cooker.
+  test("no camera this runtime builds has its eye below DOWN_CULL_Y", () => {
+    // Field camera: eye.y = CAM_FOCAL * WORLD_VIEW_H * cos(pitch), lowest at
+    // the last rung (the tween never leaves the [0, last] range).
+    const dist = CAM_FOCAL * WORLD_VIEW_H;
+    const field = dist * Math.cos((Math.max(...PITCH_RUNGS) * Math.PI) / 180);
+    expect(field).toBeGreaterThan(DOWN_CULL_Y);
+
+    // Battle rigs: eye.y = |offset| * dolly * sin(elevation), lowest at the
+    // minimum dolly and zero pitch steer (steer only raises the eye).
+    for (const r of Object.values(RIG)) {
+      const flat = Math.hypot(r.side, r.back);
+      const len = Math.hypot(flat, r.height);
+      const lowest = len * (1 - RIG_DOLLY) * Math.sin(Math.atan2(r.height, flat));
+      expect(lowest).toBeGreaterThan(DOWN_CULL_Y);
+    }
+  });
+
+  test("the cull drops only -Y faces, and VOXEL_KEEP_HIDDEN puts them back", () => {
+    const quads: Quad[] = [
+      { c: box(0, 40, 0), shade: 1, f: FACE.down }, // above the floor: kept
+      { c: box(0, 8, 0), shade: 1, f: FACE.down }, // below it: dropped
+      { c: box(0, 8, 8), shade: 1, f: FACE.north }, // north is NOT hidden
+      { c: box(8, 8, 0), shade: 1, f: FACE.up },
+    ];
+    expect(cullHidden(quads).map((q) => q.f)).toEqual([FACE.down, FACE.north, FACE.up]);
+    // Pulled streams (grass, flower) are exempt whatever they face.
+    expect(cullHidden(quads, PULLED).length).toBe(quads.length);
   });
 
   test("VPAL: 4 kind defaults + the 37 SGB SuperPalettes, then the RED++ tail", () => {

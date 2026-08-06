@@ -23,9 +23,15 @@ commands:
   parity    deep-compare gen/*.json against the gen1recomp reference
   cook      voxelize + pack dist/voxelmon/voxelmon.vxpak
   sim       run the story tape headless -> dist/voxelmon/trace/story.vtrace
-  check     import-if-missing + cook + sim + rasterize vs the hash goldens
-  record    like check, but (re)write tests/goldens/voxel/story.hashes
-  shots     like check, but write PNG frames to dist/voxelmon/shots/ (local)
+  check     import-if-missing + cook + both tapes + rasterize vs the hash
+            goldens at BOTH pinned quality rungs: the shipped psp rung
+            (<tape>.hashes) and the top rung, which must still be the
+            pre-ladder identity (<tape>-max.hashes)
+  record    like check, but (re)write the shipped psp goldens. The -max
+            goldens are the identity anchor and are only re-proved, never
+            rewritten
+  shots     like check, but write PNG frames to
+            dist/voxelmon/shots-<tape>-<tier>/ (local); --tier <name> for one
   wav       render the chip synth to dist/voxelmon/audio/*.wav (local)
   psp       gen+cook+trace + bundle game.js + cargo psp -> EBOOT.PBP
             (extra args pass to cargo psp, e.g. --release, --features capture)
@@ -35,11 +41,33 @@ env: VOXELMON_ROM (canonical US Red), VOXELMON_G1R (~/code/gen1recomp),
      VOXELMON_VOXELMOD (~/code/DramaticShapeVoxelMod)`;
 
 const ROOT = new URL("..", import.meta.url).pathname;
-/** story.tape's tested seed — the tape's routes are plotted against it. */
+/** Both tapes' tested seed — their routes are plotted against it. */
 const STORY_SEED = "17";
 const PAK = "dist/voxelmon/voxelmon.vxpak";
-const TRACE = "dist/voxelmon/trace/story.vtrace";
-const GOLDENS = "tests/goldens/voxel/story.hashes";
+
+/** The tapes every verdict runs. Each records its own trace and goldens. */
+const TAPES = ["story", "battle"] as const;
+const trace = (tape: string) => `dist/voxelmon/trace/${tape}.vtrace`;
+
+/**
+ * The two rungs the goldens pin (contracts/spec/voxel-spec.ts §quality
+ * ladder). `shipped` is what the PSP runs, so its hashes move whenever a
+ * rung's dials move — that is the point of recording them. `max` is the top
+ * rung, which is the IDENTITY: `<tape>-max.hashes` are the pre-ladder frame
+ * hashes and must stay byte-for-byte true forever. `record` deliberately
+ * refuses to rewrite them — a max-tier mismatch means the ladder's top rung
+ * stopped being the identity, and the fix is the code, never the golden.
+ */
+const SHIPPED_TIER = "psp";
+const MAX_TIER = "desktop";
+const goldens = (tape: string, tier: "shipped" | "max") =>
+  `tests/goldens/voxel/${tape}${tier === "max" ? "-max" : ""}.hashes`;
+
+/** `--name value` off the command line. */
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
 
 async function run(
   cmd: string[],
@@ -55,7 +83,7 @@ async function run(
   return await p.exited;
 }
 
-/** import (only when gen/ is absent) + cook + headless story run. */
+/** import (only when gen/ is absent) + cook + a headless run per tape. */
 async function preparePakAndTrace(): Promise<number> {
   if (!(await Bun.file(`${ROOT}dist/voxelmon/gen/maps.json`).exists())) {
     const rc = await run(["bun", "tools/voxel.ts", "import"]);
@@ -65,19 +93,23 @@ async function preparePakAndTrace(): Promise<number> {
   // an engine bug (the tools/mon.ts lesson).
   const cook = await run(["bun", "apps/voxelmon/cook/cli.ts"]);
   if (cook !== 0) return cook;
-  return await run([
-    "bun",
-    "apps/voxelmon/game/sim/cli.ts",
-    "--tape",
-    "apps/voxelmon/tapes/story.tape",
-    "--out",
-    TRACE,
-    "--seed",
-    STORY_SEED,
-  ]);
+  for (const tape of TAPES) {
+    const rc = await run([
+      "bun",
+      "apps/voxelmon/game/sim/cli.ts",
+      "--tape",
+      `apps/voxelmon/tapes/${tape}.tape`,
+      "--out",
+      trace(tape),
+      "--seed",
+      STORY_SEED,
+    ]);
+    if (rc !== 0) return rc;
+  }
+  return 0;
 }
 
-async function rasterize(extra: string[]): Promise<number> {
+async function rasterize(tape: string, tier: string, extra: string[]): Promise<number> {
   return await run(
     [
       "cargo",
@@ -89,7 +121,9 @@ async function rasterize(extra: string[]): Promise<number> {
       "--",
       `../${PAK}`,
       "--trace",
-      `../${TRACE}`,
+      `../${trace(tape)}`,
+      "--quality",
+      tier,
       ...extra,
     ],
     `${ROOT}engine`,
@@ -294,6 +328,35 @@ function buildSfo(entries: [string, string | number][]): Uint8Array {
   return out;
 }
 
+/**
+ * Replay every tape at one rung and compare against that rung's committed
+ * hashes. `max` is the ladder's regression anchor: those hashes were recorded
+ * before the ladder existed, so a mismatch there says the top rung stopped
+ * being the identity — the message says so, because the wrong fix is
+ * obvious and cheap and the right one is not.
+ */
+async function assertGoldens(tier: "shipped" | "max"): Promise<number> {
+  const quality = tier === "max" ? MAX_TIER : SHIPPED_TIER;
+  let bad = 0;
+  for (const tape of TAPES) {
+    const path = goldens(tape, tier);
+    if (!(await Bun.file(`${ROOT}${path}`).exists())) {
+      console.error(`voxel check: no goldens at ${path} — run: bun tools/voxel.ts record`);
+      return 1;
+    }
+    const rc = await rasterize(tape, quality, ["--hashes", `../${path}`, "--assert"]);
+    if (rc !== 0) {
+      bad = rc;
+      console.error(
+        tier === "max"
+          ? `voxel check: ${tape} does not match ${path} at the ${quality} tier — the ladder's TOP RUNG IS NO LONGER THE IDENTITY. Fix the dials, never re-record this file.`
+          : `voxel check: ${tape} does not match ${path} at the ${quality} tier`,
+      );
+    }
+  }
+  return bad;
+}
+
 async function launchPpsspp(profile: string): Promise<number> {
   const eboot = `${ROOT}${EBOOT_DIR}/target/mipsel-sony-psp/${profile}/EBOOT.PBP`;
   if (!existsSync(eboot)) {
@@ -335,7 +398,7 @@ async function main(): Promise<number> {
       "--tape",
       "apps/voxelmon/tapes/story.tape",
       "--out",
-      TRACE,
+      trace("story"),
       "--seed",
       STORY_SEED,
       ...process.argv.slice(3),
@@ -345,18 +408,35 @@ async function main(): Promise<number> {
     const prep = await preparePakAndTrace();
     if (prep !== 0) return prep;
     if (command === "shots") {
-      return await rasterize(["--shots", "../dist/voxelmon/shots"]);
+      // Shots are the reading material for a rung's visual verdict, so they
+      // are written per rung: `--tier <name>` picks one, default both.
+      const only = arg("tier");
+      for (const tier of only ? [only] : [SHIPPED_TIER, MAX_TIER]) {
+        for (const tape of TAPES) {
+          const rc = await rasterize(tape, tier, [
+            "--shots",
+            `../dist/voxelmon/shots-${tape}-${tier}`,
+          ]);
+          if (rc !== 0) return rc;
+        }
+      }
+      return 0;
     }
     if (command === "record") {
-      const rc = await rasterize(["--hashes", `../${GOLDENS}`]);
-      if (rc === 0) console.log(`voxel record: wrote ${GOLDENS}`);
-      return rc;
+      for (const tape of TAPES) {
+        const rc = await rasterize(tape, SHIPPED_TIER, [
+          "--hashes",
+          `../${goldens(tape, "shipped")}`,
+        ]);
+        if (rc !== 0) return rc;
+        console.log(`voxel record: wrote ${goldens(tape, "shipped")} (${SHIPPED_TIER} tier)`);
+      }
+      // The identity goldens are never rewritten, only re-proved.
+      return await assertGoldens("max");
     }
-    if (!(await Bun.file(`${ROOT}${GOLDENS}`).exists())) {
-      console.error(`voxel check: no goldens at ${GOLDENS} — run: bun tools/voxel.ts record`);
-      return 1;
-    }
-    return await rasterize(["--hashes", `../${GOLDENS}`, "--assert"]);
+    const shipped = await assertGoldens("shipped");
+    const max = await assertGoldens("max");
+    return shipped || max;
   }
   const env = resolveEnv();
   if (command === "import") {

@@ -13,7 +13,7 @@
 
 import { GRASS_THICK_PX } from "../../../contracts/spec/voxel-spec.ts";
 import { type Art, type GameMap, type GenData, artOf, PX_CLEAR } from "./data.ts";
-import { DIRS4, keyOf, type Quad, type SGrid } from "./geom.ts";
+import { DIRS4, FACE, keyOf, type Quad, type SGrid } from "./geom.ts";
 import { mergeQuads } from "./merge.ts";
 import { OBJ_SHADE } from "./standees.ts";
 
@@ -54,6 +54,8 @@ function sideQuads(
       u: ax0 + px + 0.5,
       v: ay0 + py + 0.5,
       shade: OBJ_SHADE.side,
+      // "left as seen from outside" is the low-x end of the run: -X.
+      f: FACE.west,
     });
   };
   const right = (px: number, at: number): void => {
@@ -67,6 +69,7 @@ function sideQuads(
       u: ax0 + px + 0.5,
       v: ay0 + py + 0.5,
       shade: OBJ_SHADE.side,
+      f: FACE.east,
     });
   };
   if (everyPixel) {
@@ -122,6 +125,9 @@ function grassTemplate(ref: TileArtRef): Quad[] {
           [u0, v0],
         ],
         shade: 1,
+        // zF = zMid + THICK/2 > zB: the tuft's drawn face is the south one
+        // (shade 1 / 0.68 are OBJ_SHADE.front / .back written out).
+        f: FACE.south,
       });
       quads.push({
         c: [
@@ -137,6 +143,7 @@ function grassTemplate(ref: TileArtRef): Quad[] {
           [u1, v0],
         ],
         shade: 0.68,
+        f: FACE.north,
       });
       if (!opaque(ix, iy - 1)) {
         quads.push({
@@ -153,6 +160,7 @@ function grassTemplate(ref: TileArtRef): Quad[] {
             [u0, v0],
           ],
           shade: 1,
+          f: FACE.up,
         });
       }
       if (!opaque(ix, iy + 1)) {
@@ -170,6 +178,7 @@ function grassTemplate(ref: TileArtRef): Quad[] {
             [u0, v1],
           ],
           shade: OBJ_SHADE.bottom,
+          f: FACE.down,
         });
       }
       sideQuads(quads, ix, ix2, yBot, yTop, zB, zF, ax0, ay0, iy, opaque, false);
@@ -204,6 +213,7 @@ export function buildGrass(S: SGrid, map: GameMap, art: Art): void {
           u: q.u,
           v: q.v,
           shade: q.shade,
+          f: q.f,
         });
       }
     }
@@ -299,6 +309,7 @@ function flowerTemplate(gen: GenData, ref: TileArtRef): Quad[] {
           [u0, v0],
         ],
         shade: OBJ_SHADE.front,
+        f: FACE.south,
       });
       quads.push({
         c: [
@@ -314,6 +325,7 @@ function flowerTemplate(gen: GenData, ref: TileArtRef): Quad[] {
           [u1, v0],
         ],
         shade: OBJ_SHADE.back,
+        f: FACE.north,
       });
       // every pixel gets caps on all four remaining faces: a pixel keyed
       // out by the CURRENT frame exposes them (Structures.lua:3620-3662)
@@ -330,6 +342,7 @@ function flowerTemplate(gen: GenData, ref: TileArtRef): Quad[] {
           u: tu,
           v: tv,
           shade: OBJ_SHADE.top,
+          f: FACE.up,
         });
         quads.push({
           c: [
@@ -341,6 +354,7 @@ function flowerTemplate(gen: GenData, ref: TileArtRef): Quad[] {
           u: tu,
           v: tv,
           shade: OBJ_SHADE.bottom,
+          f: FACE.down,
         });
       }
       sideQuads(quads, ix, ix2, yBot, yTop, zB, zF, ax0, ay0, py, on, true);
@@ -393,6 +407,7 @@ export function buildFlowers(S: SGrid, map: GameMap, art: Art, gen: GenData): vo
             u: q.u,
             v: q.v,
             shade: q.shade,
+            f: q.f,
           });
         }
       }

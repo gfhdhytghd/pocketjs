@@ -31,15 +31,6 @@ import {
 import { Overworld, type OverworldShell, type SaveSlice } from "./world/overworld.ts";
 import { Textbox } from "./world/textbox.ts";
 
-/**
- * The chip synth's output rate. Every AUDIO_RATES value divides 44.1 kHz
- * exactly, so any host resamples with cheap integer math
- * (contracts/spec/audio.ts); the guest's per-tick synthesis cost is linear
- * in it, and 11.025 kHz keeps every GB channel's fundamental (the highest
- * note the pitch table reaches is ~2 kHz) inside Nyquist.
- */
-const AUDIO_RATE = 11025;
-
 /** The full save: the overworld slice plus the party the battle port added. */
 export interface GameSave extends SaveSlice {
   party: PartyMon[];
@@ -210,10 +201,9 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   battleRng: Rng;
   save!: GameSave;
   overworld!: Overworld;
-  /** Music, SFX and cries. Silent until a caller hands it real banks —
-   *  setAudio(banks) on the Bun transport, setAudioFromPak() on a host that
-   *  can afford the synth. A director with no banks returns on its first
-   *  line every tick and never opens a host stream. */
+  /** Music, SFX and cries: the POLICY, emitting audio ops. Silent until a
+   *  caller hands it the manifest — setAudio(banks) on the Bun transport,
+   *  setAudioFromPak() on device. A director with no manifest emits nothing. */
   audio = new AudioDirector(null);
   private stack: GameState[] = [];
   private scene: Scene;
@@ -236,31 +226,28 @@ export class VoxelmonGame implements OverworldShell, SceneView {
   }
 
   /**
-   * Install the chip synth's program banks — `null` means NO banks, which is
-   * total silence: the director returns on the first line of every tick and
-   * never opens a host stream. Pass real banks on the Bun transport
-   * (gen/audio.json + programs.bin); `setAudioFromPak()` is the device path.
+   * Install the audio manifest — `null` means NO manifest, which is total
+   * silence: the director resolves nothing and emits no op. Pass the Bun
+   * transport's manifest (gen/audio.json); `setAudioFromPak()` is the device
+   * path.
    *
    * The `audiodata` op fires either way, on EVERY host, so a recorded trace
    * carries the same op stream a device run replays (SCHEMA.md ".vtrace").
    * Only setAudioFromPak() reads the answer.
    */
-  setAudio(banks: AudioBanks | null, rate = AUDIO_RATE): void {
+  setAudio(banks: AudioBanks | null): void {
     void this.host.audiodata();
-    this.audio = new AudioDirector(banks, { rate });
+    this.audio = new AudioDirector(banks, this.host);
   }
 
   /**
-   * Load the chip synth's banks from the pak's AUDIO section, over the
-   * `audiodata` op — the device transport. A pak cooked without audio
-   * answers null and the director stays silent (banks.ts fromSection).
-   *
-   * This is the ONE switch that turns device audio on; psp-main.ts documents
-   * why it is not the default (the interpreted synth cannot reach realtime on
-   * a PSP, docs/VOXEL.md §8).
+   * Load the audio manifest from the pak's AUDI section, over the `audiodata`
+   * op — the device transport. Only the JSON half is parsed; the programs
+   * stay in the pak, where the core reads them (banks.ts fromSection). A pak
+   * cooked without audio answers null and the director stays silent.
    */
-  setAudioFromPak(rate = AUDIO_RATE): void {
-    this.audio = new AudioDirector(fromSection(this.host.audiodata()), { rate });
+  setAudioFromPak(): void {
+    this.audio = new AudioDirector(fromSection(this.host.audiodata()), this.host);
   }
 
   /**
@@ -350,7 +337,6 @@ export class VoxelmonGame implements OverworldShell, SceneView {
     top?.update();
     this.scene.emit(this);
     this.driveAudio();
-    this.audio.tick();
     this.host.frameDone(this.tickIndex, buttons);
     this.tickIndex += 1;
   }

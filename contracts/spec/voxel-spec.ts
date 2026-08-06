@@ -103,6 +103,112 @@ export const PITCH_TWEEN_TICKS = 15;
 export const CAM_FOCAL = 1;
 
 // ---------------------------------------------------------------------------
+// The quality ladder — one cooked pak, many machines
+// ---------------------------------------------------------------------------
+//
+// This runtime is ported to machines that differ by an order of magnitude in
+// throughput, so fidelity is a LADDER a machine climbs, not a build flag. A
+// host names the rung its hardware holds (`quality(tier)`) and the core reads
+// that rung's dials out of `QUALITY` while it builds each frame.
+//
+// Every dial here is a RUNTIME dial: one cooked pak serves every rung, so the
+// rung is a host decision and never a re-cook. Rungs are append-only exactly
+// like op codes — a machine may be added, none may be renumbered — and the
+// default rung is the WEAKEST one, so a host that never calls `quality` gets
+// the cheapest frame rather than the dearest.
+//
+// **The top rung is the identity.** It draws what this runtime drew before
+// the ladder existed, pixel for pixel; `tests/goldens/voxel/*-max.hashes` are
+// the pre-ladder frame hashes, replayed at the top rung and asserted
+// byte-for-byte, so no later rung edit can quietly move the picture the
+// ladder is supposed to preserve. That is also why `chunkDist` holds
+// `CHUNK_DRAW_DIST_PX` at every rung including the top: it is a pre-existing
+// frame-budget cap being folded in from `draw.rs` (where it was the
+// hard-coded `CULL_DIST`), not a new fidelity dial, and widening it at the
+// top would draw MORE than the pre-ladder runtime rather than the same.
+//
+// Distances are world px, measured from the view centre to a chunk's own
+// centre and widened by that chunk's half-extent. Every dial goes through the
+// same arithmetic in `draw::within_dist`, so a dial added later cannot
+// measure differently from the ones the goldens were recorded against.
+//
+// **Cook-time dials are deliberately absent.** A dial belongs in this table
+// only while one cooked pak can serve every rung. Geometry that must itself
+// differ per machine (the next rung is tree LOD, which replaces carved tree
+// hulls with cheaper stand-ins) is cooked into the pak, and the pak then
+// DECLARES which rungs it carries, so a runtime asking for geometry its pak
+// does not hold falls back to what the pak has instead of misrendering. That
+// declaration is a VXPK section field, not an entry here.
+
+/**
+ * The rungs, weakest first. Append-only: never renumber, never reuse.
+ * `QUALITY[tier]` is that rung's dials, so the array and this table are one
+ * data structure in two halves (`tests/voxel-contract.test.ts` pins that).
+ */
+export const QUALITY_TIER = {
+  /** PSP-class. Measured GE throughput ~1.1 M tri/s = ~18 k tris at 60 fps. */
+  psp: 0,
+  /** PS Vita-class: the same geometry with roughly four times the budget. */
+  vita: 1,
+  /** Desktop, and the identity rung: exactly the pre-ladder picture. */
+  desktop: 2,
+} as const;
+
+/**
+ * The rung a scene boots at, and the rung it returns to after `reset()` only
+ * if the host never picked one. The weakest rung is the default on purpose:
+ * an unported host renders a frame its machine can hold.
+ */
+export const QUALITY_TIER_DEFAULT = QUALITY_TIER.psp;
+
+/**
+ * "No limit" for a distance dial, in world px. A finite sentinel rather than
+ * an infinity so the generated Rust stays a plain `f32` literal and the
+ * widened compare (`(limit + half)^2`) can never produce a NaN; 1e9 px is six
+ * orders of magnitude past the diagonal of the largest map this pipeline
+ * cooks.
+ */
+export const QUALITY_UNBOUNDED = 1e9;
+
+/**
+ * The chunk distance cap: 2.5 view-heights, the mod's own north-reach cap for
+ * its shadow frustum. The frustum's far plane is effectively infinite
+ * (dist*4 + 4096), so without this a leaned camera admits every chunk up-map.
+ * Held at every rung — see the identity note above.
+ */
+export const CHUNK_DRAW_DIST_PX = 2.5 * WORLD_VIEW_H;
+
+/**
+ * The dials, indexed by `QUALITY_TIER`. Adding a dial is appending a field to
+ * every row; adding a machine is appending a row.
+ *
+ * `grassDist` / `flowerDist` fade the two ankle-height detail meshes: past a
+ * few tiles a grass tuft is a texture, not a silhouette, and the cooker emits
+ * two standing slabs per grass cell and a cutout per flower cell across the
+ * whole field. On ROUTE_1 at pitch rung 2 those two meshes are 40 k of the
+ * frame's 80 k triangles — half the frame spent below the ankle.
+ */
+export const QUALITY = [
+  // psp — measured over the story trace: grass+flower cost is flat from 48 px
+  // to 96 px at every ROUTE_1 checkpoint and jumps at 112 px, so 96 is the
+  // largest distance that still buys the whole first-ring saving
+  // (docs/VOXEL.md §4a). It takes 30-34% off the two meshes there; it does
+  // NOT reach the 18 k-triangle budget, and no distance dial can while
+  // terrain alone is 40 k.
+  { grassDist: 96, flowerDist: 96, chunkDist: CHUNK_DRAW_DIST_PX },
+  // vita — a placeholder, not a measurement: on the v1 maps this is
+  // pixel-identical to the top rung, because 128 px chunks inside a 340 px
+  // cap leave room for only two distinct settings here.
+  { grassDist: 192, flowerDist: 192, chunkDist: CHUNK_DRAW_DIST_PX },
+  // desktop — the identity rung: both meshes unbounded, as before the ladder.
+  {
+    grassDist: QUALITY_UNBOUNDED,
+    flowerDist: QUALITY_UNBOUNDED,
+    chunkDist: CHUNK_DRAW_DIST_PX,
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
 // Diorama constants — baked at cook time, pinned here so cooker and any
 // future on-device mesher can never disagree (upstream Voxel3D/ChunkMesher)
 // ---------------------------------------------------------------------------
@@ -270,6 +376,24 @@ export const EMOTE = {
 //                                          carries no audio — the guest then
 //                                          runs silent. Same one-cold-read
 //                                          discipline as gamedata()
+//     quality(tier)                        climb the quality ladder to
+//                                          QUALITY_TIER `tier`: the core
+//                                          applies that rung's QUALITY dials
+//                                          while it builds every later frame
+//                                          (grass and flower draw distances,
+//                                          the chunk distance cap). HOST
+//                                          configuration, not guest state —
+//                                          the host knows the machine, the
+//                                          guest does not, and one cooked pak
+//                                          serves every rung, so no op stream
+//                                          and no pak byte differs between
+//                                          tiers. `reset()` KEEPS the rung,
+//                                          exactly as it keeps the synth's
+//                                          rate. An out-of-range tier is a
+//                                          no-op, so a host naming a rung
+//                                          this core does not carry keeps the
+//                                          rung it had instead of guessing.
+//                                          Boots at QUALITY_TIER_DEFAULT
 //   world
 //     mapShow(slot, mapId, ox, oy)         slot 0 current, 1..4 neighbours;
 //                                          ox/oy = seam offset in world px
@@ -313,11 +437,69 @@ export const EMOTE = {
 //     cardHide(side)
 //     battleCam(orbit, pitch, zoom)        Q8 fixed 0..256 = 0..1 (zoom Q8 x)
 //     arenaEnd()
+//   audio (the chip synth; the core interprets the ROM's channel programs and
+//         renders PCM — the guest states WHAT to play, never a sample)
+//     Every arg is a number the GUEST resolved out of the AUDI manifest: the
+//     core parses no JSON and knows no names. `bank` is always a BANK SLOT —
+//     the index of a 0x4000-byte window inside the AUDI programs half, i.e.
+//     the position of that ROM bank in the manifest's `bankOrder`. `addr` is
+//     the program's GB address inside that window (0x4000..0x7fff), and
+//     `engine` is the sound-engine id whose wave/drum tables the program
+//     uses (1..3 in Red).
+//     music(bank, addr, engine, flags)     start a song; flags = MUSIC_FLAG
+//                                          (loop = the reference's
+//                                          allowLoops, ChipSynth.lua:429).
+//                                          Replaces whatever was playing:
+//                                          "the same song does not restart"
+//                                          is guest policy (Music.lua:239)
+//     musicStop()                          drop the song, keep the stream
+//     musicFade(ticks)                     Music.lua:312 fadeOut: rAUDVOL
+//                                          steps AUDIO_FADE_LEVELS -> 0, one
+//                                          level every `ticks` ticks, and the
+//                                          song stops at 0. ticks <= 0 stops
+//                                          immediately
+//     sfx(bank, addr, engine, pitch, tempo, flags)
+//                                          a one-shot over the music
+//                                          (ChipAudio.lua:414 newSfx): pitch
+//                                          = wFrequencyModifier added to
+//                                          every tone register, tempo = the
+//                                          SFX frame length (the reference
+//                                          passes 0 and AUDIO_SFX_TEMPO for
+//                                          the plain form). flags = SFX_FLAG;
+//                                          `duck` is the FANFARE rule
+//                                          (Sound.lua:55, Music.lua:102) —
+//                                          the song PAUSES for the jingle and
+//                                          resumes after it, which is what
+//                                          stealing the music's channels
+//                                          sounds like
+//     cry(bank, addr, engine, pitch, length)
+//                                          the species cry (ChipAudio.lua:425
+//                                          newCry): pitch = the cry table's
+//                                          frequency modifier, length = its
+//                                          tempo byte, which becomes every
+//                                          non-noise channel's frame length
+//     audioWaves(engine, bank, addr)       pin a sound engine's 6-entry wave
+//                                          instrument table (manifest
+//                                          waveBanks[engine], ChipSynth.lua
+//                                          :685). Boot-time, once per engine
+//     audioDrum(engine, drum, bank, addr)  pin one drum program of a sound
+//                                          engine (manifest
+//                                          noiseHeaders[engine][drum],
+//                                          ChipSynth.lua:645). Boot-time; a
+//                                          music noise note names a drum by
+//                                          this id
+//
+// Audio PCM leaves through the PocketJS audio module (contracts/spec/audio.ts,
+// capability `audio.pcm`), not through this surface: the host pumps
+// `Scene::render_audio` for exactly the frames its ring wants. A host that
+// mounts no audio module never calls it and the identical op stream runs
+// silent.
 
 export const VOX_OP = {
   gamedata: 1,
   stats: 2,
   reset: 3,
+  quality: 4,
   audiodata: 17,
 
   mapShow: 10,
@@ -343,11 +525,69 @@ export const VOX_OP = {
   cardHide: 72,
   battleCam: 73,
   arenaEnd: 74,
+
+  music: 18,
+  musicStop: 19,
+  musicFade: 20,
+  sfx: 21,
+  cry: 22,
+  audioWaves: 23,
+  audioDrum: 24,
 } as const;
 
 /** Fixed-point scales used by op args. */
 export const Q4 = 16;
 export const Q8 = 256;
+
+// ---------------------------------------------------------------------------
+// The chip synth — constants the core, the cooker and the guest share
+// ---------------------------------------------------------------------------
+//
+// The synth is a port of gen1recomp `src/core/ChipSynth.lua`; these are that
+// file's own constants, pinned here so the Rust core and any TypeScript that
+// resolves the manifest agree on them exactly.
+
+/** One ROM sound bank: the window a program address is read inside. */
+export const AUDIO_BANK_SIZE = 0x4000;
+/** Sound-engine table slots. Red uses ids 1..3; slot 0 is never pinned. */
+export const AUDIO_ENGINES = 4;
+/** Drum ids per sound engine (Red's tables reach 19). */
+export const AUDIO_DRUMS = 32;
+/** Wave instruments a sound engine exposes: 5 read + 1 shared across 6..9
+ *  (ChipSynth.lua:685-707 — the ROM's table is short and the driver clamps). */
+export const AUDIO_WAVES = 9;
+/** The channel-program tick clock durations are counted in (ChipSynth.lua:18). */
+export const AUDIO_TICKS_PER_SECOND = 15360;
+/** One frame of the GB sound driver, in program ticks (ChipSynth.lua:19). */
+export const AUDIO_FRAME_TICKS = 256;
+/** The GB master clock the noise LFSR divides down (ChipSynth.lua:20). */
+export const AUDIO_GB_CLOCK = 4194304;
+/** The plain SFX tempo byte (ChipAudio.lua:418 `0x80 + (tempo or 0x80)`). */
+export const AUDIO_SFX_TEMPO = 0x80;
+/** rAUDVOL levels a fade walks down through (Music.lua:312 fadeOut). */
+export const AUDIO_FADE_LEVELS = 7;
+/** Longest one-shot the reference renders (ChipSynth.lua:849). */
+export const AUDIO_EFFECT_MAX_SECONDS = 5;
+/**
+ * The synth's integer mix unit: one channel at full scale is AUDIO_MIX_UNIT.
+ * 480 = lcm(15, 32), so both a pulse at volume v (v/15) and a wave nibble at
+ * output level 1/4 ((n-8)/8 * 1/4) land on an integer — which is what lets
+ * the whole mix run without a float and still quantize to the same s16 the
+ * reference's doubles do.
+ */
+export const AUDIO_MIX_UNIT = 480;
+
+/** `music(…, flags)`. */
+export const AUDIO_MUSIC_FLAG = {
+  /** Honor `sound_loop 0` instead of ending the channel (ChipSynth.lua:429). */
+  loop: 1 << 0,
+} as const;
+
+/** `sfx(…, flags)`. */
+export const AUDIO_SFX_FLAG = {
+  /** A FANFARE: pause the song for the jingle (Sound.lua:55, Music.lua:102). */
+  duck: 1 << 0,
+} as const;
 
 // ---------------------------------------------------------------------------
 // Events — core -> guest facts, drained as one batch per tick. APPEND ONLY.

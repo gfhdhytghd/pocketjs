@@ -486,6 +486,13 @@ class CaptureHost implements VoxelHost {
   battleCam(...a: number[]): void {
     this.rec("battleCam", ...a);
   }
+  music(): void {}
+  musicStop(): void {}
+  musicFade(): void {}
+  sfx(): void {}
+  cry(): void {}
+  audioWaves(): void {}
+  audioDrum(): void {}
   arenaEnd(): void {
     this.rec("arenaEnd");
   }
