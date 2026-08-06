@@ -56,9 +56,16 @@ export interface MapGeometry {
   /** Terrain, carved tree hulls included and marked (`Quad.tree`). */
   terrain: Quad[];
   /**
+   * The MIDDLE level of detail: the same hulls carved at 2x2-px voxels
+   * (trees.ts `step`), ~1/4 the fine quads with full-resolution art on the
+   * faces. Its own stream — unlike the fine hulls it never rides terrain,
+   * because nothing about the identity rung depends on its order.
+   */
+  treeCoarse: Quad[];
+  /**
    * The FAR level of detail: every hull-claimed cell re-extruded as the plain
    * box the mesher would have built for it had no hull been carved. Drawn
-   * INSTEAD of the hulls past `treeHullDist`, never with them.
+   * INSTEAD of the carved levels past `treeCoarseDist`, never with them.
    */
   treeBox: Quad[];
   water: Quad[];
@@ -453,6 +460,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   // hidden-face cull, the chunk partition, the u16 batching — sees the same
   // array it saw before tree LOD existed and the near level of detail keeps
   // its exact quad order.
+  const treeCoarse: Quad[] = [];
   for (const st of S.roundStamps) {
     for (const q of st.quads) {
       const moved: Quad = {
@@ -464,6 +472,19 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         f: q.f,
       };
       terrain.push({ ...moved, shade: groundShades(moved), tree: true });
+    }
+    // The middle level stamps beside the fine one, into its own stream —
+    // the same translation, the same ground darkening.
+    for (const q of st.coarse) {
+      const moved: Quad = {
+        c: q.c.map(([x, y, z]) => [x + st.mx, y, z + st.mz]) as [number, number, number][],
+        uv: q.uv,
+        u: q.u,
+        v: q.v,
+        shade: q.shade,
+        f: q.f,
+      };
+      treeCoarse.push({ ...moved, shade: groundShades(moved) });
     }
   }
 
@@ -528,6 +549,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   for (const [key, quads] of stamps) stamps.set(key, cullHidden(quads));
   return {
     terrain: cullHidden(terrain),
+    treeCoarse: cullHidden(treeCoarse),
     treeBox: cullHidden(treeBox),
     water: cullHidden(water),
     grass: cullHidden(S.grassQuads.map((q) => ({ ...q, shade: groundShades(q) })), PULLED),
@@ -614,6 +636,7 @@ export function packMap(geo: MapGeometry, uvt: UvTransform): { chunks: ChunkOut[
   // detail byte-identical to the pre-LOD cook.
   const streams: [number, Quad[]][] = [
     [MESH_KIND.terrain, geo.terrain],
+    [MESH_KIND.treeCoarse, geo.treeCoarse],
     [MESH_KIND.treeBox, geo.treeBox],
     [MESH_KIND.water, geo.water],
     [MESH_KIND.grass, geo.grass],

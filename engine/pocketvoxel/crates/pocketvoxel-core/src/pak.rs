@@ -76,7 +76,7 @@
 //!                                             c * CHUNK_PX, map-local)
 //!        i16 min_x,min_y,min_z,max_x,max_y,max_z   AABB, map-local world px
 //!        MESH_KINDS mesh ranges in mesh_kind order (terrain, treeHull,
-//!        treeBox, water, grass, flower):
+//!        treeCoarse, treeBox, water, grass, flower):
 //!          u32 vert_base | u16 vert_count | u16 index_count | u32 index_base
 //!        - indices are RELATIVE to vert_base (GE batch style, u16-safe)
 //!        - index_count % 3 == 0; every index < vert_count (checked at load)
@@ -409,6 +409,13 @@ impl<'a> Pak<'a> {
     /// which is the degrade the flag exists to make possible.
     pub fn has_tree_lod(&self) -> bool {
         self.meta.flags & VXPK_META_FLAG_TREE_LOD != 0
+    }
+
+    /// True when the chunks also carry the MIDDLE tree level — the 2x2-px
+    /// coarse carve (`mesh_kind::TREE_COARSE`). A rung asking for it on a
+    /// pak without it draws the fine hulls instead: slower, never treeless.
+    pub fn has_tree_coarse(&self) -> bool {
+        self.meta.flags & spec::VXPK_META_FLAG_TREE_COARSE != 0
     }
 
     /// UI tile for a character; `None` when the pak has no glyph for it.
@@ -1031,6 +1038,7 @@ pub(crate) mod tests {
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
+                    MeshRange::default(),
                 ],
             }],
         );
@@ -1081,6 +1089,7 @@ pub(crate) mod tests {
                 aabb_max: [128, 0, 128],
                 meshes: [
                     terrain,
+                    MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),

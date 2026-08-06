@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import {
   ATLAS_KIND,
   MESH_KIND,
+  VXPK_META_FLAG_TREE_COARSE,
   VXPK_META_FLAG_TREE_LOD,
 } from "../../../contracts/spec/voxel-spec.ts";
 
@@ -235,6 +236,9 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
   const treeLod = packedMaps.some((m) =>
     m.chunks.some((c) => c.meshes[MESH_KIND.treeBox].indices.length > 0),
   );
+  const treeCoarse = packedMaps.some((m) =>
+    m.chunks.some((c) => c.meshes[MESH_KIND.treeCoarse].indices.length > 0),
+  );
   const { bytes, stats } = writePak({
     palettes,
     pages,
@@ -244,7 +248,9 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     audioJson: hasAudio ? new Uint8Array(readFileSync(audioJsonPath)) : undefined,
     audioPrograms: hasAudio ? new Uint8Array(readFileSync(audioProgramPath)) : undefined,
     emotePage,
-    metaFlags: treeLod ? VXPK_META_FLAG_TREE_LOD : 0,
+    metaFlags:
+      (treeLod ? VXPK_META_FLAG_TREE_LOD : 0) |
+      (treeCoarse ? VXPK_META_FLAG_TREE_COARSE : 0),
     colour: colour
       ? { maps: colour.maps, pagePal: colour.pagePal, flags: colour.flags }
       : undefined,

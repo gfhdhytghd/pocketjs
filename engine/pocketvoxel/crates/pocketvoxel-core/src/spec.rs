@@ -99,9 +99,12 @@ pub struct QualityDials {
     pub grass_dist: f32,
     /// Flower chunk meshes past this distance are not drawn.
     pub flower_dist: f32,
-    /// A chunk inside this distance draws its CARVED tree hulls;
-    /// past it, the same cells as plain boxes (`mesh_kind::TREE_BOX`).
+    /// A chunk inside this distance draws its FINE carved hulls;
+    /// between it and `tree_coarse_dist`, the 2x2-px coarse carve.
     pub tree_hull_dist: f32,
+    /// A chunk inside this (but past `tree_hull_dist`) draws the
+    /// coarse carve; past it, plain boxes (`mesh_kind::TREE_BOX`).
+    pub tree_coarse_dist: f32,
     /// No chunk past this distance is drawn at all (any mesh kind).
     pub chunk_dist: f32,
     /// Pulled meshes (grass, flower) draw in place with one constant
@@ -116,7 +119,8 @@ pub const QUALITY: [QualityDials; 3] = [
     QualityDials {
         grass_dist: 96.0,
         flower_dist: 96.0,
-        tree_hull_dist: 128.0,
+        tree_hull_dist: 0.0,
+        tree_coarse_dist: 128.0,
         chunk_dist: 340.0,
         pull_depth_bias: true,
     },
@@ -125,6 +129,7 @@ pub const QUALITY: [QualityDials; 3] = [
         grass_dist: 192.0,
         flower_dist: 192.0,
         tree_hull_dist: 192.0,
+        tree_coarse_dist: 192.0,
         chunk_dist: 340.0,
         pull_depth_bias: false,
     },
@@ -133,6 +138,7 @@ pub const QUALITY: [QualityDials; 3] = [
         grass_dist: 1000000000.0,
         flower_dist: 1000000000.0,
         tree_hull_dist: 1000000000.0,
+        tree_coarse_dist: 1000000000.0,
         chunk_dist: 340.0,
         pull_depth_bias: false,
     },
@@ -371,7 +377,7 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 4;
+pub const VXPK_VERSION: u16 = 5;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
@@ -380,6 +386,10 @@ pub const VXPK_META_SIZE: usize = 40;
 /// META flag bit 0: chunks carry BOTH tree levels of detail, so the
 /// runtime may pick one per chunk (`QualityDials::tree_hull_dist`).
 pub const VXPK_META_FLAG_TREE_LOD: u32 = 1;
+/// META flag bit 1: chunks also carry the MIDDLE tree level — the
+/// 2x2-px coarse carve (`mesh_kind::TREE_COARSE`). Without it a rung
+/// asking for coarse draws the fine hulls: slower, never treeless.
+pub const VXPK_META_FLAG_TREE_COARSE: u32 = 2;
 /// The AUDI payload's own header (json_len, program_len, two pad words).
 pub const VXPK_AUDIO_HEADER_SIZE: usize = 16;
 /// The VCOL payload's own header (version, counts, flags, two pad words).
@@ -421,13 +431,14 @@ pub const MAX_VERTS_PER_CHUNK_MESH: usize = 65532;
 pub mod mesh_kind {
     pub const TERRAIN: u16 = 0;
     pub const TREE_HULL: u16 = 1;
-    pub const TREE_BOX: u16 = 2;
-    pub const WATER: u16 = 3;
-    pub const GRASS: u16 = 4;
-    pub const FLOWER: u16 = 5;
+    pub const TREE_COARSE: u16 = 2;
+    pub const TREE_BOX: u16 = 3;
+    pub const WATER: u16 = 4;
+    pub const GRASS: u16 = 5;
+    pub const FLOWER: u16 = 6;
 }
 
-pub const MESH_KINDS: usize = 6;
+pub const MESH_KINDS: usize = 7;
 /// Bytes per CHNK chunk record: coords + AABB + a range per kind.
-pub const VXPK_CHUNK_RECORD_SIZE: usize = 88;
+pub const VXPK_CHUNK_RECORD_SIZE: usize = 100;
 

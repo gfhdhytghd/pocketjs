@@ -29,12 +29,27 @@ function lum(byte: number): number {
 
 interface Template {
   quads: Quad[];
+  /** The 2x2-px carve of the same drawing (`MESH_KIND.treeCoarse`). */
+  coarse: Quad[];
   bg: number | false;
 }
 
 const roundCache = new Map<string, Template>();
 
+interface Carve {
+  quads: Quad[];
+  bg: number | false;
+}
+
 // Structures.lua:604 roundTemplate, plain-hull subset (N x N x NY canvas).
+//
+// `step` is the voxel size in art px: 1 is the mod's own carve; 2 runs the
+// SAME algorithm on a half-resolution canvas — every canvas pixel covers a
+// step x step art block — and scales the emitted geometry back up, so the
+// silhouette quantises to `step` px while the art on the faces stays
+// full-resolution (UVs span the block's real texels and interpolate).
+// step = 1 is float-identical to the pre-parameter code: every ` * step`
+// multiplies by 1.0 and every classification block is a single texel.
 function roundTemplate(
   S: SGrid,
   map: GameMap,
@@ -43,25 +58,43 @@ function roundTemplate(
   cy: number,
   groundTiles: number[],
   N: number,
-): Template {
-  const NX = N;
+  step = 1,
+): Carve {
+  const NX = N / step;
   const NY = NX;
   const N2 = NX / 2;
   const perRow = map.tileset.tilesPerRow || 16;
 
   const tileOf = (px: number, py: number): number | undefined =>
-    S.tileAt.get(keyOf(cx * 2 + Math.floor(px / 8), cy * 2 + Math.floor(py / 8)));
+    S.tileAt.get(
+      keyOf(cx * 2 + Math.floor((px * step) / 8), cy * 2 + Math.floor((py * step) / 8)),
+    );
   const texel = (px: number, py: number): [number, number] => {
     const tile = tileOf(px, py) ?? 0;
-    return [(tile % perRow) * 8 + mod(px, 8), Math.floor(tile / perRow) * 8 + mod(py, 8)];
+    return [
+      (tile % perRow) * 8 + mod(px * step, 8),
+      Math.floor(tile / perRow) * 8 + mod(py * step, 8),
+    ];
   };
 
-  // shade class of every canvas pixel
+  // Shade class of every canvas pixel. A coarse canvas pixel classifies its
+  // whole art block, solidest class first: the outline ("black") must stay
+  // CLOSED under downsampling — it is the flood barrier below — so a block
+  // touching the outline IS outline, and "off" survives only where the
+  // whole block is off.
+  const CLS_RANK: Record<string, number> = { black: 0, dark: 1, light: 2, white: 3, off: 4 };
   const cls: string[] = new Array(NX * NY);
   for (let py = 0; py < NY; py++) {
     for (let px = 0; px < NX; px++) {
       const [ax, ay] = texel(px, py);
-      cls[py * NX + px] = shadeClassOf(art.px(ax, ay));
+      let c = shadeClassOf(art.px(ax, ay));
+      for (let dy = 0; dy < step && step > 1; dy++) {
+        for (let dx = 0; dx < step; dx++) {
+          const c2 = shadeClassOf(art.px(ax + dx, ay + dy));
+          if (CLS_RANK[c2] < CLS_RANK[c]) c = c2;
+        }
+      }
+      cls[py * NX + px] = c;
     }
   }
 
@@ -256,7 +289,7 @@ function roundTemplate(
           z0[j] === z0[i] &&
           z1[j] === z1[i] &&
           src[j] === src[i] &&
-          Math.floor((ix2 + 1) / 8) === Math.floor(ix / 8)
+          Math.floor(((ix2 + 1) * step) / 8) === Math.floor((ix * step) / 8)
         ) {
           ix2++;
         } else break;
@@ -268,10 +301,13 @@ function roundTemplate(
       const row = src[i];
       const [ax0, ay] = texel(ix, row);
       const [ax1] = texel(ix2, row);
+      // A canvas pixel is a step x step art block: the run's art span ends
+      // at the LAST texel of its last block, and the face is `step` art
+      // rows tall — the full-resolution art rides the coarse geometry.
       const u0 = ax0 + 0.05;
-      const u1 = ax1 + 0.95;
+      const u1 = ax1 + (step - 1) + 0.95;
       const v0 = ay + 0.05;
-      const v1 = ay + 0.95;
+      const v1 = ay + (step - 1) + 0.95;
       quads.push({
         c: [
           [x0, yB, zF],
@@ -412,7 +448,15 @@ function roundTemplate(
     }
   }
   // cook-time merge: same-shade flat faces collapse (see merge.ts)
-  return { quads: mergeQuads(quads, (u, v) => art.px(Math.floor(u), Math.floor(v))), bg };
+  const merged = mergeQuads(quads, (u, v) => art.px(Math.floor(u), Math.floor(v)));
+  // Canvas units -> world px. step = 1 skips the map entirely, so the fine
+  // carve's floats are untouched by the parameter's existence.
+  if (step !== 1) {
+    for (const q of merged) {
+      q.c = q.c.map(([x, y, z]) => [x * step, y * step, z * step]) as [number, number, number][];
+    }
+  }
+  return { quads: merged, bg };
 }
 
 // Structures.lua:1278 buildCylinders — the cylinder/canopy scans.
@@ -468,10 +512,20 @@ export function buildCylinders(
         const sig = `${tsid}|g32|${gsig}|${ids.join(":")}`;
         let tpl = roundCache.get(sig);
         if (!tpl) {
-          tpl = roundTemplate(S, map, art, cx, cy, groundTiles, 32);
+          const fine = roundTemplate(S, map, art, cx, cy, groundTiles, 32);
+          // The middle level: same drawing, 2x2-px voxels, no ground vote
+          // (the fine pass owns bg).
+          const coarse = roundTemplate(S, map, art, cx, cy, [], 32, 2).quads;
+          tpl = { quads: fine.quads, coarse, bg: fine.bg };
           roundCache.set(sig, tpl);
         }
-        S.roundStamps.push({ quads: tpl.quads, mx: cx * 16 + 16, mz: cy * 16 + 16, r: 16 });
+        S.roundStamps.push({
+          quads: tpl.quads,
+          coarse: tpl.coarse,
+          mx: cx * 16 + 16,
+          mz: cy * 16 + 16,
+          r: 16,
+        });
         for (let dy = 0; dy < 4; dy++) {
           for (let dx = 0; dx < 4; dx++) {
             const tk = keyOf(cx * 2 + dx, cy * 2 + dy);
@@ -501,10 +555,17 @@ export function buildCylinders(
         const sig = `${tsid}|${gsig}|${ids.join(":")}`;
         let tpl = roundCache.get(sig);
         if (!tpl) {
-          tpl = roundTemplate(S, map, art, cx, cy, groundTiles, 16);
+          const fine = roundTemplate(S, map, art, cx, cy, groundTiles, 16);
+          const coarse = roundTemplate(S, map, art, cx, cy, [], 16, 2).quads;
+          tpl = { quads: fine.quads, coarse, bg: fine.bg };
           roundCache.set(sig, tpl);
         }
-        S.roundStamps.push({ quads: tpl.quads, mx: cx * 16 + 8, mz: cy * 16 + 8 });
+        S.roundStamps.push({
+          quads: tpl.quads,
+          coarse: tpl.coarse,
+          mx: cx * 16 + 8,
+          mz: cy * 16 + 8,
+        });
         for (let dy = 0; dy < 2; dy++) {
           for (let dx = 0; dx < 2; dx++) {
             const tk = keyOf(cx * 2 + dx, cy * 2 + dy);

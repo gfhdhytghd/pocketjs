@@ -191,12 +191,17 @@ export const CHUNK_DRAW_DIST_PX = 2.5 * WORLD_VIEW_H;
  * whole field. On ROUTE_1 at pitch rung 2 those two meshes are 40 k of the
  * frame's 80 k triangles — half the frame spent below the ankle.
  *
- * `treeHullDist` picks a chunk's tree geometry: inside it the chunk draws its
- * carved hulls (`MESH_KIND.treeHull`), outside it the same cells as plain
- * boxes (`MESH_KIND.treeBox`). A carved hull is ~700 quads per cell and a box
- * is under ten, so this is the largest single dial on the ladder — carved
- * hulls are 53 k of PALLET_TOWN's 97 k triangles at pitch rung 2 and 34 k of
- * ROUTE_1's 80 k, more than grass, flowers and water together.
+ * `treeHullDist` / `treeCoarseDist` pick a chunk's tree geometry from THREE
+ * cooked levels: inside `treeHullDist` the fine carve (`MESH_KIND.treeHull`,
+ * 1x1-px voxels, ~700 quads a cell), between it and `treeCoarseDist` the
+ * coarse carve (`MESH_KIND.treeCoarse`, 2x2-px voxels, ~1/4 the quads with
+ * the SAME full-resolution art on the faces), past both the plain box
+ * (`MESH_KIND.treeBox`, under ten). Trees are the largest single item on the
+ * ladder — fine hulls are 53 k of PALLET_TOWN's 97 k triangles at pitch rung
+ * 2 and 34 k of ROUTE_1's 80 k, more than grass, flowers and water together,
+ * and ROUTE_1 is a corridor whose trees are all NEAR, which is why the psp
+ * rung's near level is the coarse carve (`treeHullDist: 0`): no distance
+ * dial reaches near trees, only a cheaper carve does.
  *
  * `pullDepthBias` (0/1) changes HOW the pulled meshes (grass, flower) get
  * their camera-ward depth trick, not how many draw. Geometric pull — the
@@ -233,18 +238,22 @@ export const QUALITY = [
   {
     grassDist: 96,
     flowerDist: 96,
-    treeHullDist: 128,
+    // The near level is the COARSE carve (treeHullDist 0): every carved
+    // tree this rung draws is the 2x2-px one, boxes past 128 as before.
+    treeHullDist: 0,
+    treeCoarseDist: 128,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 1,
   },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px
   // cap leave room for only two distinct settings here. Measured, 192 px
-  // keeps every hull the top rung draws.
+  // keeps every hull the top rung draws; the coarse level never shows.
   {
     grassDist: 192,
     flowerDist: 192,
     treeHullDist: 192,
+    treeCoarseDist: 192,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
   },
@@ -253,6 +262,7 @@ export const QUALITY = [
     grassDist: QUALITY_UNBOUNDED,
     flowerDist: QUALITY_UNBOUNDED,
     treeHullDist: QUALITY_UNBOUNDED,
+    treeCoarseDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
   },
@@ -674,11 +684,12 @@ export const EVENT_CAP = 64;
 
 export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
 /**
- * 4 since a chunk carries both tree levels of detail: META grew a flags word
- * and the chunk record grew two mesh ranges. Both shapes are pinned below and
- * both readers validate them, so an older pak is rejected, never mis-read.
+ * 4 grew the chunk record by the two tree levels of detail and META by a
+ * flags word; 5 grew the record again by the MIDDLE tree level
+ * (`MESH_KIND.treeCoarse`). The shapes are pinned below and both readers
+ * validate them, so an older pak is rejected, never mis-read.
  */
-export const VXPK_VERSION = 4;
+export const VXPK_VERSION = 5;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
@@ -692,6 +703,14 @@ export const VXPK_META_SIZE = 40;
  * the other draws whichever the pak holds instead of dropping the trees.
  */
 export const VXPK_META_FLAG_TREE_LOD = 1 << 0;
+/**
+ * META flag bit 1: the chunks also carry the MIDDLE tree level — the same
+ * hulls carved at 2x2-px voxels (`MESH_KIND.treeCoarse`, ~1/4 the quads; the
+ * art on the faces stays full-resolution because only geometry coarsens).
+ * Without it, a rung asking for the coarse level draws the fine hulls
+ * instead: more triangles, never fewer trees.
+ */
+export const VXPK_META_FLAG_TREE_COARSE = 1 << 1;
 /** The AUDI payload's own header (json_len, program_len, two pad words). */
 export const VXPK_AUDIO_HEADER_SIZE = 16;
 /** The VCOL payload's own header (version, counts, flags, two pad words). */
@@ -800,17 +819,25 @@ export const MESH_KIND = {
   /**
    * Carved round-scenery hulls (trees), the NEAR level of detail. Cooked out
    * of the terrain stream into their own range so the runtime can swap them
-   * for `treeBox` past `treeHullDist`; drawn immediately after their own
-   * chunk's terrain, which is exactly where they sat inside it.
+   * per chunk; drawn immediately after their own chunk's terrain, which is
+   * exactly where they sat inside it.
    */
   treeHull: 1,
+  /**
+   * The MIDDLE level: the same hulls carved at 2x2-px voxels — ~1/4 the
+   * quads, full-resolution art on the faces (UVs interpolate the original
+   * texels; only the silhouette quantises to 2 px). The three tree kinds are
+   * alternatives inside the terrain pass: a chunk draws exactly one, chosen
+   * by `treeHullDist`/`treeCoarseDist`.
+   */
+  treeCoarse: 2,
   /** The same cells as plain extruded boxes: the FAR level of detail. */
-  treeBox: 2,
-  water: 3,
-  grass: 4,
-  flower: 5,
+  treeBox: 3,
+  water: 4,
+  grass: 5,
+  flower: 6,
 } as const;
-export const MESH_KINDS = 6;
+export const MESH_KINDS = 7;
 
 /**
  * Bytes per CHNK chunk record: i16 cx | i16 cy | i16 AABB[6] | one 12-byte

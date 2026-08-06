@@ -18,6 +18,7 @@ import {
   QUALITY_UNBOUNDED,
   VOX_OP,
   VXPK_CHUNK_RECORD_SIZE,
+  VXPK_META_FLAG_TREE_COARSE,
   VXPK_META_FLAG_TREE_LOD,
   VXPK_META_SIZE,
   VXPK_TAG,
@@ -60,7 +61,13 @@ test("climbing the ladder never draws less", () => {
     expect(above.grassDist).toBeGreaterThanOrEqual(below.grassDist);
     expect(above.flowerDist).toBeGreaterThanOrEqual(below.flowerDist);
     expect(above.treeHullDist).toBeGreaterThanOrEqual(below.treeHullDist);
+    expect(above.treeCoarseDist).toBeGreaterThanOrEqual(below.treeCoarseDist);
     expect(above.chunkDist).toBeGreaterThanOrEqual(below.chunkDist);
+    // The carve reach — how far SOME carved level (fine or coarse) shows
+    // before boxes take over — also never shrinks on the way up.
+    expect(Math.max(above.treeHullDist, above.treeCoarseDist)).toBeGreaterThanOrEqual(
+      Math.max(below.treeHullDist, below.treeCoarseDist),
+    );
   }
 });
 
@@ -73,9 +80,12 @@ test("the top rung is the identity", () => {
   const top = QUALITY.at(-1)!;
   expect(top.grassDist).toBe(QUALITY_UNBOUNDED);
   expect(top.flowerDist).toBe(QUALITY_UNBOUNDED);
-  // Unbounded here means every tree carved, which is what the pre-ladder
-  // runtime drew: the box level of detail exists only for lower rungs.
+  // Unbounded here means every tree carved FINE, which is what the
+  // pre-ladder runtime drew: the coarse and box levels exist only for lower
+  // rungs (the fine dial is checked first, so an unbounded coarse dial at
+  // the top is unreachable by construction).
   expect(top.treeHullDist).toBe(QUALITY_UNBOUNDED);
+  expect(top.treeCoarseDist).toBe(QUALITY_UNBOUNDED);
   // The mod's own pull is geometric — per-vertex, along each eye ray. The
   // depth-bias substitute exists only below the top.
   expect(top.pullDepthBias).toBe(0);
@@ -95,17 +105,19 @@ test("depth-bias pull never rides above a geometric rung", () => {
 
 // The GB grass-over-feet trick lives at the player's own cell, so the chunk
 // the view centre stands in must survive every rung's detail dials — and so
-// must the tree the player is standing next to, which is what makes tree LOD
-// a distance dial rather than the global VOXEL_TREE_BOXES switch it replaces.
-// The farthest a point inside a chunk can be from that chunk's centre is
-// half*sqrt(2), and a dial's limit is widened by that same half.
+// must the tree the player is standing next to: CARVED at some level, never
+// the box slab, which is what makes tree LOD distance dials rather than the
+// global VOXEL_TREE_BOXES switch they replaced. The farthest a point inside
+// a chunk can be from that chunk's centre is half*sqrt(2), and a dial's
+// limit is widened by that same half.
 test("no rung fades the chunk underfoot", () => {
   const half = CHUNK_PX / 2;
   const worst = half * Math.SQRT2;
   for (const [i, rung] of QUALITY.entries()) {
     expect(rung.grassDist + half).toBeGreaterThan(worst);
     expect(rung.flowerDist + half).toBeGreaterThan(worst);
-    expect(rung.treeHullDist + half).toBeGreaterThan(worst);
+    // The carve reach: fine or coarse, the neighbouring tree stays a tree.
+    expect(Math.max(rung.treeHullDist, rung.treeCoarseDist) + half).toBeGreaterThan(worst);
     expect(i).toBeGreaterThanOrEqual(0);
   }
 });
@@ -116,12 +128,16 @@ test("no rung fades the chunk underfoot", () => {
 // draw its carved hulls at every rung instead of losing its trees.
 test("the pak declares the levels of detail it carries", () => {
   expect(VXPK_META_FLAG_TREE_LOD).toBeGreaterThan(0);
+  expect(VXPK_META_FLAG_TREE_COARSE).toBeGreaterThan(0);
+  // Distinct single bits: a pak can carry LOD without the coarse level
+  // (yesterday's cooks) and each fact reads independently.
+  expect(VXPK_META_FLAG_TREE_LOD & VXPK_META_FLAG_TREE_COARSE).toBe(0);
   // The record has room for the flags word and its pad, and both writers
   // size the META payload from this constant.
   expect(VXPK_META_SIZE).toBe(40);
-  // Both tree levels are real mesh kinds with ranges of their own, so the
-  // chunk record grew and every reader must size it from the spec.
-  expect(MESH_KIND.treeHull).not.toBe(MESH_KIND.treeBox);
+  // All three tree levels are real mesh kinds with ranges of their own, so
+  // the chunk record grew and every reader must size it from the spec.
+  expect(new Set([MESH_KIND.treeHull, MESH_KIND.treeCoarse, MESH_KIND.treeBox]).size).toBe(3);
   expect(MESH_KINDS).toBe(Object.keys(MESH_KIND).length);
   expect(VXPK_CHUNK_RECORD_SIZE).toBe(16 + MESH_KINDS * 12);
 });
@@ -134,7 +150,8 @@ test("mesh kinds are a dense 0..n range in draw order", () => {
   expect([...ids].sort((a, b) => a - b)).toEqual(ids.map((_, i) => i));
   expect(MESH_KIND.terrain).toBe(0);
   expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.terrain + 1);
-  expect(MESH_KIND.treeBox as number).toBe(MESH_KIND.treeHull + 1);
+  expect(MESH_KIND.treeCoarse as number).toBe(MESH_KIND.treeHull + 1);
+  expect(MESH_KIND.treeBox as number).toBe(MESH_KIND.treeCoarse + 1);
 });
 
 test("section tags are unique 4CCs", () => {

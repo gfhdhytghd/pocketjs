@@ -199,11 +199,11 @@ The dials, all distances in world px from the view centre to a chunk's own
 centre, widened by the chunk's half-extent — one function, `draw::within_dist`,
 so a dial added later cannot measure differently from these:
 
-| rung | `grassDist` | `flowerDist` | `treeHullDist` | `chunkDist` | `pullDepthBias` |
-| --- | --- | --- | --- | --- | --- |
-| `psp` (default) | 96 | 96 | 128 | 340 | on |
-| `vita` | 192 | 192 | 192 | 340 | off |
-| `desktop` | unbounded | unbounded | unbounded | 340 | off |
+| rung | `grassDist` | `flowerDist` | `treeHullDist` | `treeCoarseDist` | `chunkDist` | `pullDepthBias` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `psp` (default) | 96 | 96 | 0 | 128 | 340 | on |
+| `vita` | 192 | 192 | 192 | 192 | 340 | off |
+| `desktop` | unbounded | unbounded | unbounded | unbounded | 340 | off |
 
 `chunkDist` is 2.5 view-heights at **every** rung including the top: it is
 `draw.rs`'s old hard-coded `CULL_DIST` folded in, a pre-existing frame-budget
@@ -233,15 +233,31 @@ It does not reach 18 k, and **no distance dial can**: even deleting grass and
 flowers outright leaves the worst story frame at 99 176 triangles against
 131 432 today.
 
-**Why the tree hull distance is 128, and what the cook had to carry for it.**
+**Why the tree dials are 0/128, and what the cook had to carry for them.**
 A carved tree hull is **~700 quads per cell**; the plain box the same cell
 extrudes to is **under ten**. That is why trees, not detail meshes, are the
 frame: at pitch rung 2 the hulls are **55 754 of PALLET_TOWN's 96 836
 triangles and 34 732 of ROUTE_1's 80 428**, more than terrain, grass, flowers
-and water together. So the cooker emits BOTH — the carve into
-`MESH_KIND.treeHull`, the same cells re-extruded as boxes into
-`MESH_KIND.treeBox` — and `draw::build` picks one per chunk against
-`treeHullDist`, drawing it immediately after that chunk's own terrain.
+and water together. So the cooker emits all THREE levels — the fine carve
+into `MESH_KIND.treeHull`, the same drawing carved at 2×2-px voxels into
+`MESH_KIND.treeCoarse` (trees.ts runs the identical algorithm on a
+half-resolution canvas; ~1/3 the packed quads, and the art on the faces
+stays full-resolution because UVs span the real texels), the cells
+re-extruded as boxes into `MESH_KIND.treeBox` — and `draw::build` picks one
+per chunk against `treeHullDist`/`treeCoarseDist`, drawing it immediately
+after that chunk's own terrain.
+
+The psp rung's `treeHullDist: 0` is not "no fine trees": `within_dist`
+widens every limit by the chunk's half-extent, so the chunk under the view
+centre — the tree the player is standing next to, where 2-px quantisation
+would be most visible — keeps the fine carve at ANY non-negative dial. The
+result is a three-ring gradient: fine underfoot, coarse to 128 px, boxes
+beyond. Measured over the story trace with this rung's other dials held
+(geostat, per-checkpoint): ROUTE_1 98 184 → **69 832** triangles (trees
+52 760 → 24 408, −54%), PALLET_TOWN 89 496 → **67 124**, `mid-route`
+59 656 → 41 868, the worst sampled frame 110 144 → **81 792** (−26%). The
+coarse level costs the pak the CHNK growth of one more mesh range per chunk
+plus its quads (ROUTE_1 75 294 → 85 374 packed quads, ~+13%).
 
 Measured over both tapes at every tick, with the other dials held at this
 rung: the worst frame is **flat at 110 144 triangles from 128 px to 144 px and
@@ -280,17 +296,17 @@ pixel-identical to the top rung across both tapes on the v1 maps, because
 128 px chunks inside a 340 px cap leave room for only two distinct settings
 here. It is a labelled rung owed a number from the machine itself.
 
-**What is still over budget after this rung.** The worst story frame at the
-shipped rung is 110 144 triangles against the GE's 18 k, and it is hulls
-52 760, grass 26 208, terrain 24 784, flowers 6 016, boxes 376. **Carved hulls
-are still the largest single item**, because ROUTE_1 is a corridor whose trees
-are all NEAR: no distance dial reaches them. The next cut for them is
-instancing, not culling — the STMP section already models a per-cell
-vert/index range, so one tileset signature's ~700-quad hull could be stored
-once and referenced per cell instead of replicated into the chunk pools. That
-is the same lever for the pak, where the carved hulls are **7.3 MB of the
-18.6 MB of chunk data**. Terrain is the problem after that: 24 784 triangles
-in that frame with nothing left to fade, because terrain is the silhouette.
+**What is still over budget after this rung.** With the coarse carve in,
+the worst sampled story frame at the shipped rung is **81 792** triangles
+(was 110 144): grass 26 208, terrain 24 784, coarse trees 13 440, fine
+underfoot trees 10 968, flowers 6 016, boxes 376. Trees stopped being the
+largest item; **grass and terrain now are**, and terrain has nothing left to
+fade because terrain is the silhouette. The remaining levers, in order:
+far-chunk impostors (the fixed field azimuth and five pitch rungs make the
+bake exact — the only lever with an order of magnitude in it), a grass
+density dial, and hull instancing through the STMP shape (which is also the
+pak lever: carved hulls are 7.3 MB of the chunk data, and the coarse level
+added its share on top).
 
 **Why `pullDepthBias` exists, and what it changes.** The mod's camera-ward
 pull displaces every pulled vertex toward the eye along its own ray — a

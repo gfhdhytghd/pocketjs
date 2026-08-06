@@ -486,11 +486,23 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     // it: the top rung must not merely draw the same triangles but draw them
     // in the same order.
     let tree_lod = pak.has_tree_lod();
+    let tree_coarse = pak.has_tree_coarse();
     if terrain_page.is_some() {
         for v in &visible {
             push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0, 0.0);
+            // Three levels, two dials: fine inside `tree_hull_dist`, the
+            // 2x2-px coarse carve inside `tree_coarse_dist`, boxes beyond.
+            // A rung asking for a level the pak lacks climbs UP to the fine
+            // hulls (slower, never treeless); a pak without LOD at all
+            // draws the one stream its cook produced.
             let tree = if !tree_lod || within_dist(v.dist2, v.half, dials.tree_hull_dist) {
                 mesh_kind::TREE_HULL
+            } else if within_dist(v.dist2, v.half, dials.tree_coarse_dist) {
+                if tree_coarse {
+                    mesh_kind::TREE_COARSE
+                } else {
+                    mesh_kind::TREE_HULL
+                }
             } else {
                 mesh_kind::TREE_BOX
             };
@@ -675,6 +687,7 @@ mod tests {
                 // it chunk by chunk, so they share its rank.
                 k if k == mesh_kind::TERRAIN
                     || k == mesh_kind::TREE_HULL
+                    || k == mesh_kind::TREE_COARSE
                     || k == mesh_kind::TREE_BOX =>
                 {
                     1
@@ -870,28 +883,44 @@ mod tests {
             meshes: m,
         };
         let empty = MeshRange::default();
-        // terrain | treeHull | treeBox | water | grass | flower
+        // terrain | treeHull | treeCoarse | treeBox | water | grass | flower
+        // The coarse slot ships alongside the others so the three-level
+        // selection is testable; the LOD-less pak leaves all three empty
+        // but the hull.
         let near = [
             quad(0, 0, 128, 128),
             quad(8, 8, 24, 24),
+            if tree_lod { quad(8, 8, 24, 24) } else { empty },
             if tree_lod { quad(8, 8, 24, 24) } else { empty },
             empty,
             quad(0, 0, 64, 64),
             quad(64, 64, 128, 128),
         ];
+        // One chunk north (128 px): outside the psp rung's fine reach
+        // (0 + half), inside its coarse reach (128 + half) — the middle ring.
+        let mid = [
+            quad(0, -128, 128, 0),
+            quad(8, -120, 24, -104),
+            if tree_lod { quad(8, -120, 24, -104) } else { empty },
+            if tree_lod { quad(8, -120, 24, -104) } else { empty },
+            empty,
+            quad(0, -128, 64, -64),
+            quad(64, -64, 128, 0),
+        ];
         let far = [
             quad(0, -384, 128, -256),
             quad(8, -376, 24, -360),
+            if tree_lod { quad(8, -376, 24, -360) } else { empty },
             if tree_lod { quad(8, -376, 24, -360) } else { empty },
             empty,
             quad(0, -384, 64, -320),
             quad(64, -320, 128, -256),
         ];
-        b.map(7, &[chunk(-3, far), chunk(0, near)]);
+        b.map(7, &[chunk(-3, far), chunk(-1, mid), chunk(0, near)]);
         b.stamps(7, &[]);
         b.game(b"{}");
         if tree_lod {
-            b.meta_flags(spec::VXPK_META_FLAG_TREE_LOD);
+            b.meta_flags(spec::VXPK_META_FLAG_TREE_LOD | spec::VXPK_META_FLAG_TREE_COARSE);
         }
         b.finish()
     }
@@ -925,35 +954,42 @@ mod tests {
         let count = |v: &[(u16, u32)], kind: u16| v.iter().filter(|(k, _)| *k == kind).count();
 
         let top = kinds(spec::quality_tier::DESKTOP);
-        assert_eq!(count(&top, mesh_kind::TERRAIN), 2, "both chunks in view");
-        assert_eq!(count(&top, mesh_kind::GRASS), 2, "top rung fades nothing");
-        assert_eq!(count(&top, mesh_kind::FLOWER), 2);
+        assert_eq!(count(&top, mesh_kind::TERRAIN), 3, "all three chunks in view");
+        assert_eq!(count(&top, mesh_kind::GRASS), 3, "top rung fades nothing");
+        assert_eq!(count(&top, mesh_kind::FLOWER), 3);
 
         assert_eq!(
             count(&top, mesh_kind::TREE_HULL),
-            2,
-            "the top rung carves every tree in view"
+            3,
+            "the top rung carves every tree in view FINE"
         );
+        assert_eq!(count(&top, mesh_kind::TREE_COARSE), 0);
         assert_eq!(count(&top, mesh_kind::TREE_BOX), 0);
 
         let psp = kinds(spec::quality_tier::PSP);
         assert_eq!(
             count(&psp, mesh_kind::TERRAIN),
-            2,
+            3,
             "a detail dial never touches terrain — the silhouette must not move"
         );
-        assert_eq!(count(&psp, mesh_kind::GRASS), 1, "the far grass faded");
-        assert_eq!(count(&psp, mesh_kind::FLOWER), 1);
+        assert_eq!(count(&psp, mesh_kind::GRASS), 2, "the far grass faded");
+        assert_eq!(count(&psp, mesh_kind::FLOWER), 2);
+        // The three rings of the tree ladder: the chunk underfoot stays
+        // FINE (a 0 fine dial still reaches it through the half-extent
+        // widening — the tree beside the player keeps every voxel), the
+        // middle ring carves coarse, the far ring boxes. Swapped, never
+        // dropped.
         assert_eq!(
             count(&psp, mesh_kind::TREE_HULL),
             1,
-            "the near chunk keeps its carved hulls"
+            "the chunk underfoot keeps the fine carve"
         );
         assert_eq!(
-            count(&psp, mesh_kind::TREE_BOX),
+            count(&psp, mesh_kind::TREE_COARSE),
             1,
-            "and the far one swaps them for boxes — swapped, never dropped"
+            "the middle ring carves at 2x2"
         );
+        assert_eq!(count(&psp, mesh_kind::TREE_BOX), 1, "the far ring boxes");
     }
 
     /// A pak that carries only ONE tree level says so (no META flag), and
@@ -981,7 +1017,8 @@ mod tests {
                     .filter(|i| matches!(i, Item::ChunkMesh { kind: k, .. } if *k == kind))
                     .count()
             };
-            assert_eq!(n(mesh_kind::TREE_HULL), 2, "both chunks keep their hulls");
+            assert_eq!(n(mesh_kind::TREE_HULL), 3, "every chunk keeps its hulls");
+            assert_eq!(n(mesh_kind::TREE_COARSE), 0, "no coarse level to draw");
             assert_eq!(n(mesh_kind::TREE_BOX), 0, "there are no boxes to draw");
         }
     }
@@ -1000,7 +1037,9 @@ mod tests {
             for (name, limit) in [
                 ("grass", dials.grass_dist),
                 ("flower", dials.flower_dist),
-                ("tree hull", dials.tree_hull_dist),
+                // The tree that matters is CARVED at some level — fine or
+                // coarse — never the box slab; the reach is their union.
+                ("carve reach", dials.tree_hull_dist.max(dials.tree_coarse_dist)),
             ] {
                 assert!(
                     within_dist(worst_dist2, half, limit),

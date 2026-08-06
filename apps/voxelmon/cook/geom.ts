@@ -160,7 +160,7 @@ export interface SGrid {
   objectQuads: Quad[];
   grassQuads: Quad[];
   flowerQuads: Quad[];
-  roundStamps: { quads: Quad[]; mx: number; mz: number; r?: number }[];
+  roundStamps: { quads: Quad[]; coarse: Quad[]; mx: number; mz: number; r?: number }[];
   /**
    * Tile keys a carved hull claimed. These are the cells the FAR level of
    * detail re-extrudes as plain boxes (`MESH_KIND.treeBox`), so it is the
