@@ -174,3 +174,194 @@ export function bakeGround(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// The facade fold: keep-stream quads absorbed into the bake page
+// ---------------------------------------------------------------------------
+
+/** Bake page height (v8 cook layout): ground rows 0..BAKE_TEXELS-1, facade
+ * strips shelf-packed below. Both dimensions power-of-two for the GE. */
+export const BAKE_PAGE_H = 256;
+
+interface PV2 {
+  u: number;
+  v: number;
+  abgr: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Group a baked chunk's KEEP quads by axis-aligned plane and fold each big
+ * group into a painted strip on the chunk's bake page + a 16px-subdivided
+ * grid of quads for the groundBake mesh. Building walls are dozens of 8px
+ * band quads on a handful of planes; one strip redraws a whole wall.
+ *
+ * Only quads whose four vertex colors match the group's facing shade fold
+ * (index-space painting cannot carry per-vertex AO); the rest — and any
+ * group the 128x128 facade shelf cannot hold — stay in keep. Returns the
+ * surviving keep quads and the facade geometry to append to the bake mesh.
+ */
+export function foldFacades(
+  keepVerts: PV2[],
+  canvas: Uint8Array,
+  srcTexels: Uint8Array,
+  srcW: number,
+  srcH: number,
+  transparent: (index: number) => boolean,
+): { keep: PV2[]; facadeVerts: PV2[]; facadeIndices: number[] } {
+  interface Group {
+    axis: "x" | "z" | "y";
+    coord: number;
+    quads: number[];
+    abgr: number;
+  }
+  const groups = new Map<string, Group>();
+  const quadCount = keepVerts.length / 4;
+  for (let q = 0; q < quadCount; q++) {
+    const vs = keepVerts.slice(q * 4, q * 4 + 4);
+    const axis = vs.every((v) => v.x === vs[0].x)
+      ? "x"
+      : vs.every((v) => v.z === vs[0].z)
+        ? "z"
+        : vs.every((v) => v.y === vs[0].y)
+          ? "y"
+          : null;
+    if (!axis) continue; // sloped (gables): stays geometry
+    if (!vs.every((v) => v.abgr === vs[0].abgr)) continue; // AO-shaded corner
+    const coord = axis === "x" ? vs[0].x : axis === "z" ? vs[0].z : vs[0].y;
+    const key = `${axis}:${coord}:${vs[0].abgr}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = { axis: axis as Group["axis"], coord, quads: [], abgr: vs[0].abgr }));
+    g.quads.push(q);
+  }
+
+  // Plane 2D mapping: (h, v) axes per plane orientation.
+  const to2d = (g: Group, v: PV2): [number, number] =>
+    g.axis === "z" ? [v.x, v.y] : g.axis === "x" ? [v.z, v.y] : [v.x, v.z];
+
+  const absorbed = new Set<number>();
+  const facadeVerts: PV2[] = [];
+  const facadeIndices: number[] = [];
+  // Shelf packer over the facade half of the canvas.
+  let shelfY = BAKE_TEXELS;
+  let shelfX = 0;
+  let shelfH = 0;
+
+  const candidates = [...groups.values()]
+    .filter((g) => g.quads.length >= 4)
+    .sort((a, b) => b.quads.length - a.quads.length);
+  for (const g of candidates) {
+    let h0 = Infinity;
+    let h1 = -Infinity;
+    let v0 = Infinity;
+    let v1 = -Infinity;
+    for (const q of g.quads) {
+      for (const v of keepVerts.slice(q * 4, q * 4 + 4)) {
+        const [hh, vv] = to2d(g, v);
+        if (hh < h0) h0 = hh;
+        if (hh > h1) h1 = hh;
+        if (vv < v0) v0 = vv;
+        if (vv > v1) v1 = vv;
+      }
+    }
+    const w = Math.ceil(h1 - h0);
+    const h = Math.ceil(v1 - v0);
+    if (w <= 0 || h <= 0 || w > BAKE_TEXELS) continue;
+    // Shelf placement (1 texel = 1 world px).
+    if (shelfX + w > BAKE_TEXELS) {
+      shelfY += shelfH;
+      shelfX = 0;
+      shelfH = 0;
+    }
+    if (shelfY + h > BAKE_PAGE_H) continue; // shelf full: stays geometry
+    const sx = shelfX;
+    const sy = shelfY;
+    shelfX += w;
+    shelfH = Math.max(shelfH, h);
+
+    // Paint every quad of the group into its strip cell (nearest, painter).
+    for (const q of g.quads) {
+      const vs = keepVerts.slice(q * 4, q * 4 + 4);
+      const p2 = vs.map((v) => to2d(g, v));
+      const qh0 = Math.min(...p2.map((p) => p[0]));
+      const qh1 = Math.max(...p2.map((p) => p[0]));
+      const qv0 = Math.min(...p2.map((p) => p[1]));
+      const qv1 = Math.max(...p2.map((p) => p[1]));
+      if (qh1 - qh0 < 1e-6 || qv1 - qv0 < 1e-6) continue;
+      // Affine UV over the quad's 2D rect (corner-weight interpolation).
+      const lerpUv = (hh: number, vv: number): [number, number] => {
+        const th = (hh - qh0) / (qh1 - qh0);
+        const tv = (vv - qv0) / (qv1 - qv0);
+        let u = 0;
+        let vq = 0;
+        let ws = 0;
+        for (let i = 0; i < 4; i++) {
+          const ch = (p2[i][0] - qh0) / (qh1 - qh0);
+          const cv = (p2[i][1] - qv0) / (qv1 - qv0);
+          const wgt = (ch > 0.5 ? th : 1 - th) * (cv > 0.5 ? tv : 1 - tv);
+          u += vs[i].u * wgt;
+          vq += vs[i].v * wgt;
+          ws += wgt;
+        }
+        return [u / ws, vq / ws];
+      };
+      const i0 = Math.max(0, Math.floor(qh0 - h0));
+      const i1 = Math.min(w - 1, Math.ceil(qh1 - h0));
+      const j0 = Math.max(0, Math.floor(qv0 - v0));
+      const j1 = Math.min(h - 1, Math.ceil(qv1 - v0));
+      for (let j = j0; j <= j1; j++) {
+        const vv = v0 + j + 0.5;
+        if (vv < qv0 || vv > qv1) continue;
+        for (let i = i0; i <= i1; i++) {
+          const hh = h0 + i + 0.5;
+          if (hh < qh0 || hh > qh1) continue;
+          const [uu, vq] = lerpUv(hh, vv);
+          const tx = Math.min(srcW - 1, Math.max(0, Math.floor(uu * srcW)));
+          const ty = Math.min(srcH - 1, Math.max(0, Math.floor(vq * srcH)));
+          const index = srcTexels[ty * srcW + tx];
+          if (transparent(index)) continue;
+          // v axis: strip row 0 = TOP of the plane rect (v1), growing down.
+          canvas[(sy + (h - 1 - j)) * BAKE_TEXELS + sx + i] = index;
+        }
+      }
+      absorbed.add(q);
+    }
+
+    // Emit the facade rect as a <=16px grid on the plane, UV into the strip.
+    const cols = Math.max(1, Math.ceil(w / 16));
+    const rows = Math.max(1, Math.ceil(h / 16));
+    const base = facadeVerts.length;
+    for (let r = 0; r <= rows; r++) {
+      for (let cix = 0; cix <= cols; cix++) {
+        const hh = h0 + (cix * w) / cols;
+        const vv = v1 - (r * h) / rows; // top row first
+        const pos =
+          g.axis === "z"
+            ? { x: hh, y: vv, z: g.coord }
+            : g.axis === "x"
+              ? { x: g.coord, y: vv, z: hh }
+              : { x: hh, y: g.coord, z: vv };
+        facadeVerts.push({
+          u: (sx + (cix * w) / cols) / BAKE_TEXELS,
+          v: (sy + (r * h) / rows) / BAKE_PAGE_H,
+          abgr: g.abgr,
+          ...pos,
+        });
+      }
+    }
+    for (let r = 0; r < rows; r++) {
+      for (let cix = 0; cix < cols; cix++) {
+        const b = base + r * (cols + 1) + cix;
+        facadeIndices.push(b, b + 1, b + cols + 2, b, b + cols + 2, b + cols + 1);
+      }
+    }
+  }
+
+  const keep: PV2[] = [];
+  for (let q = 0; q < quadCount; q++) {
+    if (!absorbed.has(q)) keep.push(...keepVerts.slice(q * 4, q * 4 + 4));
+  }
+  return { keep, facadeVerts, facadeIndices };
+}

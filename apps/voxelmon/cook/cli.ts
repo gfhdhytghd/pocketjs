@@ -40,7 +40,7 @@ import {
   ROOT,
 } from "./data.ts";
 import { buildCharmap, buildGamedata, type AtlasIndex } from "./gamedata.ts";
-import { bakeGround, BAKE_MAX_Y, BAKE_TEXELS } from "./groundbake.ts";
+import { BAKE_PAGE_H, bakeGround, BAKE_MAX_Y, BAKE_TEXELS, foldFacades } from "./groundbake.ts";
 import { packMap, runGeometry, type MapGeometry, type UvTransform } from "./mesh.ts";
 import { writePak } from "./pak.ts";
 import { planColour, Redpp, type ColourPlan, type PageOwner } from "./redpp.ts";
@@ -270,13 +270,29 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
         keep.verts.push(...quad);
         keep.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
       }
-      c.meshes[MESH_KIND.terrainKeep] = keep;
+      // The full bake page: ground rows on top, facade strips below.
+      const fullCanvas = new Uint8Array(BAKE_TEXELS * BAKE_PAGE_H).fill(clearIndex);
+      fullCanvas.set(canvas, 0);
+      const folded = foldFacades(
+        keep.verts,
+        fullCanvas,
+        terrain.page.frames[0],
+        terrain.page.w,
+        terrain.page.h,
+        transparentIdx,
+      );
+      const keptVerts = folded.keep;
+      const kept: typeof keep = { verts: keptVerts, indices: [] };
+      for (let q = 0; q * 4 < keptVerts.length; q++) {
+        kept.indices.push(q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3);
+      }
+      c.meshes[MESH_KIND.terrainKeep] = kept;
       c.bakePage = pages.length;
       pages.push({
         w: BAKE_TEXELS,
-        h: BAKE_TEXELS,
+        h: BAKE_PAGE_H,
         kind: ATLAS_KIND.terrain,
-        frames: [canvas],
+        frames: [fullCanvas],
         name: `bake/${m.mapId}/${c.cx},${c.cy}`,
       });
       pageOwners.push({ kind: ATLAS_KIND.terrain });
@@ -288,12 +304,13 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
       // AE ~16k), while the 16 px spans the rest of the pak is built from
       // demonstrably agree. 128 triangles a chunk against ~1500 replaced.
       const N = 8;
+      const groundVScale = BAKE_TEXELS / BAKE_PAGE_H; // ground = top rows
       const verts = [];
       for (let gz = 0; gz <= N; gz++) {
         for (let gx = 0; gx <= N; gx++) {
           verts.push({
             u: gx / N,
-            v: gz / N,
+            v: (gz / N) * groundVScale,
             abgr: 0xffffffff,
             x: x0 + (gx * 128) / N,
             y: 0,
@@ -308,6 +325,11 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
           indices.push(b, b + 1, b + N + 2, b, b + N + 2, b + N + 1);
         }
       }
+      // Facade strips ride the SAME page and mesh (docs §4a): a building
+      // wall of dozens of band quads redraws as one painted grid.
+      const fb = verts.length;
+      verts.push(...folded.facadeVerts);
+      indices.push(...folded.facadeIndices.map((i) => i + fb));
       c.meshes[MESH_KIND.groundBake] = { verts, indices };
       bakedChunks++;
     }
