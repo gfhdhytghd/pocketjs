@@ -139,7 +139,8 @@ test("the pak declares the levels of detail it carries", () => {
   // the chunk record grew and every reader must size it from the spec.
   expect(new Set([MESH_KIND.treeHull, MESH_KIND.treeCoarse, MESH_KIND.treeBox]).size).toBe(3);
   expect(MESH_KINDS).toBe(Object.keys(MESH_KIND).length);
-  expect(VXPK_CHUNK_RECORD_SIZE).toBe(16 + MESH_KINDS * 12);
+  // 20 = coords + AABB + the bake page word and its pad (v6).
+  expect(VXPK_CHUNK_RECORD_SIZE).toBe(20 + MESH_KINDS * 12);
 });
 
 // Mesh kinds ARE the draw order (voxel-spec.ts §MESH_KIND), and the two tree
@@ -149,7 +150,8 @@ test("mesh kinds are a dense 0..n range in draw order", () => {
   const ids: number[] = Object.values(MESH_KIND);
   expect([...ids].sort((a, b) => a - b)).toEqual(ids.map((_, i) => i));
   expect(MESH_KIND.terrain).toBe(0);
-  expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.terrain + 1);
+  expect(MESH_KIND.groundBake as number).toBe(MESH_KIND.terrain + 1);
+  expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.groundBake + 1);
   expect(MESH_KIND.treeCoarse as number).toBe(MESH_KIND.treeHull + 1);
   expect(MESH_KIND.treeBox as number).toBe(MESH_KIND.treeCoarse + 1);
 });

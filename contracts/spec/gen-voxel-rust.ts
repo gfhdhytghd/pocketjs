@@ -100,6 +100,8 @@ import {
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
+  BAKE_PAGE_NONE,
+  VXPK_META_FLAG_GROUND_BAKE,
   VXPK_META_FLAG_TREE_COARSE,
   VXPK_META_FLAG_TREE_LOD,
   VXPK_META_SIZE,
@@ -254,6 +256,9 @@ export function generateVoxelRust(): string {
   put("    pub tree_coarse_dist: f32,");
   put("    /// No chunk past this distance is drawn at all (any mesh kind).");
   put("    pub chunk_dist: f32,");
+  put("    /// An ELIGIBLE chunk past this draws its baked ground quad");
+  put("    /// (`mesh_kind::GROUND_BAKE`) instead of terrain+grass+flower.");
+  put("    pub ground_bake_dist: f32,");
   put("    /// Pulled meshes (grass, flower) draw in place with one constant");
   put("    /// NDC-depth bias instead of per-vertex geometric displacement —");
   put("    /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).");
@@ -271,6 +276,7 @@ export function generateVoxelRust(): string {
     put(`        tree_hull_dist: ${f32(row.treeHullDist)},`);
     put(`        tree_coarse_dist: ${f32(row.treeCoarseDist)},`);
     put(`        chunk_dist: ${f32(row.chunkDist)},`);
+    put(`        ground_bake_dist: ${f32(row.groundBakeDist)},`);
     put(`        pull_depth_bias: ${row.pullDepthBias === 1},`);
     put("    },");
   }
@@ -434,6 +440,10 @@ export function generateVoxelRust(): string {
   put("/// 2x2-px coarse carve (`mesh_kind::TREE_COARSE`). Without it a rung");
   put("/// asking for coarse draws the fine hulls: slower, never treeless.");
   put(`pub const VXPK_META_FLAG_TREE_COARSE: u32 = ${VXPK_META_FLAG_TREE_COARSE};`);
+  put("/// META flag bit 2: eligible chunks carry a baked ground quad + page.");
+  put(`pub const VXPK_META_FLAG_GROUND_BAKE: u32 = ${VXPK_META_FLAG_GROUND_BAKE};`);
+  put('/// `Chunk.bake_page` value for "no baked ground".');
+  put(`pub const BAKE_PAGE_NONE: u16 = ${hex(BAKE_PAGE_NONE, 4)};`);
   put("/// The AUDI payload's own header (json_len, program_len, two pad words).");
   put(`pub const VXPK_AUDIO_HEADER_SIZE: usize = ${VXPK_AUDIO_HEADER_SIZE};`);
   put("/// The VCOL payload's own header (version, counts, flags, two pad words).");

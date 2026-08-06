@@ -111,6 +111,9 @@ pub struct QualityDials {
     pub tree_coarse_dist: f32,
     /// No chunk past this distance is drawn at all (any mesh kind).
     pub chunk_dist: f32,
+    /// An ELIGIBLE chunk past this draws its baked ground quad
+    /// (`mesh_kind::GROUND_BAKE`) instead of terrain+grass+flower.
+    pub ground_bake_dist: f32,
     /// Pulled meshes (grass, flower) draw in place with one constant
     /// NDC-depth bias instead of per-vertex geometric displacement —
     /// exact at the camera focus, zero per-vertex CPU (`draw::depth_bias`).
@@ -126,6 +129,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_hull_dist: -1.0,
         tree_coarse_dist: 96.0,
         chunk_dist: 340.0,
+        ground_bake_dist: 64.0,
         pull_depth_bias: true,
     },
     // vita
@@ -135,6 +139,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_hull_dist: 192.0,
         tree_coarse_dist: 192.0,
         chunk_dist: 340.0,
+        ground_bake_dist: 1000000000.0,
         pull_depth_bias: false,
     },
     // desktop
@@ -144,6 +149,7 @@ pub const QUALITY: [QualityDials; 3] = [
         tree_hull_dist: 1000000000.0,
         tree_coarse_dist: 1000000000.0,
         chunk_dist: 340.0,
+        ground_bake_dist: 1000000000.0,
         pull_depth_bias: false,
     },
 ];
@@ -381,7 +387,7 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 5;
+pub const VXPK_VERSION: u16 = 6;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
@@ -394,6 +400,10 @@ pub const VXPK_META_FLAG_TREE_LOD: u32 = 1;
 /// 2x2-px coarse carve (`mesh_kind::TREE_COARSE`). Without it a rung
 /// asking for coarse draws the fine hulls: slower, never treeless.
 pub const VXPK_META_FLAG_TREE_COARSE: u32 = 2;
+/// META flag bit 2: eligible chunks carry a baked ground quad + page.
+pub const VXPK_META_FLAG_GROUND_BAKE: u32 = 4;
+/// `Chunk.bake_page` value for "no baked ground".
+pub const BAKE_PAGE_NONE: u16 = 0xffff;
 /// The AUDI payload's own header (json_len, program_len, two pad words).
 pub const VXPK_AUDIO_HEADER_SIZE: usize = 16;
 /// The VCOL payload's own header (version, counts, flags, two pad words).
@@ -434,15 +444,16 @@ pub const MAX_VERTS_PER_CHUNK_MESH: usize = 65532;
 /// Mesh kinds inside a chunk — draw order is their numeric order.
 pub mod mesh_kind {
     pub const TERRAIN: u16 = 0;
-    pub const TREE_HULL: u16 = 1;
-    pub const TREE_COARSE: u16 = 2;
-    pub const TREE_BOX: u16 = 3;
-    pub const WATER: u16 = 4;
-    pub const GRASS: u16 = 5;
-    pub const FLOWER: u16 = 6;
+    pub const GROUND_BAKE: u16 = 1;
+    pub const TREE_HULL: u16 = 2;
+    pub const TREE_COARSE: u16 = 3;
+    pub const TREE_BOX: u16 = 4;
+    pub const WATER: u16 = 5;
+    pub const GRASS: u16 = 6;
+    pub const FLOWER: u16 = 7;
 }
 
-pub const MESH_KINDS: usize = 7;
+pub const MESH_KINDS: usize = 8;
 /// Bytes per CHNK chunk record: coords + AABB + a range per kind.
-pub const VXPK_CHUNK_RECORD_SIZE: usize = 100;
+pub const VXPK_CHUNK_RECORD_SIZE: usize = 116;
 

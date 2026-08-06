@@ -579,6 +579,8 @@ export interface PackedMesh {
 export interface ChunkOut {
   cx: number;
   cy: number;
+  /** Atlas page of this chunk's baked ground, when eligible (v6). */
+  bakePage?: number;
   aabbMin: [number, number, number];
   aabbMax: [number, number, number];
   /** One mesh per spec MESH_KIND, in MESH_KIND order. */

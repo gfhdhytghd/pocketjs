@@ -256,6 +256,10 @@ export const QUALITY = [
     treeCoarseDist: 96,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 1,
+    // Past this, an eligible chunk's ground is the baked quad (see
+    // MESH_KIND.groundBake). Gated at runtime to the rung-2 rest pitch and
+    // to field play; initial value pending the device pass.
+    groundBakeDist: 64,
   },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px
@@ -268,6 +272,7 @@ export const QUALITY = [
     treeCoarseDist: 192,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
+    groundBakeDist: QUALITY_UNBOUNDED,
   },
   // desktop — the identity rung: every mesh unbounded, as before the ladder.
   {
@@ -277,6 +282,7 @@ export const QUALITY = [
     treeCoarseDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
+    groundBakeDist: QUALITY_UNBOUNDED,
   },
 ] as const;
 
@@ -698,10 +704,12 @@ export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
 /**
  * 4 grew the chunk record by the two tree levels of detail and META by a
  * flags word; 5 grew the record again by the MIDDLE tree level
- * (`MESH_KIND.treeCoarse`). The shapes are pinned below and both readers
- * validate them, so an older pak is rejected, never mis-read.
+ * (`MESH_KIND.treeCoarse`); 6 by the baked-ground quad
+ * (`MESH_KIND.groundBake`) and its per-chunk bake page. The shapes are
+ * pinned below and both readers validate them, so an older pak is
+ * rejected, never mis-read.
  */
-export const VXPK_VERSION = 5;
+export const VXPK_VERSION = 6;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
@@ -723,6 +731,12 @@ export const VXPK_META_FLAG_TREE_LOD = 1 << 0;
  * instead: more triangles, never fewer trees.
  */
 export const VXPK_META_FLAG_TREE_COARSE = 1 << 1;
+/**
+ * META flag bit 2: eligible chunks carry a baked ground quad + page
+ * (`MESH_KIND.groundBake`). Without it, `groundBakeDist` draws geometry
+ * everywhere — slower, never wrong.
+ */
+export const VXPK_META_FLAG_GROUND_BAKE = 1 << 2;
 /** The AUDI payload's own header (json_len, program_len, two pad words). */
 export const VXPK_AUDIO_HEADER_SIZE = 16;
 /** The VCOL payload's own header (version, counts, flags, two pad words). */
@@ -829,12 +843,23 @@ export const MAX_VERTS_PER_CHUNK_MESH = 65532;
 export const MESH_KIND = {
   terrain: 0,
   /**
+   * The chunk's BAKED GROUND: one textured quad drawn INSTEAD of this
+   * chunk's terrain + grass + flower meshes past `groundBakeDist` (§quality
+   * ladder). The texture is the cook's oblique projection of those quads
+   * onto the y=0 plane at the rung-2 rest pitch, composited in CLUT-index
+   * space on the chunk's own bake page (`Chunk.bake_page`), so palettes and
+   * the day tint apply unchanged. Only low-relief chunks bake (docs §4a);
+   * a chunk with an empty range here is ineligible and always draws its
+   * geometry.
+   */
+  groundBake: 1,
+  /**
    * Carved round-scenery hulls (trees), the NEAR level of detail. Cooked out
    * of the terrain stream into their own range so the runtime can swap them
    * per chunk; drawn immediately after their own chunk's terrain, which is
    * exactly where they sat inside it.
    */
-  treeHull: 1,
+  treeHull: 2,
   /**
    * The MIDDLE level: the same hulls carved at 2x2-px voxels — ~1/4 the
    * quads, full-resolution art on the faces (UVs interpolate the original
@@ -842,17 +867,20 @@ export const MESH_KIND = {
    * alternatives inside the terrain pass: a chunk draws exactly one, chosen
    * by `treeHullDist`/`treeCoarseDist`.
    */
-  treeCoarse: 2,
+  treeCoarse: 3,
   /** The same cells as plain extruded boxes: the FAR level of detail. */
-  treeBox: 3,
-  water: 4,
-  grass: 5,
-  flower: 6,
+  treeBox: 4,
+  water: 5,
+  grass: 6,
+  flower: 7,
 } as const;
-export const MESH_KINDS = 7;
+export const MESH_KINDS = 8;
 
 /**
- * Bytes per CHNK chunk record: i16 cx | i16 cy | i16 AABB[6] | one 12-byte
- * mesh range per MESH_KIND. Both writers size the directory with this.
+ * Bytes per CHNK chunk record: i16 cx | i16 cy | i16 AABB[6] | u16
+ * bake_page (0xffff = no bake) | u16 pad | one 12-byte mesh range per
+ * MESH_KIND. Both writers size the directory with this.
  */
-export const VXPK_CHUNK_RECORD_SIZE = 16 + MESH_KINDS * 12;
+export const VXPK_CHUNK_RECORD_SIZE = 20 + MESH_KINDS * 12;
+/** `Chunk.bake_page` value for "this chunk has no baked ground". */
+export const BAKE_PAGE_NONE = 0xffff;

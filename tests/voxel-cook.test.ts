@@ -85,7 +85,8 @@ function readPak(path: string): { flags: number; chunks: ChunkRec[] } {
     const r = first + i * VXPK_CHUNK_RECORD_SIZE;
     const meshes = [];
     for (let k = 0; k < MESH_KINDS; k++) {
-      const m = r + 16 + k * 12;
+      // 20 = coords + AABB + the v6 bake-page word and its pad.
+      const m = r + 20 + k * 12;
       meshes.push({
         vertBase: dv.getUint32(m, true),
         vertCount: dv.getUint16(m + 4, true),

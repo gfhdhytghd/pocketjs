@@ -436,6 +436,44 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     };
     let anim_frame = |frames: u16| ((scene.tick / TILE_ANIM_DIV) % frames as u32) as u16;
 
+    // The ground bake replaces an eligible chunk's terrain + grass + flower
+    // past the rung's dial (§quality ladder `groundBakeDist`) — and only
+    // where the bake is exact: field play at the rung-2 REST pitch, the
+    // projection it was cooked at. A battle rig, another pitch rung or a
+    // live tween falls back to full geometry: slower, never wrong.
+    let bake_ok = !scene.battle.active
+        && scene.pitch_rung == 2
+        && scene.pitch_t >= spec::PITCH_TWEEN_TICKS;
+    let baked = |v: &Visible<'_>| -> bool {
+        bake_ok
+            && v.chunk.bake_page != spec::BAKE_PAGE_NONE
+            && v.chunk.meshes[mesh_kind::GROUND_BAKE as usize].index_count > 0
+            && !within_dist(v.dist2, v.half, dials.ground_bake_dist)
+    };
+    // The bake quad binds the chunk's OWN page (the composited ground
+    // image), not the map's terrain page; everything else rides the same
+    // MeshDraw path, world palette included.
+    let push_bake = |items: &mut Vec<Item>, v: &Visible<'_>| {
+        let m = &v.chunk.meshes[mesh_kind::GROUND_BAKE as usize];
+        items.push(Item::ChunkMesh {
+            slot: v.slot,
+            kind: mesh_kind::GROUND_BAKE,
+            mesh: MeshDraw {
+                vert_base: m.vert_base,
+                vert_count: m.vert_count,
+                index_base: m.index_base,
+                index_count: m.index_count,
+                page: v.chunk.bake_page,
+                frame: 0,
+                off_x: v.ox,
+                off_y: v.oy,
+                pull: 0.0,
+                pull_bias: 0.0,
+                pal: slot_pal[v.slot as usize],
+            },
+        });
+    };
+
     // One chunk mesh of one kind, or nothing when that kind is empty here.
     let push_mesh = |items: &mut Vec<Item>, v: &Visible<'_>, kind: u16, pull: f32, bias: f32| {
         let m = &v.chunk.meshes[kind as usize];
@@ -465,17 +503,21 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
 
     // `dist` is the rung's dial for this mesh kind: the chunk cap already
     // bounded the gather, so a kind-level dial only ever narrows it further.
-    let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32, bias: f32, dist: f32| {
-        if terrain_page.is_none() {
-            return;
-        }
-        for v in &visible {
-            if !within_dist(v.dist2, v.half, dist) {
-                continue;
+    let mesh_pass =
+        |items: &mut Vec<Item>, kind: u16, pull: f32, bias: f32, dist: f32, skip_baked: bool| {
+            if terrain_page.is_none() {
+                return;
             }
-            push_mesh(items, v, kind, pull, bias);
-        }
-    };
+            for v in &visible {
+                if !within_dist(v.dist2, v.half, dist) {
+                    continue;
+                }
+                if skip_baked && baked(v) {
+                    continue;
+                }
+                push_mesh(items, v, kind, pull, bias);
+            }
+        };
 
     // 2. Terrain and its trees, then stamps (terrain sub-meshes; few,
     // unculled). Terrain and water carry no dial of their own — they ARE the
@@ -495,7 +537,11 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let tree_coarse = pak.has_tree_coarse();
     if terrain_page.is_some() {
         for v in &visible {
-            push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0, 0.0);
+            if baked(v) {
+                push_bake(&mut items, v);
+            } else {
+                push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0, 0.0);
+            }
             // Three levels, two dials: fine inside `tree_hull_dist`, the
             // 2x2-px coarse carve inside `tree_coarse_dist`, boxes beyond.
             // A rung asking for a level the pak lacks climbs UP to the fine
@@ -546,7 +592,14 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     }
 
     // 3. Water.
-    mesh_pass(&mut items, mesh_kind::WATER, 0.0, 0.0, spec::QUALITY_UNBOUNDED);
+    mesh_pass(
+        &mut items,
+        mesh_kind::WATER,
+        0.0,
+        0.0,
+        spec::QUALITY_UNBOUNDED,
+        false,
+    );
 
     // 4. Shadow decals: field entities, then staged battle cards (which
     // darken harder — the cards need grounding).
@@ -652,6 +705,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         grass_pull,
         grass_bias,
         dials.grass_dist,
+        true,
     );
     mesh_pass(
         &mut items,
@@ -659,6 +713,7 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
         flower_pull,
         flower_bias,
         dials.flower_dist,
+        true,
     );
 
     // 9. The GB UI layer.
@@ -692,6 +747,7 @@ mod tests {
                 // The tree streams ARE the terrain pass: they interleave with
                 // it chunk by chunk, so they share its rank.
                 k if k == mesh_kind::TERRAIN
+                    || k == mesh_kind::GROUND_BAKE
                     || k == mesh_kind::TREE_HULL
                     || k == mesh_kind::TREE_COARSE
                     || k == mesh_kind::TREE_BOX =>
@@ -886,15 +942,17 @@ mod tests {
             cy,
             aabb_min: [0, 0, cy * 128],
             aabb_max: [128, 0, cy * 128 + 128],
+            bake_page: spec::BAKE_PAGE_NONE,
             meshes: m,
         };
         let empty = MeshRange::default();
-        // terrain | treeHull | treeCoarse | treeBox | water | grass | flower
-        // The coarse slot ships alongside the others so the three-level
-        // selection is testable; the LOD-less pak leaves all three empty
-        // but the hull.
+        // terrain | groundBake | treeHull | treeCoarse | treeBox | water |
+        // grass | flower. The coarse slot ships alongside the others so the
+        // three-level selection is testable; the LOD-less pak leaves all
+        // three empty but the hull.
         let near = [
             quad(0, 0, 128, 128),
+            empty,
             quad(8, 8, 24, 24),
             if tree_lod { quad(8, 8, 24, 24) } else { empty },
             if tree_lod { quad(8, 8, 24, 24) } else { empty },
@@ -906,6 +964,7 @@ mod tests {
         // (0 + half), inside its coarse reach (128 + half) — the middle ring.
         let mid = [
             quad(0, -128, 128, 0),
+            empty,
             quad(8, -120, 24, -104),
             if tree_lod { quad(8, -120, 24, -104) } else { empty },
             if tree_lod { quad(8, -120, 24, -104) } else { empty },
@@ -915,6 +974,7 @@ mod tests {
         ];
         let far = [
             quad(0, -384, 128, -256),
+            empty,
             quad(8, -376, 24, -360),
             if tree_lod { quad(8, -376, 24, -360) } else { empty },
             if tree_lod { quad(8, -376, 24, -360) } else { empty },

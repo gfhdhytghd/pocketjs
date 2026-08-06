@@ -75,8 +75,10 @@
 //!        i16 cx | i16 cy                      chunk coords (world px =
 //!                                             c * CHUNK_PX, map-local)
 //!        i16 min_x,min_y,min_z,max_x,max_y,max_z   AABB, map-local world px
-//!        MESH_KINDS mesh ranges in mesh_kind order (terrain, treeHull,
-//!        treeCoarse, treeBox, water, grass, flower):
+//!        u16 bake_page | u16 pad = 0     baked-ground atlas page, or
+//!                                        BAKE_PAGE_NONE (v6)
+//!        MESH_KINDS mesh ranges in mesh_kind order (terrain, groundBake,
+//!        treeHull, treeCoarse, treeBox, water, grass, flower):
 //!          u32 vert_base | u16 vert_count | u16 index_count | u32 index_base
 //!        - indices are RELATIVE to vert_base (GE batch style, u16-safe)
 //!        - index_count % 3 == 0; every index < vert_count (checked at load)
@@ -246,8 +248,12 @@ pub struct Chunk {
     /// AABB in map-local world px: [min_x, min_y, min_z], [max_x, max_y, max_z].
     pub aabb_min: [i16; 3],
     pub aabb_max: [i16; 3],
-    /// Indexed by `spec::mesh_kind` (terrain, treeHull, treeBox, water,
-    /// grass, flower).
+    /// Atlas page of the baked ground quad (`mesh_kind::GROUND_BAKE`), or
+    /// `spec::BAKE_PAGE_NONE` — this chunk is ineligible and always draws
+    /// its geometry.
+    pub bake_page: u16,
+    /// Indexed by `spec::mesh_kind` (terrain, groundBake, treeHull,
+    /// treeCoarse, treeBox, water, grass, flower).
     pub meshes: [MeshRange; MESH_KINDS],
 }
 
@@ -791,6 +797,13 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
             if aabb_min.iter().zip(&aabb_max).any(|(lo, hi)| lo > hi) {
                 return Err("chunk AABB is inverted");
             }
+            let bake_page = r.u16v()?;
+            if r.u16v()? != 0 {
+                return Err("chunk record pad is not zero");
+            }
+            if bake_page != spec::BAKE_PAGE_NONE && bake_page as u32 >= meta.atlas_count {
+                return Err("chunk bake page out of range");
+            }
             let mut meshes = [MeshRange::default(); MESH_KINDS];
             for mesh in &mut meshes {
                 *mesh = read_mesh_range(&mut r)?;
@@ -801,6 +814,7 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
                 cy,
                 aabb_min,
                 aabb_max,
+                bake_page,
                 meshes,
             });
         }
@@ -1031,8 +1045,10 @@ pub(crate) mod tests {
                 cy: 0,
                 aabb_min: [0, 0, 0],
                 aabb_max: [128, 0, 128],
+                bake_page: spec::BAKE_PAGE_NONE,
                 meshes: [
                     terrain,
+                    MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
@@ -1087,8 +1103,10 @@ pub(crate) mod tests {
                 cy: 0,
                 aabb_min: [0, 0, 0],
                 aabb_max: [128, 0, 128],
+                bake_page: spec::BAKE_PAGE_NONE,
                 meshes: [
                     terrain,
+                    MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),

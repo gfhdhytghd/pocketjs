@@ -11,6 +11,7 @@
 // payloads, total_len patched last.
 
 import {
+  BAKE_PAGE_NONE,
   COLOR_PAL_NONE,
   VERTEX_STRIDE,
   VXPK_CHUNK_RECORD_SIZE,
@@ -194,6 +195,7 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
     cy: number;
     aabbMin: [number, number, number];
     aabbMax: [number, number, number];
+    bakePage?: number;
     meshes: Range[];
   }
   const chunkRecs: { mapId: number; chunks: ChunkRec[] }[] = [];
@@ -204,6 +206,7 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
       cy: c.cy,
       aabbMin: c.aabbMin,
       aabbMax: c.aabbMax,
+      bakePage: c.bakePage,
       meshes: c.meshes.map(appendMesh),
     }));
     chunkRecs.push({ mapId: m.mapId, chunks });
@@ -298,6 +301,8 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
       chnk.i16(c.cx);
       chnk.i16(c.cy);
       for (const v of [...c.aabbMin, ...c.aabbMax]) chnk.i16(v);
+      chnk.u16(c.bakePage ?? BAKE_PAGE_NONE);
+      chnk.u16(0);
       for (const r of c.meshes) writeRange(chnk, r);
     }
   }
