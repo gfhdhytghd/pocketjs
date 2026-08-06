@@ -9,7 +9,8 @@ use alloc::vec::Vec;
 
 use super::{EMOTE_PAGE_NONE, MeshRange, PakVert, swizzle_rows, swizzle_stride};
 use crate::spec::{
-    self, COLOR_PAL_NONE, MESH_KINDS, VXPK_ALIGN, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE,
+    self, COLOR_PAL_NONE, MESH_KINDS, VXPK_ALIGN, VXPK_CHUNK_RECORD_SIZE, VXPK_ENTRY_SIZE,
+    VXPK_HEADER_SIZE,
 };
 
 /// One chunk record for [`PakBuilder::map`].
@@ -74,6 +75,7 @@ pub struct PakBuilder {
     audio_json: Vec<u8>,
     audio_programs: Vec<u8>,
     emote_page: u32,
+    meta_flags: u32,
     color_flags: u16,
     /// map_id -> (world_pal, terrain_page); maps not named here take NONE.
     color_maps: Vec<(u32, u16, u16)>,
@@ -95,6 +97,7 @@ impl PakBuilder {
             audio_json: Vec::new(),
             audio_programs: Vec::new(),
             emote_page: EMOTE_PAGE_NONE,
+            meta_flags: 0,
             color_flags: 0,
             color_maps: Vec::new(),
             color_pages: Vec::new(),
@@ -144,6 +147,12 @@ impl PakBuilder {
                 .collect(),
         });
         (self.atlases.len() - 1) as u16
+    }
+
+    /// META flags: what this pak CARRIES (`spec::VXPK_META_FLAG_TREE_LOD`
+    /// when every chunk holds both tree levels of detail).
+    pub fn meta_flags(&mut self, flags: u32) {
+        self.meta_flags = flags;
     }
 
     /// The page emote bubbles sample (16x16 cells stacked vertically).
@@ -230,9 +239,12 @@ impl PakBuilder {
             self.emote_page,
             spec::VIEW_W as u32,
             spec::VIEW_H as u32,
+            self.meta_flags,
+            0,
         ] {
             meta.extend_from_slice(&v.to_le_bytes());
         }
+        assert_eq!(meta.len(), spec::VXPK_META_SIZE, "META record size");
 
         // --- VPAL ---
         let mut vpal = Vec::new();
@@ -276,7 +288,7 @@ impl PakBuilder {
         chnk.extend_from_slice(&(self.maps.len() as u16).to_le_bytes());
         chnk.extend_from_slice(&0u16.to_le_bytes());
         chnk.extend_from_slice(&(chunk_total as u32).to_le_bytes());
-        let dir_end = 32 + self.maps.len() * 12 + chunk_total * 64;
+        let dir_end = 32 + self.maps.len() * 12 + chunk_total * VXPK_CHUNK_RECORD_SIZE;
         let verts_off = dir_end.div_ceil(VXPK_ALIGN) * VXPK_ALIGN;
         let verts_len = self.verts.len() * spec::VERTEX_STRIDE;
         let indices_off = (verts_off + verts_len).div_ceil(VXPK_ALIGN) * VXPK_ALIGN;

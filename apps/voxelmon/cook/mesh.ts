@@ -13,6 +13,7 @@ import {
   FACE_SHADE,
   GABLE_TOP_SHADE,
   MAX_VERTS_PER_CHUNK_MESH,
+  MESH_KIND,
   MESH_KINDS,
   VOLUME_TOP_SHADE,
 } from "../../../contracts/spec/voxel-spec.ts";
@@ -52,7 +53,14 @@ const LATERAL: Record<number, [number, number, number, number]> = {
 };
 
 export interface MapGeometry {
+  /** Terrain, carved tree hulls included and marked (`Quad.tree`). */
   terrain: Quad[];
+  /**
+   * The FAR level of detail: every hull-claimed cell re-extruded as the plain
+   * box the mesher would have built for it had no hull been carved. Drawn
+   * INSTEAD of the hulls past `treeHullDist`, never with them.
+   */
+  treeBox: Quad[];
   water: Quad[];
   grass: Quad[];
   flower: Quad[];
@@ -66,14 +74,28 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   const water: Quad[] = [];
   const perRow = map.tileset.tilesPerRow || 16;
 
-  const heightAt = (tx: number, ty: number): number => {
-    const k = keyOf(tx, ty);
-    if (S.skip.has(k)) return 0;
-    const run = S.runs.get(k);
-    if (run) return run.h;
-    const s = S.shapeAt.get(k);
-    return s ? s.h : 0;
-  };
+  // Two readings of the same grid. `heightAt` is the cook's own: a claimed
+  // cell is flat ground, because an object stands on it. `boxHeightAt` is
+  // what the grid would have said had the round hulls never been carved —
+  // a hull-claimed cell extrudes to its class height — and it is what the
+  // tree-box level of detail is meshed against, so a run of trees does not
+  // grow interior walls between its own cells.
+  const heightIn =
+    (boxes: boolean) =>
+    (tx: number, ty: number): number => {
+      const k = keyOf(tx, ty);
+      if (boxes && S.round.has(k)) {
+        const s = S.shapeAt.get(k);
+        return s ? s.h : 0;
+      }
+      if (S.skip.has(k)) return 0;
+      const run = S.runs.get(k);
+      if (run) return run.h;
+      const s = S.shapeAt.get(k);
+      return s ? s.h : 0;
+    };
+  const heightAt = heightIn(false);
+  const boxHeightAt = heightIn(true);
 
   // one atlas-rect UV in SHEET px, optionally cropped to art rows
   // [vTop, vBot] of 8 (ChunkMesher.lua:252 uvRect)
@@ -85,15 +107,21 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   };
 
   // ---- baked ambient occlusion (ChunkMesher.lua:283-369; spec AO) ----
-  const aoShades = (tx: number, ty: number, h: number, shade: number): number | number[] => {
-    const n = heightAt(tx, ty - 1) > h;
-    const s = heightAt(tx, ty + 1) > h;
-    const e = heightAt(tx + 1, ty) > h;
-    const w = heightAt(tx - 1, ty) > h;
-    const nw = heightAt(tx - 1, ty - 1) > h;
-    const ne = heightAt(tx + 1, ty - 1) > h;
-    const sw = heightAt(tx - 1, ty + 1) > h;
-    const se = heightAt(tx + 1, ty + 1) > h;
+  const aoShades = (
+    tx: number,
+    ty: number,
+    h: number,
+    shade: number,
+    ha: (tx: number, ty: number) => number = heightAt,
+  ): number | number[] => {
+    const n = ha(tx, ty - 1) > h;
+    const s = ha(tx, ty + 1) > h;
+    const e = ha(tx + 1, ty) > h;
+    const w = ha(tx - 1, ty) > h;
+    const nw = ha(tx - 1, ty - 1) > h;
+    const ne = ha(tx + 1, ty - 1) > h;
+    const sw = ha(tx - 1, ty + 1) > h;
+    const se = ha(tx + 1, ty + 1) > h;
     if (!(n || s || e || w || nw || ne || sw || se)) return shade;
     const corner = (a: boolean, b: boolean, d: boolean): number => {
       let k = 0;
@@ -127,7 +155,15 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
     ];
   };
 
-  const topQuad = (x0: number, z0: number, h: number, tile: number, shade: number, to?: Quad[]): void => {
+  const topQuad = (
+    x0: number,
+    z0: number,
+    h: number,
+    tile: number,
+    shade: number,
+    to?: Quad[],
+    ha?: (tx: number, ty: number) => number,
+  ): void => {
     const [u0, u1, v0, v1] = uvRect(tile, 0, 8);
     (to ?? terrain).push({
       c: [
@@ -142,7 +178,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         [u1, v1],
         [u0, v1],
       ],
-      shade: aoShades(x0 / 8, z0 / 8, h, shade),
+      shade: aoShades(x0 / 8, z0 / 8, h, shade, ha),
       f: FACE.up,
     });
   };
@@ -158,6 +194,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
     vTop: number,
     vBot: number,
     shade: number | number[],
+    to: Quad[] = terrain,
   ): void => {
     const x1 = x0 + 8;
     const z1 = z0 + 8;
@@ -192,7 +229,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
       ];
     }
     const [u0, u1, v0, v1] = uvRect(tile, vTop, vBot);
-    terrain.push({
+    to.push({
       c,
       uv: [
         [u0, v1],
@@ -411,6 +448,11 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   for (const q of S.objectQuads) {
     terrain.push({ ...q, shade: groundShades(q) });
   }
+  // The carved hulls ride the TERRAIN stream, marked. They are split into
+  // MESH_KIND.treeHull at pack time, not here, so every later stage — the
+  // hidden-face cull, the chunk partition, the u16 batching — sees the same
+  // array it saw before tree LOD existed and the near level of detail keeps
+  // its exact quad order.
   for (const st of S.roundStamps) {
     for (const q of st.quads) {
       const moved: Quad = {
@@ -421,7 +463,52 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
         shade: q.shade,
         f: q.f,
       };
-      terrain.push({ ...moved, shade: groundShades(moved) });
+      terrain.push({ ...moved, shade: groundShades(moved), tree: true });
+    }
+  }
+
+  // ---- the far level of detail: the same cells, extruded as plain boxes ----
+  // This is the geometry a VOXEL_TREE_BOXES=1 cook produces for these cells,
+  // built here alongside the hulls rather than in place of them: one flat top
+  // plus 8px side bands wherever the (box-reading) neighbour is lower. The
+  // synthesized ground the hull path already wrote under each claimed tile
+  // stays in the terrain stream and simply sits under the box.
+  const treeBox: Quad[] = [];
+  for (let ty = -r; ty < th + r; ty++) {
+    for (let tx = -r; tx < tw + r; tx++) {
+      const k = keyOf(tx, ty);
+      if (!S.round.has(k)) continue;
+      const s = S.shapeAt.get(k);
+      const tile = S.tileAt.get(k);
+      if (!s || tile === undefined) continue;
+      const h = s.h;
+      const x0 = tx * 8;
+      const z0 = ty * 8;
+      topQuad(x0, z0, h, tile, 1, treeBox, boxHeightAt);
+      for (const [sx, sy, d] of SIDES) {
+        const nh = boxHeightAt(tx + sx, ty + sy);
+        if (nh >= h) continue;
+        const lat = LATERAL[d];
+        const hl = boxHeightAt(tx + lat[0], ty + lat[1]);
+        const hr = boxHeightAt(tx + lat[2], ty + lat[3]);
+        for (let band = Math.floor(nh / 8); band <= Math.ceil(h / 8) - 1; band++) {
+          const y0 = Math.max(nh, band * 8);
+          const y1 = Math.min(h, band * 8 + 8);
+          if (y1 <= y0) continue;
+          sideQuad(
+            d,
+            x0,
+            z0,
+            y0,
+            y1,
+            tile,
+            band * 8 + 8 - y1,
+            band * 8 + 8 - y0,
+            sideShades(hl, hr, y0, y1, y0 <= nh, DIR_SHADE[d]),
+            treeBox,
+          );
+        }
+      }
     }
   }
 
@@ -441,6 +528,7 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
   for (const [key, quads] of stamps) stamps.set(key, cullHidden(quads));
   return {
     terrain: cullHidden(terrain),
+    treeBox: cullHidden(treeBox),
     water: cullHidden(water),
     grass: cullHidden(S.grassQuads.map((q) => ({ ...q, shade: groundShades(q) })), PULLED),
     flower: cullHidden(S.flowerQuads.map((q) => ({ ...q, shade: groundShades(q) })), PULLED),
@@ -471,7 +559,7 @@ export interface ChunkOut {
   cy: number;
   aabbMin: [number, number, number];
   aabbMax: [number, number, number];
-  /** One mesh per spec MESH_KIND (terrain, water, grass, flower). */
+  /** One mesh per spec MESH_KIND, in MESH_KIND order. */
   meshes: PackedMesh[];
 }
 
@@ -521,9 +609,18 @@ function packQuads(quads: Quad[], uvt: UvTransform): PackedMesh {
 
 /** Partition a map's geometry into CHUNK_TILES chunks + stamp meshes. */
 export function packMap(geo: MapGeometry, uvt: UvTransform): { chunks: ChunkOut[]; stamps: StampOut[] } {
-  const streams = [geo.terrain, geo.water, geo.grass, geo.flower];
+  // treeHull has no stream of its own: its quads are carried inside terrain
+  // and cut out of each BATCH below, which is what keeps the near level of
+  // detail byte-identical to the pre-LOD cook.
+  const streams: [number, Quad[]][] = [
+    [MESH_KIND.terrain, geo.terrain],
+    [MESH_KIND.treeBox, geo.treeBox],
+    [MESH_KIND.water, geo.water],
+    [MESH_KIND.grass, geo.grass],
+    [MESH_KIND.flower, geo.flower],
+  ];
   const byChunk = new Map<string, Quad[][]>();
-  streams.forEach((quads, kind) => {
+  streams.forEach(([kind, quads]) => {
     for (const q of quads) {
       let cxSum = 0;
       let czSum = 0;
@@ -555,9 +652,25 @@ export function packMap(geo: MapGeometry, uvt: UvTransform): { chunks: ChunkOut[
     const entry = byChunk.get(key)!;
     const batches = Math.max(1, ...entry.map((q) => Math.ceil(q.length / QUADS_PER_MESH)));
     for (let b = 0; b < batches; b++) {
-      const meshes = entry.map((quads) =>
-        packQuads(quads.slice(b * QUADS_PER_MESH, (b + 1) * QUADS_PER_MESH), uvt),
-      );
+      const slices = entry.map((quads) => quads.slice(b * QUADS_PER_MESH, (b + 1) * QUADS_PER_MESH));
+      // Cut the carved hulls out of this batch's terrain slice. They were
+      // appended after every tile and object quad, so within a chunk — and
+      // therefore within a batch of one — they are a SUFFIX, and
+      // [terrain, treeHull] concatenates back to exactly the array the
+      // pre-LOD cook packed as one mesh. draw.rs draws the pair in that
+      // order for the same chunk, so the top rung's triangles keep both
+      // their values and their sequence.
+      const terr = slices[MESH_KIND.terrain];
+      const cut = terr.findIndex((q) => q.tree);
+      if (cut >= 0) {
+        const hull = terr.slice(cut);
+        if (!hull.every((q) => q.tree)) {
+          throw new Error("carved tree quads are not a suffix of the terrain stream");
+        }
+        slices[MESH_KIND.terrain] = terr.slice(0, cut);
+        slices[MESH_KIND.treeHull] = hull;
+      }
+      const meshes = slices.map((quads) => packQuads(quads, uvt));
       const aabbMin: [number, number, number] = [32767, 32767, 32767];
       const aabbMax: [number, number, number] = [-32768, -32768, -32768];
       let any = false;

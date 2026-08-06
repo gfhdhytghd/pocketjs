@@ -92,12 +92,15 @@ import {
   VOX_OP,
   VXPK_ALIGN,
   VXPK_AUDIO_HEADER_SIZE,
+  VXPK_CHUNK_RECORD_SIZE,
   VXPK_COLOR_FLAG_WORLD,
   VXPK_COLOR_HEADER_SIZE,
   VXPK_COLOR_VERSION,
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
+  VXPK_META_FLAG_TREE_LOD,
+  VXPK_META_SIZE,
   VXPK_TAG,
   VXPK_VERSION,
   WATER_DROP_PX,
@@ -237,6 +240,9 @@ export function generateVoxelRust(): string {
   put("    pub grass_dist: f32,");
   put("    /// Flower chunk meshes past this distance are not drawn.");
   put("    pub flower_dist: f32,");
+  put("    /// A chunk inside this distance draws its CARVED tree hulls;");
+  put("    /// past it, the same cells as plain boxes (`mesh_kind::TREE_BOX`).");
+  put("    pub tree_hull_dist: f32,");
   put("    /// No chunk past this distance is drawn at all (any mesh kind).");
   put("    pub chunk_dist: f32,");
   put("}");
@@ -249,6 +255,7 @@ export function generateVoxelRust(): string {
     put("    QualityDials {");
     put(`        grass_dist: ${f32(row.grassDist)},`);
     put(`        flower_dist: ${f32(row.flowerDist)},`);
+    put(`        tree_hull_dist: ${f32(row.treeHullDist)},`);
     put(`        chunk_dist: ${f32(row.chunkDist)},`);
     put("    },");
   }
@@ -403,6 +410,11 @@ export function generateVoxelRust(): string {
   put(`pub const VXPK_HEADER_SIZE: usize = ${VXPK_HEADER_SIZE};`);
   put(`pub const VXPK_ENTRY_SIZE: usize = ${VXPK_ENTRY_SIZE};`);
   put(`pub const VXPK_ALIGN: usize = ${VXPK_ALIGN};`);
+  put("/// The META record: eight u32 counts/dims, then flags and a pad word.");
+  put(`pub const VXPK_META_SIZE: usize = ${VXPK_META_SIZE};`);
+  put("/// META flag bit 0: chunks carry BOTH tree levels of detail, so the");
+  put("/// runtime may pick one per chunk (`QualityDials::tree_hull_dist`).");
+  put(`pub const VXPK_META_FLAG_TREE_LOD: u32 = ${VXPK_META_FLAG_TREE_LOD};`);
   put("/// The AUDI payload's own header (json_len, program_len, two pad words).");
   put(`pub const VXPK_AUDIO_HEADER_SIZE: usize = ${VXPK_AUDIO_HEADER_SIZE};`);
   put("/// The VCOL payload's own header (version, counts, flags, two pad words).");
@@ -425,6 +437,8 @@ export function generateVoxelRust(): string {
     "Mesh kinds inside a chunk — draw order is their numeric order.",
   ]);
   put(`pub const MESH_KINDS: usize = ${MESH_KINDS};`);
+  put("/// Bytes per CHNK chunk record: coords + AABB + a range per kind.");
+  put(`pub const VXPK_CHUNK_RECORD_SIZE: usize = ${VXPK_CHUNK_RECORD_SIZE};`);
   put("");
 
   return L.join("\n");

@@ -132,13 +132,16 @@ export const CAM_FOCAL = 1;
 // same arithmetic in `draw::within_dist`, so a dial added later cannot
 // measure differently from the ones the goldens were recorded against.
 //
-// **Cook-time dials are deliberately absent.** A dial belongs in this table
-// only while one cooked pak can serve every rung. Geometry that must itself
-// differ per machine (the next rung is tree LOD, which replaces carved tree
-// hulls with cheaper stand-ins) is cooked into the pak, and the pak then
-// DECLARES which rungs it carries, so a runtime asking for geometry its pak
-// does not hold falls back to what the pak has instead of misrendering. That
-// declaration is a VXPK section field, not an entry here.
+// **A dial here is still a runtime dial when the GEOMETRY differs.** Tree LOD
+// cooks BOTH levels of detail into every chunk — the carved hull in mesh kind
+// `treeHull`, the same cells as plain boxes in `treeBox` — and the runtime
+// picks one per chunk through `treeHullDist`. One pak still serves every rung.
+// What the pak must then state is which levels it actually carries, and that
+// is a META flag (`VXPK_META_FLAG_TREE_LOD`), not an entry in this table: a
+// pak cooked without the box level renders every tree carved at every rung
+// instead of misrendering, and a pak cooked with `VOXEL_TREE_BOXES=1` (the
+// ladder's predecessor: a global cook switch) carries neither level and draws
+// its boxes out of the terrain stream, as it always did.
 
 /**
  * The rungs, weakest first. Append-only: never renumber, never reuse.
@@ -187,6 +190,13 @@ export const CHUNK_DRAW_DIST_PX = 2.5 * WORLD_VIEW_H;
  * two standing slabs per grass cell and a cutout per flower cell across the
  * whole field. On ROUTE_1 at pitch rung 2 those two meshes are 40 k of the
  * frame's 80 k triangles — half the frame spent below the ankle.
+ *
+ * `treeHullDist` picks a chunk's tree geometry: inside it the chunk draws its
+ * carved hulls (`MESH_KIND.treeHull`), outside it the same cells as plain
+ * boxes (`MESH_KIND.treeBox`). A carved hull is ~700 quads per cell and a box
+ * is under ten, so this is the largest single dial on the ladder — carved
+ * hulls are 53 k of PALLET_TOWN's 97 k triangles at pitch rung 2 and 34 k of
+ * ROUTE_1's 80 k, more than grass, flowers and water together.
  */
 export const QUALITY = [
   // psp — measured over the story trace: grass+flower cost is flat from 48 px
@@ -195,15 +205,36 @@ export const QUALITY = [
   // (docs/VOXEL.md §4a). It takes 30-34% off the two meshes there; it does
   // NOT reach the 18 k-triangle budget, and no distance dial can while
   // terrain alone is 40 k.
-  { grassDist: 96, flowerDist: 96, chunkDist: CHUNK_DRAW_DIST_PX },
+  // treeHullDist — measured over both traces, every tick, with the other
+  // dials held here: the worst frame is FLAT at 110144 triangles from 128 px
+  // to 144 px and jumps to 117272 at 160 px, and 128 is the point in that
+  // plateau where every pixel the swap costs sits at the horizon or the
+  // frame's top edge. Below it the boundary walks into the near field —
+  // at 96 px Pallet Town's whole roadside tree column turns to slabs and so
+  // does the boulder beside the battle stage. It takes 15% off the mean
+  // frame over the story tape (57339 -> 48959 triangles) and 11% off the
+  // worst (124392 -> 110144). See docs/VOXEL.md §4a.
+  {
+    grassDist: 96,
+    flowerDist: 96,
+    treeHullDist: 128,
+    chunkDist: CHUNK_DRAW_DIST_PX,
+  },
   // vita — a placeholder, not a measurement: on the v1 maps this is
   // pixel-identical to the top rung, because 128 px chunks inside a 340 px
-  // cap leave room for only two distinct settings here.
-  { grassDist: 192, flowerDist: 192, chunkDist: CHUNK_DRAW_DIST_PX },
-  // desktop — the identity rung: both meshes unbounded, as before the ladder.
+  // cap leave room for only two distinct settings here. Measured, 192 px
+  // keeps every hull the top rung draws.
+  {
+    grassDist: 192,
+    flowerDist: 192,
+    treeHullDist: 192,
+    chunkDist: CHUNK_DRAW_DIST_PX,
+  },
+  // desktop — the identity rung: every mesh unbounded, as before the ladder.
   {
     grassDist: QUALITY_UNBOUNDED,
     flowerDist: QUALITY_UNBOUNDED,
+    treeHullDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
   },
 ] as const;
@@ -623,11 +654,25 @@ export const EVENT_CAP = 64;
 // never indexes unchecked.
 
 export const VXPK_MAGIC = 0x4b505856; // 'VXPK'
-/** 3 since the required section set gained VCOL (the per-tile color bindings). */
-export const VXPK_VERSION = 3;
+/**
+ * 4 since a chunk carries both tree levels of detail: META grew a flags word
+ * and the chunk record grew two mesh ranges. Both shapes are pinned below and
+ * both readers validate them, so an older pak is rejected, never mis-read.
+ */
+export const VXPK_VERSION = 4;
 export const VXPK_HEADER_SIZE = 16;
 export const VXPK_ENTRY_SIZE = 16;
 export const VXPK_ALIGN = 16;
+/** The META record: eight u32 counts/dims, then a flags word and a pad word. */
+export const VXPK_META_SIZE = 40;
+/**
+ * META flag bit 0: every chunk carries BOTH tree levels of detail — the
+ * carved hulls in `MESH_KIND.treeHull` and the same cells as plain boxes in
+ * `MESH_KIND.treeBox` — so a runtime may pick one per chunk (`treeHullDist`).
+ * A pak WITHOUT this flag carries at most one level, and a runtime that wants
+ * the other draws whichever the pak holds instead of dropping the trees.
+ */
+export const VXPK_META_FLAG_TREE_LOD = 1 << 0;
 /** The AUDI payload's own header (json_len, program_len, two pad words). */
 export const VXPK_AUDIO_HEADER_SIZE = 16;
 /** The VCOL payload's own header (version, counts, flags, two pad words). */
@@ -660,8 +705,7 @@ export const VXPK_TAG = {
   /**
    * Per-map chunk meshes: map directory, then per chunk a header
    * (i16 cx | i16 cy | AABB i16[6] | per-mesh-kind vert/index ranges) over
-   * shared 20-byte-vertex and u16-index pools. Mesh kinds: terrain, water,
-   * grass, flower.
+   * shared 20-byte-vertex and u16-index pools. One range per `MESH_KIND`.
    */
   chunks: 0x4b4e4843, // 'CHNK'
   /** Removable stamps: per map, per (cx,cy) a small vert/index range. */
@@ -734,8 +778,23 @@ export const MAX_VERTS_PER_CHUNK_MESH = 65532;
 
 export const MESH_KIND = {
   terrain: 0,
-  water: 1,
-  grass: 2,
-  flower: 3,
+  /**
+   * Carved round-scenery hulls (trees), the NEAR level of detail. Cooked out
+   * of the terrain stream into their own range so the runtime can swap them
+   * for `treeBox` past `treeHullDist`; drawn immediately after their own
+   * chunk's terrain, which is exactly where they sat inside it.
+   */
+  treeHull: 1,
+  /** The same cells as plain extruded boxes: the FAR level of detail. */
+  treeBox: 2,
+  water: 3,
+  grass: 4,
+  flower: 5,
 } as const;
-export const MESH_KINDS = 4;
+export const MESH_KINDS = 6;
+
+/**
+ * Bytes per CHNK chunk record: i16 cx | i16 cy | i16 AABB[6] | one 12-byte
+ * mesh range per MESH_KIND. Both writers size the directory with this.
+ */
+export const VXPK_CHUNK_RECORD_SIZE = 16 + MESH_KINDS * 12;

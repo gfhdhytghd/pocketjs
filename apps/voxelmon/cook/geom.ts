@@ -38,6 +38,14 @@ export interface Quad {
   f: Facing;
   /** A body-anchored building's own quad — exempt from edge keep-rules. */
   own?: boolean;
+  /**
+   * A carved round-scenery (tree) quad. It rides the TERRAIN stream through
+   * the whole cook — analysis, culling, chunk partition and batching — and
+   * is split off into `MESH_KIND.treeHull` only at pack time, so the near
+   * level of detail keeps the exact quad order it had when tree hulls were
+   * simply part of the terrain (cook/mesh.ts packMap).
+   */
+  tree?: boolean;
 }
 
 /**
@@ -153,6 +161,13 @@ export interface SGrid {
   grassQuads: Quad[];
   flowerQuads: Quad[];
   roundStamps: { quads: Quad[]; mx: number; mz: number; r?: number }[];
+  /**
+   * Tile keys a carved hull claimed. These are the cells the FAR level of
+   * detail re-extrudes as plain boxes (`MESH_KIND.treeBox`), so it is the
+   * hull's own claim list and not `skip`, which buildings, standees and
+   * grass also write to.
+   */
+  round: Set<number>;
   /** Cut-tree stamps: "cx,cy" cell key -> quads (become STMP records). */
   stampQuads: Map<string, Quad[]>;
   /**

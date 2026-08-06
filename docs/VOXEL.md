@@ -120,9 +120,10 @@ tick: `frame(buttons)`, exactly once.
   ramp. Both backends call it, so the software rasterizer and the GE can
   never bind different colours for the same draw;
 - builds one ordered draw list per frame. Draw order (from the mod, minus
-  shader-bound passes): sky bands → terrain chunks → water (flat, animated
-  atlas) → shadow decals → player ghost (inverted depth, no write) → entity
-  cards → grass mesh → flower mesh → GB UI quads.
+  shader-bound passes): sky bands → terrain chunks, each followed by its own
+  tree mesh at the level of detail this rung picked (§4a) → water (flat,
+  animated atlas) → shadow decals → player ghost (inverted depth, no write) →
+  entity cards → grass mesh → flower mesh → GB UI quads.
 
 Per-frame boundary traffic is **~10–40 ops** (camera + moving entities +
 a reveal counter); menu opens burst a few hundred `ui*` ops once. Against the
@@ -184,24 +185,25 @@ Two rules make it a ladder and not a pile of switches:
 - **Every dial here is a RUNTIME dial.** One cooked pak serves every rung, so
   the rung is a host decision and never a re-cook — no op stream and no pak
   byte differs between a PSP and a desktop. Geometry that must itself differ
-  per machine belongs in the cook, and the pak then declares which rungs it
-  carries so a runtime asking for one it does not hold degrades instead of
-  misrendering. The `VOXEL_TREE_BOXES=1` cook flag is the shape this replaces.
+  per machine is cooked at BOTH levels and picked between at runtime, and the
+  pak declares which levels it carries so a runtime asking for one it does not
+  hold degrades instead of misrendering (`treeHullDist`, below). The
+  `VOXEL_TREE_BOXES=1` cook flag is the shape this replaces.
 - **The top rung is the identity.** It draws exactly what this runtime drew
   before the ladder existed. `tests/goldens/voxel/*-max.hashes` are the
   pre-ladder frame hashes and `bun tools/voxel.ts check` replays both tapes at
   the top rung against them byte-for-byte, so no later dial edit can quietly
   move the picture the ladder is supposed to preserve.
 
-v1's dials, all distances in world px from the view centre to a chunk's own
+The dials, all distances in world px from the view centre to a chunk's own
 centre, widened by the chunk's half-extent — one function, `draw::within_dist`,
 so a dial added later cannot measure differently from these:
 
-| rung | `grassDist` | `flowerDist` | `chunkDist` |
-| --- | --- | --- | --- |
-| `psp` (default) | 96 | 96 | 340 |
-| `vita` | 192 | 192 | 340 |
-| `desktop` | unbounded | unbounded | 340 |
+| rung | `grassDist` | `flowerDist` | `treeHullDist` | `chunkDist` |
+| --- | --- | --- | --- | --- |
+| `psp` (default) | 96 | 96 | 128 | 340 |
+| `vita` | 192 | 192 | 192 | 340 |
+| `desktop` | unbounded | unbounded | unbounded | 340 |
 
 `chunkDist` is 2.5 view-heights at **every** rung including the top: it is
 `draw.rs`'s old hard-coded `CULL_DIST` folded in, a pre-existing frame-budget
@@ -224,17 +226,68 @@ shipped number — every larger value costs picture and buys nothing. It takes
 30–34% off the two detail meshes at the ROUTE_1 checkpoints and 5–17% off
 those whole frames.
 
-It does not reach 18 k, and **no distance dial can**: ROUTE_1's terrain alone
-is 40 202 triangles at rung 2 and Pallet Town's is 89 k with its neighbours
-loaded, so even deleting grass and flowers outright leaves the worst story
-frame at 99 176 triangles against 131 432 today. This rung takes the largest
-bite a runtime dial can take; closing the budget needs the cook-time rungs
-(tree LOD, stamp instancing, per-map streaming).
+It does not reach 18 k, and **no distance dial can**: even deleting grass and
+flowers outright leaves the worst story frame at 99 176 triangles against
+131 432 today.
+
+**Why the tree hull distance is 128, and what the cook had to carry for it.**
+A carved tree hull is **~700 quads per cell**; the plain box the same cell
+extrudes to is **under ten**. That is why trees, not detail meshes, are the
+frame: at pitch rung 2 the hulls are **55 754 of PALLET_TOWN's 96 836
+triangles and 34 732 of ROUTE_1's 80 428**, more than terrain, grass, flowers
+and water together. So the cooker emits BOTH — the carve into
+`MESH_KIND.treeHull`, the same cells re-extruded as boxes into
+`MESH_KIND.treeBox` — and `draw::build` picks one per chunk against
+`treeHullDist`, drawing it immediately after that chunk's own terrain.
+
+Measured over both tapes at every tick, with the other dials held at this
+rung: the worst frame is **flat at 110 144 triangles from 128 px to 144 px and
+jumps to 117 272 at 160 px**. 128 px is the point in that plateau where every
+pixel the swap costs sits at the horizon or the frame's top edge — 886 px of a
+480×272 frame at `battle-intro`, 438 px in an 11-px strip at the top of
+`encounter-seen`, and nothing at all at the nine other story checkpoints.
+Below it the boundary walks into the near field: at 96 px Pallet Town's whole
+roadside tree column turns to slabs (1908 px at `sign-read`) and so does the
+boulder beside the battle stage (9824 px). The rung takes **15% off the mean
+story frame (57 339 → 48 959 triangles) and 11% off the worst (124 392 →
+110 144)**, and costs **+173 888 pak bytes, 0.84%** — the box level is 3 716
+triangles over all seven maps, against 159 036 carved.
+
+Two facts the pak states so a runtime never has to guess. The **META flags
+word** (`VXPK_META_FLAG_TREE_LOD`) says the chunks carry both levels; without
+it — an older pak, or one cooked with `VOXEL_TREE_BOXES=1`, which carves
+nothing and leaves its boxes in the terrain stream — every rung draws the one
+level the pak holds rather than losing its trees. And the **chunk record grew
+two mesh ranges**, which is a VXPK version bump (3 → 4), so a stale pak is
+rejected instead of mis-read.
+
+**Where the two levels do not line up.** A quad joins the chunk its centroid
+falls in, and a hull is a ball wider than the cell it stands on, so a tree at
+a chunk seam can put a few of its hull quads in the neighbouring chunk while
+its box stays in its own. Over the seven v1 maps that is **3 chunks of 122**:
+one carries 2080 hull triangles and no box (those quads vanish when that chunk
+goes far), two carry 8 box triangles each and no hull. The visible effect is
+bounded by the goldens' own pixel counts above; the fix, if it ever shows, is
+to bin a hull by its stamp centre rather than per quad — which is a change to
+the near level's quad order and therefore to the identity rung, so it needs
+the `-max` goldens re-proved, not re-recorded.
 
 The `vita` rung is a placeholder, not a measurement: at 192 px it is
 pixel-identical to the top rung across both tapes on the v1 maps, because
 128 px chunks inside a 340 px cap leave room for only two distinct settings
 here. It is a labelled rung owed a number from the machine itself.
+
+**What is still over budget after this rung.** The worst story frame at the
+shipped rung is 110 144 triangles against the GE's 18 k, and it is hulls
+52 760, grass 26 208, terrain 24 784, flowers 6 016, boxes 376. **Carved hulls
+are still the largest single item**, because ROUTE_1 is a corridor whose trees
+are all NEAR: no distance dial reaches them. The next cut for them is
+instancing, not culling — the STMP section already models a per-cell
+vert/index range, so one tileset signature's ~700-quad hull could be stored
+once and referenced per cell instead of replicated into the chunk pools. That
+is the same lever for the pak, where the carved hulls are **7.3 MB of the
+18.6 MB of chunk data**. Terrain is the problem after that: 24 784 triangles
+in that frame with nothing left to fade, because terrain is the silhouette.
 
 PCM leaves through the PocketJS `audio` module (`contracts/spec/audio.ts`,
 capability `audio.pcm`), not through this surface: the host pumps
@@ -266,7 +319,13 @@ instead of every session on the handheld:
    (`u,v f32 | color u32 | x,y,z i16 + pad`), u16 indices, face shade ×
    baked AO folded into vertex color, grass/flower/water split into their
    own meshes, side faces cut into 8 px bands with cropped (never stretched)
-   art;
+   art. Round scenery is meshed **twice** — the carved hull and the plain box
+   the same cells extrude to — into the two tree mesh kinds a runtime picks
+   between (§4a). The hulls ride the terrain stream through the analysis, the
+   cull and the u16 batching and are split out only at pack time, so a
+   chunk's hull vertices land immediately after its own terrain vertices and
+   the near level of detail keeps the exact quad order it had before tree LOD
+   existed;
 4. pack atlases as pre-swizzled CLUT8 — one terrain atlas copy per animation
    frame (water, flowers), so tile animation on device is a texture bind, not
    a texel write; day tint is a CLUT rewrite, the GB's own trick;
@@ -454,12 +513,14 @@ only clock; tile animation and menu cursors derive from it.
    is a host decision, so `bun tools/voxel.ts check` replays each recorded
    trace twice through `pocketvoxel-sim --quality`. `story.hashes` /
    `battle.hashes` are recorded at the **shipped `psp` rung**, so they carry
-   that rung's grass and flower distance fade (§4a) and legitimately moved
-   when the ladder landed: 5 of 11 story marks and all 4 battle marks changed,
-   every one of them in the far field. `story-max.hashes` / `battle-max.hashes`
-   are the pre-ladder hashes, asserted at the top rung and **never
-   re-recorded** — a mismatch there means the top rung stopped being the
-   identity, and the fix is the dials, not the file.
+   that rung's dials (§4a) and legitimately move when a dial does. The grass
+   and flower fade moved 5 of 11 story marks and all 4 battle marks, every one
+   of them in the far field; tree LOD then moved 1 story mark
+   (`encounter-seen`) and all 4 battle marks, and nothing else.
+   `story-max.hashes` / `battle-max.hashes` are the pre-ladder hashes,
+   asserted at the top rung and **never re-recorded** — a mismatch there means
+   the top rung stopped being the identity, and the fix is the dials, not the
+   file.
 
 ## 8. Audio
 
@@ -576,7 +637,8 @@ sample swizzled from main RAM.
 
 v1 (this tree, delivered): Red only. Import (16 datasets at field-level
 parity with the reference extractor) + cook (42/42 non-desk building
-templates, carved tree hulls, 8 baked tile-animation frames) + the overworld
+templates, carved tree hulls at two levels of detail, 8 baked tile-animation
+frames) + the overworld
 slice — walk, collide, ledges, grass, warps, doors, signs, NPCs, an 8-verb
 script runner, the textbox typewriter — and the wild-battle core (damage /
 accuracy / crit / status / catch / run / exp through the oracle-verified
@@ -592,12 +654,11 @@ themes, the textbox beep and species cries. Colour is RED++ / pokered-gbc
 oracle-checked against the reference's own `PaletteFX`; the GB UI layer
 stays grayscale.
 
-Later rungs, in dependency order: the next quality-ladder rung, tree LOD —
-the first dial the geometry itself must carry, so it is cooked into the pak
-and declared there (§4a); the GB UI colour layer (a `uiPal` op — the
+Later rungs, in dependency order: the GB UI colour layer (a `uiPal` op — the
 one piece of RED++ parity that needs a new op); pak slimming for the
-PSP-1000's 24 MB
-(stamp instancing over the tree-wall boxes; per-map streaming); the arena
+PSP-1000's 24 MB and the frame budget together
+(hull instancing over the STMP per-cell range, which is the only cut left for
+the carved trees the distance dial cannot reach; per-map streaming); the arena
 clearance walk (needs cook-time heights in gamedata) and the authored arena
 table; the full script verb set and story flags; trainer battles + AI
 layers; the desk-set templates, stairs, and detected props; battle move

@@ -422,10 +422,14 @@ export function buildCylinders(
   art: Art,
   groundTiles: number[],
 ): void {
-  // Perf experiment / low-detail mode: VOXEL_TREE_BOXES=1 skips ALL hull
-  // carving — every round-scenery cell falls to the mesher's plain box (the
-  // mod's own beyond-ROUND_RING degraded mode). A Pallet frame's tri count
-  // is dominated by carved tree balls on real hardware (measured 66 ms GE).
+  // The quality ladder's PREDECESSOR, superseded by the `treeHullDist` dial
+  // (contracts/spec/voxel-spec.ts §quality ladder): VOXEL_TREE_BOXES=1 skips
+  // ALL hull carving, so every round-scenery cell — including the one the
+  // player stands next to — falls to the mesher's plain box. The ladder cooks
+  // BOTH levels instead and picks per chunk at runtime, which is what this
+  // global switch could never do. Kept because it is still the cheapest way
+  // to price the boxes-everywhere floor; a pak cooked with it carries neither
+  // tree mesh kind and declares no VXPK_META_FLAG_TREE_LOD.
   if (process.env.VOXEL_TREE_BOXES === "1") return;
   const tw = map.def.width * 4;
   const th = map.def.height * 4;
@@ -472,6 +476,7 @@ export function buildCylinders(
           for (let dx = 0; dx < 4; dx++) {
             const tk = keyOf(cx * 2 + dx, cy * 2 + dy);
             S.skip.add(tk);
+            S.round.add(tk);
             S.ground.set(tk, tpl.bg);
           }
         }
@@ -504,6 +509,7 @@ export function buildCylinders(
           for (let dx = 0; dx < 2; dx++) {
             const tk = keyOf(cx * 2 + dx, cy * 2 + dy);
             S.skip.add(tk);
+            S.round.add(tk);
             S.ground.set(tk, tpl.bg);
           }
         }

@@ -383,54 +383,71 @@ pub fn build(scene: &Scene, pak: &Pak) -> DrawList {
     let pull_flower = (pull_card - FLOWER_PULL_SUB_PX * sinf(a)).max(0.0);
     let anim_frame = |frames: u16| ((scene.tick / TILE_ANIM_DIV) % frames as u32) as u16;
 
+    // One chunk mesh of one kind, or nothing when that kind is empty here.
+    let push_mesh = |items: &mut Vec<Item>, v: &Visible<'_>, kind: u16, pull: f32| {
+        let m = &v.chunk.meshes[kind as usize];
+        if m.index_count == 0 {
+            return;
+        }
+        let page = slot_page[v.slot as usize];
+        let frames = pak.atlases[page as usize].frames;
+        items.push(Item::ChunkMesh {
+            slot: v.slot,
+            kind,
+            mesh: MeshDraw {
+                vert_base: m.vert_base,
+                vert_count: m.vert_count,
+                index_base: m.index_base,
+                index_count: m.index_count,
+                page,
+                frame: anim_frame(frames),
+                off_x: v.ox,
+                off_y: v.oy,
+                pull,
+                pal: slot_pal[v.slot as usize],
+            },
+        });
+    };
+
     // `dist` is the rung's dial for this mesh kind: the chunk cap already
     // bounded the gather, so a kind-level dial only ever narrows it further.
     let mesh_pass = |items: &mut Vec<Item>, kind: u16, pull: f32, dist: f32| {
         if terrain_page.is_none() {
             return;
         }
-        for &Visible {
-            slot,
-            ox,
-            oy,
-            chunk,
-            dist2,
-            half,
-        } in &visible
-        {
-            let m = &chunk.meshes[kind as usize];
-            if m.index_count == 0 {
+        for v in &visible {
+            if !within_dist(v.dist2, v.half, dist) {
                 continue;
             }
-            if !within_dist(dist2, half, dist) {
-                continue;
-            }
-            let page = slot_page[slot as usize];
-            let frames = pak.atlases[page as usize].frames;
-            items.push(Item::ChunkMesh {
-                slot,
-                kind,
-                mesh: MeshDraw {
-                    vert_base: m.vert_base,
-                    vert_count: m.vert_count,
-                    index_base: m.index_base,
-                    index_count: m.index_count,
-                    page,
-                    frame: anim_frame(frames),
-                    off_x: ox,
-                    off_y: oy,
-                    pull,
-                    pal: slot_pal[slot as usize],
-                },
-            });
+            push_mesh(items, v, kind, pull);
         }
     };
 
-    // 2. Terrain, then stamps (terrain sub-meshes; few, uncculled). Terrain
-    // and water carry no dial of their own — they ARE the silhouette, so the
-    // chunk cap is the only distance that bounds them.
-    mesh_pass(&mut items, mesh_kind::TERRAIN, 0.0, spec::QUALITY_UNBOUNDED);
+    // 2. Terrain and its trees, then stamps (terrain sub-meshes; few,
+    // unculled). Terrain and water carry no dial of their own — they ARE the
+    // silhouette, so the chunk cap is the only distance that bounds them.
+    //
+    // The trees are the ladder's cook-time rung: a chunk inside
+    // `tree_hull_dist` draws the carved hulls it was cooked with, and past it
+    // the same cells as plain boxes — ~700 quads a cell against under ten.
+    // Both levels ship in the pak and META says so; a pak that carries only
+    // one (an older cook, or `VOXEL_TREE_BOXES=1`, which folds its boxes back
+    // into the terrain stream) keeps drawing what it has. The tree mesh is
+    // pushed inside this chunk's own iteration, immediately after its
+    // terrain, because that is where those quads sat when they were part of
+    // it: the top rung must not merely draw the same triangles but draw them
+    // in the same order.
+    let tree_lod = pak.has_tree_lod();
     if terrain_page.is_some() {
+        for v in &visible {
+            push_mesh(&mut items, v, mesh_kind::TERRAIN, 0.0);
+            let tree = if !tree_lod || within_dist(v.dist2, v.half, dials.tree_hull_dist) {
+                mesh_kind::TREE_HULL
+            } else {
+                mesh_kind::TREE_BOX
+            };
+            push_mesh(&mut items, v, tree, 0.0);
+        }
         for &(slot, map_id, ox, oy) in &shown_maps {
             let page = slot_page[slot as usize];
             let frames = pak.atlases[page as usize].frames;
@@ -598,7 +615,14 @@ mod tests {
         match item {
             Item::SkyBands { .. } => 0,
             Item::ChunkMesh { kind, .. } => match *kind {
-                k if k == mesh_kind::TERRAIN => 1,
+                // The tree streams ARE the terrain pass: they interleave with
+                // it chunk by chunk, so they share its rank.
+                k if k == mesh_kind::TERRAIN
+                    || k == mesh_kind::TREE_HULL
+                    || k == mesh_kind::TREE_BOX =>
+                {
+                    1
+                }
                 k if k == mesh_kind::WATER => 3,
                 k if k == mesh_kind::GRASS => 7,
                 _ => 8,
@@ -751,11 +775,11 @@ mod tests {
 
     /// A two-chunk map: the chunk at the origin and one three chunks NORTH
     /// (the orbit camera stands to the south and looks -Z, so that is the
-    /// direction distance is visible in), each carrying terrain + grass +
-    /// flower. The far chunk is inside the chunk cap (384 px < 340 + 64) and
-    /// outside every detail dial, so it is exactly the chunk a fade is
-    /// supposed to strip and the cap is not.
-    fn fading_pak_bytes() -> alloc::vec::Vec<u8> {
+    /// direction distance is visible in), each carrying terrain + both tree
+    /// levels + grass + flower. The far chunk is inside the chunk cap
+    /// (384 px < 340 + 64) and outside every detail dial, so it is exactly
+    /// the chunk a fade is supposed to strip and the cap is not.
+    fn fading_pak_bytes(tree_lod: bool) -> alloc::vec::Vec<u8> {
         use crate::pak::builder::{ChunkDef, PakBuilder};
         use crate::pak::{MeshRange, PakVert};
         let mut b = PakBuilder::new();
@@ -782,28 +806,37 @@ mod tests {
                 &[0, 1, 2, 0, 2, 3],
             )
         };
-        let chunk = |cy: i16, m: [MeshRange; 4]| ChunkDef {
+        let chunk = |cy: i16, m: [MeshRange; spec::MESH_KINDS]| ChunkDef {
             cx: 0,
             cy,
             aabb_min: [0, 0, cy * 128],
             aabb_max: [128, 0, cy * 128 + 128],
             meshes: m,
         };
+        let empty = MeshRange::default();
+        // terrain | treeHull | treeBox | water | grass | flower
         let near = [
             quad(0, 0, 128, 128),
-            MeshRange::default(),
+            quad(8, 8, 24, 24),
+            if tree_lod { quad(8, 8, 24, 24) } else { empty },
+            empty,
             quad(0, 0, 64, 64),
             quad(64, 64, 128, 128),
         ];
         let far = [
             quad(0, -384, 128, -256),
-            MeshRange::default(),
+            quad(8, -376, 24, -360),
+            if tree_lod { quad(8, -376, 24, -360) } else { empty },
+            empty,
             quad(0, -384, 64, -320),
             quad(64, -320, 128, -256),
         ];
         b.map(7, &[chunk(-3, far), chunk(0, near)]);
         b.stamps(7, &[]);
         b.game(b"{}");
+        if tree_lod {
+            b.meta_flags(spec::VXPK_META_FLAG_TREE_LOD);
+        }
         b.finish()
     }
 
@@ -812,7 +845,7 @@ mod tests {
     /// the silhouette and only the chunk cap bounds it.
     #[test]
     fn detail_meshes_fade_with_the_rung() {
-        let blob = pak::AlignedBlob::from_bytes(&fading_pak_bytes());
+        let blob = pak::AlignedBlob::from_bytes(&fading_pak_bytes(true));
         let pak = pak::read(blob.bytes()).unwrap();
         let kinds = |tier: u8| -> alloc::vec::Vec<(u16, u32)> {
             let mut s = Scene::new();
@@ -840,6 +873,13 @@ mod tests {
         assert_eq!(count(&top, mesh_kind::GRASS), 2, "top rung fades nothing");
         assert_eq!(count(&top, mesh_kind::FLOWER), 2);
 
+        assert_eq!(
+            count(&top, mesh_kind::TREE_HULL),
+            2,
+            "the top rung carves every tree in view"
+        );
+        assert_eq!(count(&top, mesh_kind::TREE_BOX), 0);
+
         let psp = kinds(spec::quality_tier::PSP);
         assert_eq!(
             count(&psp, mesh_kind::TERRAIN),
@@ -848,6 +888,46 @@ mod tests {
         );
         assert_eq!(count(&psp, mesh_kind::GRASS), 1, "the far grass faded");
         assert_eq!(count(&psp, mesh_kind::FLOWER), 1);
+        assert_eq!(
+            count(&psp, mesh_kind::TREE_HULL),
+            1,
+            "the near chunk keeps its carved hulls"
+        );
+        assert_eq!(
+            count(&psp, mesh_kind::TREE_BOX),
+            1,
+            "and the far one swaps them for boxes — swapped, never dropped"
+        );
+    }
+
+    /// A pak that carries only ONE tree level says so (no META flag), and
+    /// every rung then draws the level it has. Losing the trees at distance
+    /// because the pak predates the LOD cook would be a misrender; drawing
+    /// the carved hull a rung did not ask for is merely slow.
+    #[test]
+    fn a_pak_without_the_lod_flag_keeps_the_level_it_carries() {
+        let blob = pak::AlignedBlob::from_bytes(&fading_pak_bytes(false));
+        let pak = pak::read(blob.bytes()).unwrap();
+        assert!(!pak.has_tree_lod());
+        for tier in [spec::quality_tier::PSP, spec::quality_tier::DESKTOP] {
+            let mut s = Scene::new();
+            s.op(op::QUALITY, &[tier as i32], None);
+            s.op(op::MAP_SHOW, &[0, 7, 0, 0], None);
+            s.op(op::CAM, &[64 * Q4, 64 * Q4], None);
+            s.op(op::PITCH, &[4], None);
+            for _ in 0..spec::PITCH_TWEEN_TICKS {
+                s.tick();
+            }
+            let list = build(&s, &pak);
+            let n = |kind: u16| {
+                list.items
+                    .iter()
+                    .filter(|i| matches!(i, Item::ChunkMesh { kind: k, .. } if *k == kind))
+                    .count()
+            };
+            assert_eq!(n(mesh_kind::TREE_HULL), 2, "both chunks keep their hulls");
+            assert_eq!(n(mesh_kind::TREE_BOX), 0, "there are no boxes to draw");
+        }
     }
 
     /// The chunk the view centre stands in is inside EVERY rung's detail
@@ -861,7 +941,11 @@ mod tests {
         let half = spec::CHUNK_PX as f32 * 0.5;
         let worst_dist2 = 2.0 * half * half;
         for (rung, dials) in spec::QUALITY.iter().enumerate() {
-            for (name, limit) in [("grass", dials.grass_dist), ("flower", dials.flower_dist)] {
+            for (name, limit) in [
+                ("grass", dials.grass_dist),
+                ("flower", dials.flower_dist),
+                ("tree hull", dials.tree_hull_dist),
+            ] {
                 assert!(
                     within_dist(worst_dist2, half, limit),
                     "rung {rung}'s {name} dial ({limit}) drops the chunk underfoot"

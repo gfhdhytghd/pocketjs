@@ -71,6 +71,8 @@ fn build_pak() -> Vec<u8> {
                 MeshRange::default(),
                 MeshRange::default(),
                 MeshRange::default(),
+                MeshRange::default(),
+                MeshRange::default(),
             ],
         }],
     );

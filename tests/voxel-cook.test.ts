@@ -42,9 +42,14 @@ import {
 import { Redpp, ROOF_GROUP } from "../apps/voxelmon/cook/redpp.ts";
 import {
   CAM_FOCAL,
+  MESH_KIND,
+  MESH_KINDS,
   PITCH_RUNGS,
   RIG,
   RIG_DOLLY,
+  VXPK_CHUNK_RECORD_SIZE,
+  VXPK_META_FLAG_TREE_LOD,
+  VXPK_TAG,
   WORLD_VIEW_H,
 } from "../contracts/spec/voxel-spec.ts";
 
@@ -55,6 +60,42 @@ const box = (x: number, y: number, z: number): [number, number, number][] => [
   [x + 1, y, z + 1],
   [x, y, z + 1],
 ];
+
+/** One chunk record, read back out of a written pak's CHNK section. */
+interface ChunkRec {
+  meshes: { vertBase: number; vertCount: number; indexCount: number }[];
+}
+
+/** META flags + every chunk record of a pak on disk (the reader's layout). */
+function readPak(path: string): { flags: number; chunks: ChunkRec[] } {
+  const bytes = readFileSync(path);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const sections = new Map<number, number>();
+  for (let i = 0; i < dv.getUint16(6, true); i++) {
+    const e = 16 + i * 16;
+    sections.set(dv.getUint32(e, true), dv.getUint32(e + 4, true));
+  }
+  const flags = dv.getUint32(sections.get(VXPK_TAG.meta)! + 32, true);
+  const chnk = sections.get(VXPK_TAG.chunks)!;
+  const mapCount = dv.getUint16(chnk, true);
+  const total = dv.getUint32(chnk + 4, true);
+  const first = chnk + 32 + mapCount * 12;
+  const chunks: ChunkRec[] = [];
+  for (let i = 0; i < total; i++) {
+    const r = first + i * VXPK_CHUNK_RECORD_SIZE;
+    const meshes = [];
+    for (let k = 0; k < MESH_KINDS; k++) {
+      const m = r + 16 + k * 12;
+      meshes.push({
+        vertBase: dv.getUint32(m, true),
+        vertCount: dv.getUint16(m + 4, true),
+        indexCount: dv.getUint16(m + 6, true),
+      });
+    }
+    chunks.push({ meshes });
+  }
+  return { flags, chunks };
+}
 
 const root = join(import.meta.dir, "..");
 const scratch = join(root, "dist/voxelmon");
@@ -99,6 +140,73 @@ describe.skipIf(reason !== null)("voxel cook", () => {
     const a = readFileSync(outA);
     const b = readFileSync(outB);
     expect(a.equals(b)).toBe(true);
+  }, 240000);
+
+  // Tree LOD (docs/VOXEL.md §4a): the cook emits BOTH levels of detail and
+  // the pak SAYS so, because that declaration is what lets a runtime asking
+  // for a level this pak does not hold fall back instead of misrender.
+  test("the pak carries both tree levels and declares them", () => {
+    const { flags, chunks } = readPak(outA);
+    expect(flags & VXPK_META_FLAG_TREE_LOD).toBe(VXPK_META_FLAG_TREE_LOD);
+    const tris = (kind: number) =>
+      chunks.reduce((n, c) => n + c.meshes[kind].indexCount / 3, 0);
+    const hull = tris(MESH_KIND.treeHull);
+    const boxes = tris(MESH_KIND.treeBox);
+    expect(hull).toBeGreaterThan(0);
+    expect(boxes).toBeGreaterThan(0);
+    // The whole point of the rung: a carved hull is ~700 quads a cell and a
+    // box is under ten, so the far level must be a rounding error beside it.
+    expect(boxes * 10).toBeLessThan(hull);
+  });
+
+  // The near level of detail must draw the same triangles IN THE SAME ORDER
+  // as the pre-LOD cook, which packed hulls inside the terrain mesh. Both
+  // guarantees are structural: the hulls were a SUFFIX of each chunk's
+  // terrain quads, so their vertices land immediately after that chunk's own
+  // terrain vertices in the shared pool, and draw.rs pushes the pair back to
+  // back. A chunk whose hull vertices moved anywhere else means the split
+  // reordered geometry and *-max.hashes cannot hold.
+  test("a chunk's carved hulls sit immediately after its own terrain", () => {
+    const { chunks } = readPak(outA);
+    let checked = 0;
+    for (const c of chunks) {
+      const terrain = c.meshes[MESH_KIND.terrain];
+      const hull = c.meshes[MESH_KIND.treeHull];
+      // An empty range is all-zero, so it names no place in the pool.
+      if (hull.indexCount === 0 || terrain.indexCount === 0) continue;
+      checked++;
+      expect(hull.vertBase).toBe(terrain.vertBase + terrain.vertCount);
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  // The ladder's predecessor still works, and still states what it is: a
+  // cook with no carving at all carries neither tree mesh and declares no
+  // levels, so every rung draws the boxes out of the terrain stream exactly
+  // as it did before tree LOD existed.
+  test("VOXEL_TREE_BOXES=1 cooks one level and declares none", () => {
+    const out = join(scratch, "voxelmon.test-boxes.vxpak");
+    const before = process.env.VOXEL_TREE_BOXES;
+    process.env.VOXEL_TREE_BOXES = "1";
+    try {
+      cook(DEFAULT_MAPS, out);
+    } finally {
+      if (before === undefined) delete process.env.VOXEL_TREE_BOXES;
+      else process.env.VOXEL_TREE_BOXES = before;
+    }
+    const { flags, chunks } = readPak(out);
+    expect(flags & VXPK_META_FLAG_TREE_LOD).toBe(0);
+    for (const c of chunks) {
+      expect(c.meshes[MESH_KIND.treeHull].indexCount).toBe(0);
+      expect(c.meshes[MESH_KIND.treeBox].indexCount).toBe(0);
+    }
+    // ...and it is still the cheap floor it was kept for.
+    const terrain = chunks.reduce((n, c) => n + c.meshes[MESH_KIND.terrain].indexCount / 3, 0);
+    const carved = readPak(outA).chunks.reduce(
+      (n, c) => n + (c.meshes[MESH_KIND.terrain].indexCount + c.meshes[MESH_KIND.treeHull].indexCount) / 3,
+      0,
+    );
+    expect(terrain).toBeLessThan(carved / 2);
   }, 240000);
 
   test("every cooked map has chunks and vertices", () => {

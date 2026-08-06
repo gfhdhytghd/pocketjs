@@ -148,6 +148,7 @@ export function analyseMap(
     grassQuads: [],
     flowerQuads: [],
     roundStamps: [],
+    round: new Set(),
     stampQuads: new Map(),
     x0,
     x1,

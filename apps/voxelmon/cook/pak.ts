@@ -13,6 +13,7 @@
 import {
   COLOR_PAL_NONE,
   VERTEX_STRIDE,
+  VXPK_CHUNK_RECORD_SIZE,
   VIEW_H,
   VIEW_W,
   VXPK_ALIGN,
@@ -21,6 +22,7 @@ import {
   VXPK_ENTRY_SIZE,
   VXPK_HEADER_SIZE,
   VXPK_MAGIC,
+  VXPK_META_SIZE,
   VXPK_TAG,
   VXPK_VERSION,
 } from "../../../contracts/spec/voxel-spec.ts";
@@ -111,6 +113,13 @@ export interface PakInput {
   audioJson?: Uint8Array;
   audioPrograms?: Uint8Array;
   emotePage: number | null;
+  /**
+   * META flags — what this pak CARRIES, not how to draw it
+   * (`VXPK_META_FLAG_TREE_LOD` when every chunk holds both tree levels of
+   * detail). Omitted = 0, which is what an older cook stated by having no
+   * field at all.
+   */
+  metaFlags?: number;
   /**
    * The VCOL bindings (cook/redpp.ts). Omit for a pak with no RED++ pack:
    * the section is still written (it is required), with every index
@@ -208,6 +217,9 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
   meta.u32(input.emotePage ?? EMOTE_PAGE_NONE);
   meta.u32(VIEW_W);
   meta.u32(VIEW_H);
+  meta.u32(input.metaFlags ?? 0);
+  meta.u32(0);
+  if (meta.length !== VXPK_META_SIZE) throw new Error("META record size");
 
   // --- VPAL ---
   const vpal = new ByteWriter();
@@ -247,7 +259,7 @@ export function writePak(input: PakInput): { bytes: Uint8Array; stats: PakStats 
   chnk.u16(input.maps.length);
   chnk.u16(0);
   chnk.u32(chunkTotal);
-  const dirEnd = 32 + input.maps.length * 12 + chunkTotal * 64;
+  const dirEnd = 32 + input.maps.length * 12 + chunkTotal * VXPK_CHUNK_RECORD_SIZE;
   const vertsOff = Math.ceil(dirEnd / VXPK_ALIGN) * VXPK_ALIGN;
   const vertsLen = vertCount * VERTEX_STRIDE;
   const indicesOff = Math.ceil((vertsOff + vertsLen) / VXPK_ALIGN) * VXPK_ALIGN;

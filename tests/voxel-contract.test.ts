@@ -10,11 +10,16 @@ import { generateVoxelRust } from "../contracts/spec/gen-voxel-rust.ts";
 import {
   CHUNK_DRAW_DIST_PX,
   CHUNK_PX,
+  MESH_KIND,
+  MESH_KINDS,
   QUALITY,
   QUALITY_TIER,
   QUALITY_TIER_DEFAULT,
   QUALITY_UNBOUNDED,
   VOX_OP,
+  VXPK_CHUNK_RECORD_SIZE,
+  VXPK_META_FLAG_TREE_LOD,
+  VXPK_META_SIZE,
   VXPK_TAG,
 } from "../contracts/spec/voxel-spec.ts";
 
@@ -54,6 +59,7 @@ test("climbing the ladder never draws less", () => {
     const above = QUALITY[i]!;
     expect(above.grassDist).toBeGreaterThanOrEqual(below.grassDist);
     expect(above.flowerDist).toBeGreaterThanOrEqual(below.flowerDist);
+    expect(above.treeHullDist).toBeGreaterThanOrEqual(below.treeHullDist);
     expect(above.chunkDist).toBeGreaterThanOrEqual(below.chunkDist);
   }
 });
@@ -67,12 +73,17 @@ test("the top rung is the identity", () => {
   const top = QUALITY.at(-1)!;
   expect(top.grassDist).toBe(QUALITY_UNBOUNDED);
   expect(top.flowerDist).toBe(QUALITY_UNBOUNDED);
+  // Unbounded here means every tree carved, which is what the pre-ladder
+  // runtime drew: the box level of detail exists only for lower rungs.
+  expect(top.treeHullDist).toBe(QUALITY_UNBOUNDED);
   for (const rung of QUALITY) expect(rung.chunkDist).toBe(CHUNK_DRAW_DIST_PX);
 });
 
 // The GB grass-over-feet trick lives at the player's own cell, so the chunk
-// the view centre stands in must survive every rung's detail dials. The
-// farthest a point inside a chunk can be from that chunk's centre is
+// the view centre stands in must survive every rung's detail dials — and so
+// must the tree the player is standing next to, which is what makes tree LOD
+// a distance dial rather than the global VOXEL_TREE_BOXES switch it replaces.
+// The farthest a point inside a chunk can be from that chunk's centre is
 // half*sqrt(2), and a dial's limit is widened by that same half.
 test("no rung fades the chunk underfoot", () => {
   const half = CHUNK_PX / 2;
@@ -80,8 +91,36 @@ test("no rung fades the chunk underfoot", () => {
   for (const [i, rung] of QUALITY.entries()) {
     expect(rung.grassDist + half).toBeGreaterThan(worst);
     expect(rung.flowerDist + half).toBeGreaterThan(worst);
+    expect(rung.treeHullDist + half).toBeGreaterThan(worst);
     expect(i).toBeGreaterThanOrEqual(0);
   }
+});
+
+// Tree LOD is the one dial whose geometry lives in the pak, so the pak has
+// to be able to SAY what it carries. A flag word — not a version bump, not a
+// mesh-kind count — is what lets a pak cooked without the box level load and
+// draw its carved hulls at every rung instead of losing its trees.
+test("the pak declares the levels of detail it carries", () => {
+  expect(VXPK_META_FLAG_TREE_LOD).toBeGreaterThan(0);
+  // The record has room for the flags word and its pad, and both writers
+  // size the META payload from this constant.
+  expect(VXPK_META_SIZE).toBe(40);
+  // Both tree levels are real mesh kinds with ranges of their own, so the
+  // chunk record grew and every reader must size it from the spec.
+  expect(MESH_KIND.treeHull).not.toBe(MESH_KIND.treeBox);
+  expect(MESH_KINDS).toBe(Object.keys(MESH_KIND).length);
+  expect(VXPK_CHUNK_RECORD_SIZE).toBe(16 + MESH_KINDS * 12);
+});
+
+// Mesh kinds ARE the draw order (voxel-spec.ts §MESH_KIND), and the two tree
+// levels are alternatives inside the terrain pass: whichever a chunk draws,
+// it draws right after that chunk's own terrain.
+test("mesh kinds are a dense 0..n range in draw order", () => {
+  const ids: number[] = Object.values(MESH_KIND);
+  expect([...ids].sort((a, b) => a - b)).toEqual(ids.map((_, i) => i));
+  expect(MESH_KIND.terrain).toBe(0);
+  expect(MESH_KIND.treeHull as number).toBe(MESH_KIND.terrain + 1);
+  expect(MESH_KIND.treeBox as number).toBe(MESH_KIND.treeHull + 1);
 });
 
 test("section tags are unique 4CCs", () => {

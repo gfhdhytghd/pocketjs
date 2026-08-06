@@ -99,6 +99,9 @@ pub struct QualityDials {
     pub grass_dist: f32,
     /// Flower chunk meshes past this distance are not drawn.
     pub flower_dist: f32,
+    /// A chunk inside this distance draws its CARVED tree hulls;
+    /// past it, the same cells as plain boxes (`mesh_kind::TREE_BOX`).
+    pub tree_hull_dist: f32,
     /// No chunk past this distance is drawn at all (any mesh kind).
     pub chunk_dist: f32,
 }
@@ -109,18 +112,21 @@ pub const QUALITY: [QualityDials; 3] = [
     QualityDials {
         grass_dist: 96.0,
         flower_dist: 96.0,
+        tree_hull_dist: 128.0,
         chunk_dist: 340.0,
     },
     // vita
     QualityDials {
         grass_dist: 192.0,
         flower_dist: 192.0,
+        tree_hull_dist: 192.0,
         chunk_dist: 340.0,
     },
     // desktop
     QualityDials {
         grass_dist: 1000000000.0,
         flower_dist: 1000000000.0,
+        tree_hull_dist: 1000000000.0,
         chunk_dist: 340.0,
     },
 ];
@@ -358,10 +364,15 @@ pub const EVENT_CAP: usize = 64;
 // ---------------------------------------------------------------------------
 
 pub const VXPK_MAGIC: u32 = 0x4b505856; // 'VXPK'
-pub const VXPK_VERSION: u16 = 3;
+pub const VXPK_VERSION: u16 = 4;
 pub const VXPK_HEADER_SIZE: usize = 16;
 pub const VXPK_ENTRY_SIZE: usize = 16;
 pub const VXPK_ALIGN: usize = 16;
+/// The META record: eight u32 counts/dims, then flags and a pad word.
+pub const VXPK_META_SIZE: usize = 40;
+/// META flag bit 0: chunks carry BOTH tree levels of detail, so the
+/// runtime may pick one per chunk (`QualityDials::tree_hull_dist`).
+pub const VXPK_META_FLAG_TREE_LOD: u32 = 1;
 /// The AUDI payload's own header (json_len, program_len, two pad words).
 pub const VXPK_AUDIO_HEADER_SIZE: usize = 16;
 /// The VCOL payload's own header (version, counts, flags, two pad words).
@@ -402,10 +413,14 @@ pub const MAX_VERTS_PER_CHUNK_MESH: usize = 65532;
 /// Mesh kinds inside a chunk — draw order is their numeric order.
 pub mod mesh_kind {
     pub const TERRAIN: u16 = 0;
-    pub const WATER: u16 = 1;
-    pub const GRASS: u16 = 2;
-    pub const FLOWER: u16 = 3;
+    pub const TREE_HULL: u16 = 1;
+    pub const TREE_BOX: u16 = 2;
+    pub const WATER: u16 = 3;
+    pub const GRASS: u16 = 4;
+    pub const FLOWER: u16 = 5;
 }
 
-pub const MESH_KINDS: usize = 4;
+pub const MESH_KINDS: usize = 6;
+/// Bytes per CHNK chunk record: coords + AABB + a range per kind.
+pub const VXPK_CHUNK_RECORD_SIZE: usize = 88;
 

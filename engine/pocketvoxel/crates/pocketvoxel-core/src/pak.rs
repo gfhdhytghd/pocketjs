@@ -18,7 +18,7 @@
 //! VCOL, CMAP, STMP, ATLS.
 //!
 //! ```text
-//! META  (table count = 1), 32 bytes:
+//! META  (table count = 1), VXPK_META_SIZE bytes:
 //!   0  u32 map_count       == CHNK map_count
 //!   4  u32 atlas_count     == ATLS page count
 //!   8  u32 palette_count   == VPAL palette count
@@ -29,6 +29,12 @@
 //!                          kind - 1); 0xffffffff = pak has no emote art
 //!   24 u32 view_w          == spec::VIEW_W  — a pak cooked for another
 //!   28 u32 view_h          == spec::VIEW_H    viewport is rejected
+//!   32 u32 flags           what this pak CARRIES, not how to draw it. Bit 0
+//!                          (VXPK_META_FLAG_TREE_LOD): every chunk holds both
+//!                          tree levels of detail, so the runtime may pick
+//!                          per chunk. Unknown bits are ignored, never
+//!                          rejected — a newer cook stays loadable
+//!   36 u32 pad = 0
 //!
 //! VPAL  (table count = palette count):
 //!   0  u16 count
@@ -65,11 +71,12 @@
 //!   32 map directory, map_count * 12 bytes:
 //!        u32 map_id | u32 first_chunk | u32 chunk_count
 //!      (one map's chunk records are contiguous)
-//!   .. chunk records, chunk_total * 64 bytes each:
+//!   .. chunk records, chunk_total * VXPK_CHUNK_RECORD_SIZE bytes each:
 //!        i16 cx | i16 cy                      chunk coords (world px =
 //!                                             c * CHUNK_PX, map-local)
 //!        i16 min_x,min_y,min_z,max_x,max_y,max_z   AABB, map-local world px
-//!        4 mesh ranges in mesh_kind order (terrain, water, grass, flower):
+//!        MESH_KINDS mesh ranges in mesh_kind order (terrain, treeHull,
+//!        treeBox, water, grass, flower):
 //!          u32 vert_base | u16 vert_count | u16 index_count | u32 index_base
 //!        - indices are RELATIVE to vert_base (GE batch style, u16-safe)
 //!        - index_count % 3 == 0; every index < vert_count (checked at load)
@@ -122,7 +129,8 @@ use alloc::vec::Vec;
 
 use crate::spec::{
     self, COLOR_PAL_NONE, MESH_KINDS, VERTEX_STRIDE, VXPK_ALIGN, VXPK_COLOR_HEADER_SIZE,
-    VXPK_COLOR_VERSION, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE, VXPK_MAGIC, VXPK_VERSION,
+    VXPK_COLOR_VERSION, VXPK_ENTRY_SIZE, VXPK_HEADER_SIZE, VXPK_MAGIC, VXPK_META_FLAG_TREE_LOD,
+    VXPK_META_SIZE, VXPK_VERSION,
 };
 
 pub type ReadError = &'static str;
@@ -238,7 +246,8 @@ pub struct Chunk {
     /// AABB in map-local world px: [min_x, min_y, min_z], [max_x, max_y, max_z].
     pub aabb_min: [i16; 3],
     pub aabb_max: [i16; 3],
-    /// Indexed by `spec::mesh_kind` (terrain, water, grass, flower).
+    /// Indexed by `spec::mesh_kind` (terrain, treeHull, treeBox, water,
+    /// grass, flower).
     pub meshes: [MeshRange; MESH_KINDS],
 }
 
@@ -281,6 +290,8 @@ pub struct Meta {
     pub emote_page: u32,
     pub view_w: u32,
     pub view_h: u32,
+    /// What the pak CARRIES (`spec::VXPK_META_FLAG_*`), not how to draw it.
+    pub flags: u32,
 }
 
 /// A validated VXPK. Bulk data borrows from the source blob (which must
@@ -389,6 +400,15 @@ impl<'a> Pak<'a> {
     pub fn page_pal(&self, page: u16) -> Option<u16> {
         let pal = *self.color.pages.get(page as usize)?;
         (pal != COLOR_PAL_NONE).then_some(pal)
+    }
+
+    /// True when every chunk carries BOTH tree levels of detail, so the
+    /// rung's `tree_hull_dist` may pick one per chunk. On a pak without it
+    /// the core draws whichever level the cook produced — a pak carrying only
+    /// carved hulls renders them at every rung rather than losing its trees,
+    /// which is the degrade the flag exists to make possible.
+    pub fn has_tree_lod(&self) -> bool {
+        self.meta.flags & VXPK_META_FLAG_TREE_LOD != 0
     }
 
     /// UI tile for a character; `None` when the pak has no glyph for it.
@@ -592,8 +612,8 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
     let meta;
     {
         let (_, len, count) = sections[0];
-        if count != 1 || len != 32 {
-            return Err("META must be one 32-byte record");
+        if count != 1 || len != VXPK_META_SIZE {
+            return Err("META must be one VXPK_META_SIZE record");
         }
         let mut r = Rd::new(payload(0));
         meta = Meta {
@@ -605,7 +625,11 @@ pub fn read(data: &[u8]) -> Result<Pak<'_>, ReadError> {
             emote_page: r.u32v()?,
             view_w: r.u32v()?,
             view_h: r.u32v()?,
+            flags: r.u32v()?,
         };
+        if r.u32v()? != 0 {
+            return Err("META pad is not zero");
+        }
         if meta.view_w != spec::VIEW_W as u32 || meta.view_h != spec::VIEW_H as u32 {
             return Err("pak was cooked for a different viewport");
         }
@@ -1005,6 +1029,8 @@ pub(crate) mod tests {
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
+                    MeshRange::default(),
+                    MeshRange::default(),
                 ],
             }],
         );
@@ -1055,6 +1081,8 @@ pub(crate) mod tests {
                 aabb_max: [128, 0, 128],
                 meshes: [
                     terrain,
+                    MeshRange::default(),
+                    MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),
                     MeshRange::default(),

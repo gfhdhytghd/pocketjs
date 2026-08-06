@@ -3,14 +3,18 @@
 //   bun apps/voxelmon/cook/cli.ts [--maps PALLET_TOWN,ROUTE_1,...] [--out f]
 //
 // Pipeline (docs/VOXEL.md §5): classify -> volumes/buildings/trees/standees
-// -> mesh per 16x16-tile chunk into the four MESH_KIND streams -> atlases +
+// -> mesh per 16x16-tile chunk into the MESH_KIND streams -> atlases +
 // palettes -> GAME + CMAP -> dist/voxelmon/voxelmon.vxpak. Prints per-stage
 // stats. Skips (exit 1, printed reason) when gen/ is absent.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { ATLAS_KIND } from "../../../contracts/spec/voxel-spec.ts";
+import {
+  ATLAS_KIND,
+  MESH_KIND,
+  VXPK_META_FLAG_TREE_LOD,
+} from "../../../contracts/spec/voxel-spec.ts";
 
 import {
   buildEmotePage,
@@ -223,6 +227,14 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
       })
     : null;
   const palettes = buildPalettes(gen, colour?.palettes ?? []);
+  // The pak states what it carries: a chunk with a treeBox mesh has BOTH
+  // tree levels of detail, so a runtime may pick per chunk. A cook that
+  // carved no hulls (VOXEL_TREE_BOXES=1) produces neither tree mesh and
+  // declares nothing, and the core then draws whatever the terrain stream
+  // holds — the pre-LOD behaviour, unchanged.
+  const treeLod = packedMaps.some((m) =>
+    m.chunks.some((c) => c.meshes[MESH_KIND.treeBox].indices.length > 0),
+  );
   const { bytes, stats } = writePak({
     palettes,
     pages,
@@ -232,6 +244,7 @@ export function cook(mapNames: string[], outPath: string, genDir = GEN_DIR): Coo
     audioJson: hasAudio ? new Uint8Array(readFileSync(audioJsonPath)) : undefined,
     audioPrograms: hasAudio ? new Uint8Array(readFileSync(audioProgramPath)) : undefined,
     emotePage,
+    metaFlags: treeLod ? VXPK_META_FLAG_TREE_LOD : 0,
     colour: colour
       ? { maps: colour.maps, pagePal: colour.pagePal, flags: colour.flags }
       : undefined,
