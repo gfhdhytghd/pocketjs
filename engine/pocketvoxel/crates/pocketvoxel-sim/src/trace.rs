@@ -287,6 +287,37 @@ pub fn run(
                     ticked = true;
                 }
                 let list = draw::build(&scene, pak);
+                // Composition probe (VOXEL_TRIS=1): what the frame's
+                // triangles are spent on, per mesh kind, at this rung's
+                // dials — the measuring tool for uniform-dial budgeting.
+                if std::env::var_os("VOXEL_TRIS").is_some() {
+                    let mut kinds = [0u32; 16];
+                    let mut stamps = 0u32;
+                    let mut cards = 0u32;
+                    for item in &list.items {
+                        match item {
+                            draw::Item::ChunkMesh { kind, mesh, .. } => {
+                                kinds[*kind as usize] += u32::from(mesh.index_count) / 3;
+                            }
+                            draw::Item::StampMesh { mesh, .. } => {
+                                stamps += u32::from(mesh.index_count) / 3;
+                            }
+                            draw::Item::Card { .. } => cards += 2,
+                            _ => {}
+                        }
+                    }
+                    let names = [
+                        "terrain", "bake", "keep", "hull", "coarse", "box", "water", "grass",
+                        "flower",
+                    ];
+                    let mut line = format!("tris {name}:");
+                    for (k, label) in names.iter().enumerate() {
+                        if kinds[k] > 0 {
+                            line.push_str(&format!(" {label} {}", kinds[k]));
+                        }
+                    }
+                    eprintln!("{line} stamps {stamps} cards {cards}");
+                }
                 let frame = raster::render(&list, pak, cache);
                 hashes.push((name.clone(), fnv1a64(&frame.rgba_bytes())));
                 shot(name, &frame);

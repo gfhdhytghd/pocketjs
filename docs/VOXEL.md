@@ -199,18 +199,43 @@ The dials, all distances in world px from the view centre to a chunk's own
 centre, widened by the chunk's half-extent — one function, `draw::within_dist`,
 so a dial added later cannot measure differently from these:
 
-| rung | `grassDist` | `flowerDist` | `treeHullDist` | `treeCoarseDist` | `chunkDist` | `pullDepthBias` |
-| --- | --- | --- | --- | --- | --- | --- |
-| `psp` (default) | 96 | 96 | 0 | 128 | 340 | on |
-| `vita` | 192 | 192 | 192 | 192 | 340 | off |
-| `desktop` | unbounded | unbounded | unbounded | unbounded | 340 | off |
+| rung | `grassDist` | `flowerDist` | `treeHullDist` | `treeCoarseDist` | `groundBakeDist` | `detailDensity` | `chunkDist` | `pullDepthBias` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `psp` (default) | unbounded | unbounded | off | unbounded | off (bake all) | 4 | 340 | on |
+| `vita` | unbounded | unbounded | unbounded | unbounded | unbounded (never) | 1 | 340 | off |
+| `desktop` | unbounded | unbounded | unbounded | unbounded | unbounded (never) | 1 | 340 | off |
 
 `chunkDist` is 2.5 view-heights at **every** rung including the top: it is
 `draw.rs`'s old hard-coded `CULL_DIST` folded in, a pre-existing frame-budget
 cap rather than a new fidelity dial, and widening it at the top would draw
 *more* than the pre-ladder runtime instead of the same.
 
-**Why the grass and flower distances are what they are.** The end-to-end
+**The no-moving-boundary rule (2026-08-06).** The psp rung shipped one
+afternoon with finite detail distances (96 px), a coarse/box tree boundary
+(96 px) and a live-geometry bubble around the player (`groundBakeDist` 0),
+and every one of them became a device-visible walking artifact the same day:
+a distance boundary inside the visible field moves with each step, so the
+swap it hides plays as flicker (the roadside light-tree ring twinkled
+coarse↔box), popping (grass at its fade line) or a jump (the road flipping
+baked↔live one cell ahead of the player). Under the 30 fps present lock the
+rung now keeps **one representation everywhere the frustum reaches**: every
+distance dial is unbounded or off, and the frame is paid for with the
+UNIFORM dials — coarse-only trees, bake-everywhere, detail density, and
+the coarse carve shipping without its rear hemisphere (a carved ball is
+convex and the camera is always south of and above it, so its north faces
+are self-occluded at every pitch rung; they were 25% of the coarse
+stream) — which cannot flicker because they never switch. `detailDensity`
+draws a prefix of each chunk's detail streams; the cook packs those
+streams stratified (round-robin by within-cell rank, cells in bit-reversed
+order), so any prefix is a spatially uniform sample — packed row-major,
+"half density" had meant a bald south half per chunk, not thinner grass.
+Composition at the route-1 checkpoint under these dials (the
+`VOXEL_TRIS=1` probe in pocketvoxel-sim): coarse trees 15.4k, keep 10.2k,
+grass 6.6k, bake 2.2k, flower 1.5k — ~37k against the ~40k that holds a
+33.3 ms present.
+
+**Why the grass and flower distances were 96 px in the 60 fps push
+(historical — the rung now draws them unbounded).** The end-to-end
 pipeline measured ~1.1 M triangles/s when these dials were set (the figure
 folded in CPU submission costs that have since been removed — the GE alone
 sustains ~1.3 M/s on this content, still fetch-bound, see §6), so 60 fps
@@ -623,7 +648,16 @@ only clock; tile animation and menu cursors derive from it.
    1/64-texel sampling shift against the 0.02-texel INSET) moved **590
    pixels across all fifteen max-tier frames** (worst 255 in one frame,
    0.195%; nine frames under 10), every one a texel-boundary flip, and the
-   anchors were re-recorded 2026-08-06 with that bound in hand.
+   anchors were re-recorded 2026-08-06 with that bound in hand. A PACK
+   ORDER change ranks the same way: the stratified detail-stream order
+   (§4a `detailDensity`) re-sequences grass slabs whose crossing lines are
+   equal-depth contests, where draw order owns the shared pixels — the
+   stratified pack moved **60 pixels across all fifteen frames** (worst 23,
+   0.018%), every one on a tuft's crossing or cell-border line, and the
+   anchors were re-based 2026-08-06 with that bound in hand. (A
+   rank-preserving order was tried first specifically to hold the anchor;
+   neighbour-cell border ties move regardless, so the ceremony was paid
+   rather than the uniformity constraint weakened.)
 
 ## 8. Audio
 

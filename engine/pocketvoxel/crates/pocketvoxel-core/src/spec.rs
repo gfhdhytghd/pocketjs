@@ -127,21 +127,21 @@ pub struct QualityDials {
 pub const QUALITY: [QualityDials; 3] = [
     // psp
     QualityDials {
-        grass_dist: 96.0,
-        flower_dist: 96.0,
+        grass_dist: 1000000000.0,
+        flower_dist: 1000000000.0,
         tree_hull_dist: -1.0,
-        tree_coarse_dist: 96.0,
+        tree_coarse_dist: 1000000000.0,
         chunk_dist: 340.0,
-        ground_bake_dist: 0.0,
-        detail_density: 2,
+        ground_bake_dist: -1.0,
+        detail_density: 4,
         pull_depth_bias: true,
     },
     // vita
     QualityDials {
-        grass_dist: 192.0,
-        flower_dist: 192.0,
-        tree_hull_dist: 192.0,
-        tree_coarse_dist: 192.0,
+        grass_dist: 1000000000.0,
+        flower_dist: 1000000000.0,
+        tree_hull_dist: 1000000000.0,
+        tree_coarse_dist: 1000000000.0,
         chunk_dist: 340.0,
         ground_bake_dist: 1000000000.0,
         detail_density: 1,

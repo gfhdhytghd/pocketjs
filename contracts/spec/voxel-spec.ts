@@ -229,56 +229,60 @@ export const CHUNK_DRAW_DIST_PX = 2.5 * WORLD_VIEW_H;
  * stands.
  */
 export const QUALITY = [
-  // psp — measured over the story trace: grass+flower cost is flat from 48 px
-  // to 96 px at every ROUTE_1 checkpoint and jumps at 112 px, so 96 is the
-  // largest distance that still buys the whole first-ring saving
-  // (docs/VOXEL.md §4a). It takes 30-34% off the two meshes there; it does
-  // NOT reach the 18 k-triangle budget, and no distance dial can while
-  // terrain alone is 40 k.
-  // treeHullDist — measured over both traces, every tick, with the other
-  // dials held here: the worst frame is FLAT at 110144 triangles from 128 px
-  // to 144 px and jumps to 117272 at 160 px, and 128 is the point in that
-  // plateau where every pixel the swap costs sits at the horizon or the
-  // frame's top edge. Below it the boundary walks into the near field —
-  // at 96 px Pallet Town's whole roadside tree column turns to slabs and so
-  // does the boulder beside the battle stage. It takes 15% off the mean
-  // frame over the story tape (57339 -> 48959 triangles) and 11% off the
-  // worst (124392 -> 110144). See docs/VOXEL.md §4a.
+  // psp — retuned 2026-08-06 for the 30 fps present lock, under one rule the
+  // 60 fps push had traded away: NO camera-relative representation change
+  // inside the visible field. A distance dial whose boundary sits in view
+  // moves with every step, and the swap it hides becomes a walking artifact
+  // — the roadside light-tree ring twinkled coarse<->box at 96 px, the
+  // ground flipped baked<->live at the live-bubble's edge one cell ahead of
+  // the player, and grass popped in and out at its 96 px fade line (all
+  // three device-reported the same afternoon). Every distance dial on this
+  // rung is now either unbounded (ONE representation everywhere the frustum
+  // reaches) or off; what remains of the 60 fps savings are the UNIFORM
+  // dials — half density, coarse-only trees, bake-everywhere — which cannot
+  // flicker because they never switch. The measurements that priced the
+  // moving boundaries live on in docs/VOXEL.md §4a and §7.
   {
-    grassDist: 96,
-    flowerDist: 96,
+    grassDist: QUALITY_UNBOUNDED,
+    flowerDist: QUALITY_UNBOUNDED,
     // Every carved tree this rung draws is the COARSE one (fine is OFF —
     // measured 2026-08-06 over the ring report: the underfoot fine ring
     // alone was 10 968 triangles on ROUTE_1 and 11 630 on PALLET_TOWN
-    // against ~3 400 as coarse), and the carve ring tightens to 96 where
-    // the box swap is already past the detail distances.
+    // against ~3 400 as coarse). Coarse is uniform across the field; the
+    // box level never shows on this rung and remains the fallback for a
+    // pak cooked without the coarse stream.
     treeHullDist: QUALITY_OFF,
-    treeCoarseDist: 96,
+    treeCoarseDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 1,
-    // Past this, an eligible chunk's ground is the baked quad (see
-    // MESH_KIND.groundBake). 0 is NOT "bake everything": the half-extent
-    // widening in `within_dist` keeps every chunk that overlaps the view
-    // centre — the ground underfoot — on real geometry, and bakes the rest.
-    // 64 was tried first and barely baked at all (widened, it meant "beyond
-    // ~154 px": device run J cut only 1-3k of the predicted 11-15k
-    // triangles); 0 is the dial that means what the design intended.
-    groundBakeDist: 0,
-    // Draw every SECOND grass/flower quad (the cook packs each chunk's
-    // detail quads evens-first so a prefix of the index range IS the
-    // half-density set). Ankle-height detail at half density reads as
-    // texture, and it is measured as up to 18k of an outdoor frame.
-    detailDensity: 2,
+    // OFF makes every eligible chunk draw the baked quad — including the
+    // ground underfoot. The bake is exact at the rung-2 rest pitch by
+    // construction and CHEAPER than the live terrain it replaces; the live
+    // bubble the old 0 dial kept around the player protected near-field
+    // relief, but its edge crossed a chunk seam one step ahead of the
+    // player and the baked<->live swap read as the road jumping.
+    groundBakeDist: QUALITY_OFF,
+    // Draw every FOURTH grass/flower quad (the cook packs each chunk's
+    // detail quads in bit-reversed order, so any prefix of the index range
+    // is a stratified — spatially uniform — sample of the field). Unlike a
+    // fade distance this is uniform: no boundary, nothing to pop. It is
+    // also what pays for the unbounded dials above: within the route-1
+    // chunk reach the raw detail streams are 52k+20k triangles, the
+    // largest slices of the frame; 4 (with the coarse carve's rear
+    // hemisphere dropped at cook) holds the measured worst outdoor
+    // segments at the 33.3 ms present slot that 2 and 3 missed.
+    detailDensity: 4,
   },
-  // vita — a placeholder, not a measurement: on the v1 maps this is
-  // pixel-identical to the top rung, because 128 px chunks inside a 340 px
-  // cap leave room for only two distinct settings here. Measured, 192 px
-  // keeps every hull the top rung draws; the coarse level never shows.
+  // vita — a placeholder, not a measurement. It was 192 px dials that were
+  // measured pixel-identical to the top rung on the v1 maps; under the
+  // no-moving-boundary rule above the honest spelling of "identical" is the
+  // top rung's own dials, so a bigger map cannot quietly re-introduce a
+  // boundary that today's tapes never crossed.
   {
-    grassDist: 192,
-    flowerDist: 192,
-    treeHullDist: 192,
-    treeCoarseDist: 192,
+    grassDist: QUALITY_UNBOUNDED,
+    flowerDist: QUALITY_UNBOUNDED,
+    treeHullDist: QUALITY_UNBOUNDED,
+    treeCoarseDist: QUALITY_UNBOUNDED,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 0,
     groundBakeDist: QUALITY_UNBOUNDED,

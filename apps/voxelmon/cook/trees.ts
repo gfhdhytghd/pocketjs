@@ -281,21 +281,35 @@ function roundTemplate(
   // The span-or-point choice for a borrowed-texel face (see blockUv note
   // above): fine faces keep their single texel; coarse faces stretch the
   // block across the quad so dithered material renders as the mix. The
-  // 0.05 inset mirrors the drawing faces' seam guard.
+  // 0.05 inset mirrors the drawing faces' seam guard. A UNIFORM block —
+  // every pixel the same value — keeps the point form: the span would show
+  // the same pixels, and point faces still collapse in the cook-time merge
+  // (span-ifying them cost ~20% more coarse quads for zero visible change).
   const blockUv = (
     ax: number,
     ay: number,
-  ): { u?: number; v?: number; uv?: [number, number][] } =>
-    step === 1
-      ? { u: ax + 0.5, v: ay + 0.5 }
-      : {
-          uv: [
-            [ax + 0.05, ay + step - 0.05],
-            [ax + step - 0.05, ay + step - 0.05],
-            [ax + step - 0.05, ay + 0.05],
-            [ax + 0.05, ay + 0.05],
-          ],
-        };
+  ): { u?: number; v?: number; uv?: [number, number][] } => {
+    if (step === 1) return { u: ax + 0.5, v: ay + 0.5 };
+    const p0 = art.px(ax, ay);
+    let uniform = true;
+    for (let dy = 0; dy < step && uniform; dy++) {
+      for (let dx = 0; dx < step; dx++) {
+        if (art.px(ax + dx, ay + dy) !== p0) {
+          uniform = false;
+          break;
+        }
+      }
+    }
+    if (uniform) return { u: ax + 0.5, v: ay + 0.5 };
+    return {
+      uv: [
+        [ax + 0.05, ay + step - 0.05],
+        [ax + step - 0.05, ay + step - 0.05],
+        [ax + step - 0.05, ay + 0.05],
+        [ax + 0.05, ay + 0.05],
+      ],
+    };
+  };
 
   const quads: Quad[] = [];
 

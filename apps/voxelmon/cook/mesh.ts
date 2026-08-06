@@ -474,8 +474,14 @@ export function runGeometry(map: GameMap, S: SGrid): MapGeometry {
       terrain.push({ ...moved, shade: groundShades(moved), tree: true });
     }
     // The middle level stamps beside the fine one, into its own stream —
-    // the same translation, the same ground darkening.
+    // the same translation, the same ground darkening. Its NORTH faces are
+    // dropped outright: a carved ball is convex and the camera is always
+    // south of and above what it draws, so the rear hemisphere is
+    // self-occluded at every pitch rung (proven by pixel-diff over the
+    // pitch ladder tape). The fine carve keeps its backs — it is the
+    // identity rung's geometry and not ours to thin.
     for (const q of st.coarse) {
+      if (q.f === FACE.north) continue;
       const moved: Quad = {
         c: q.c.map(([x, y, z]) => [x + st.mx, y, z + st.mz]) as [number, number, number][],
         uv: q.uv,
@@ -694,6 +700,54 @@ export function packMap(geo: MapGeometry, uvt: UvTransform): { chunks: ChunkOut[
         }
         slices[MESH_KIND.terrain] = terr.slice(0, cut);
         slices[MESH_KIND.treeHull] = hull;
+      }
+      // The detail streams pack STRATIFIED: draw.rs thins them by drawing a
+      // PREFIX (`detailDensity`), so the prefix must be a spatially uniform
+      // sample of the field. (Packed row-major, the prefix was each chunk's
+      // north rows: half density meant a bald south half, not thinner
+      // grass.) The order is round-robin by within-cell rank — every cell's
+      // first quad, then every cell's second — with cells visited in
+      // bit-reversed order so any prefix stays evenly spread. Rank order is
+      // preserved WITHIN a cell on purpose: a tuft's two slabs cross at
+      // equal depth, where draw order decides the shared pixels, so
+      // reordering across ranks moves the identity anchor (measured: a
+      // plain bit-reversal of the whole stream did).
+      for (const kind of [MESH_KIND.grass, MESH_KIND.flower]) {
+        const quads = slices[kind];
+        if (quads.length < 2) continue;
+        const groups: Quad[][] = [];
+        let prev: string | null = null;
+        for (const q of quads) {
+          let mx = Infinity;
+          let mz = Infinity;
+          for (const [x, , z] of q.c) {
+            mx = Math.min(mx, x);
+            mz = Math.min(mz, z);
+          }
+          const key = `${Math.floor(mx / 8)},${Math.floor(mz / 8)}`;
+          if (key !== prev) {
+            groups.push([]);
+            prev = key;
+          }
+          groups.at(-1)!.push(q);
+        }
+        let bits = 1;
+        while (1 << bits < groups.length) bits++;
+        const order: number[] = [];
+        for (let p = 0; p < 1 << bits; p++) {
+          let j = 0;
+          for (let b = 0; b < bits; b++) j |= ((p >> b) & 1) << (bits - 1 - b);
+          if (j < groups.length) order.push(j);
+        }
+        const ordered: Quad[] = [];
+        const maxLen = Math.max(...groups.map((g) => g.length));
+        for (let k = 0; k < maxLen; k++) {
+          for (const j of order) {
+            const q = groups[j][k];
+            if (q) ordered.push(q);
+          }
+        }
+        slices[kind] = ordered;
       }
       const meshes = slices.map((quads) => packQuads(quads, uvt));
       const aabbMin: [number, number, number] = [32767, 32767, 32767];
