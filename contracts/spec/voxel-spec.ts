@@ -174,6 +174,15 @@ export const QUALITY_TIER_DEFAULT = QUALITY_TIER.psp;
 export const QUALITY_UNBOUNDED = 1e9;
 
 /**
+ * "This level never draws" for a distance dial. Negative on purpose and
+ * handled EXPLICITLY in `draw::within_dist` (a negative limit admits
+ * nothing): the half-extent widening means any non-negative dial — even 0 —
+ * still admits the chunk under the view centre, so "off" needs its own
+ * value, not a small number.
+ */
+export const QUALITY_OFF = -1;
+
+/**
  * The chunk distance cap: 2.5 view-heights, the mod's own north-reach cap for
  * its shadow frustum. The frustum's far plane is effectively infinite
  * (dist*4 + 4096), so without this a leaned camera admits every chunk up-map.
@@ -238,10 +247,13 @@ export const QUALITY = [
   {
     grassDist: 96,
     flowerDist: 96,
-    // The near level is the COARSE carve (treeHullDist 0): every carved
-    // tree this rung draws is the 2x2-px one, boxes past 128 as before.
-    treeHullDist: 0,
-    treeCoarseDist: 128,
+    // Every carved tree this rung draws is the COARSE one (fine is OFF —
+    // measured 2026-08-06 over the ring report: the underfoot fine ring
+    // alone was 10 968 triangles on ROUTE_1 and 11 630 on PALLET_TOWN
+    // against ~3 400 as coarse), and the carve ring tightens to 96 where
+    // the box swap is already past the detail distances.
+    treeHullDist: QUALITY_OFF,
+    treeCoarseDist: 96,
     chunkDist: CHUNK_DRAW_DIST_PX,
     pullDepthBias: 1,
   },

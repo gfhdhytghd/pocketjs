@@ -87,6 +87,10 @@ pub const QUALITY_TIER_DEFAULT: u8 = 0;
 /// "No limit" for a distance dial, in world px (a finite sentinel: the
 /// widened compare `(limit + half)^2` must never reach a NaN).
 pub const QUALITY_UNBOUNDED: f32 = 1000000000.0;
+/// "Never draws" for a distance dial: negative, refused explicitly by
+/// `draw::within_dist` (a 0 dial still admits the chunk underfoot via
+/// the half-extent widening; off needs its own value).
+pub const QUALITY_OFF: f32 = -1.0;
 /// The chunk distance cap: 2.5 view-heights, held at every rung.
 pub const CHUNK_DRAW_DIST_PX: f32 = 340.0;
 
@@ -119,8 +123,8 @@ pub const QUALITY: [QualityDials; 3] = [
     QualityDials {
         grass_dist: 96.0,
         flower_dist: 96.0,
-        tree_hull_dist: 0.0,
-        tree_coarse_dist: 128.0,
+        tree_hull_dist: -1.0,
+        tree_coarse_dist: 96.0,
         chunk_dist: 340.0,
         pull_depth_bias: true,
     },

@@ -347,6 +347,7 @@ unsafe fn run() {
         }
         JS_FreeValue(ctx, r);
         host::drain_jobs(rt);
+        let t_js_done = sys::sceKernelGetSystemTimeLow();
 
         // Arena-pressure GC (hosts/psp main.rs): collect when a frame leaves
         // the bump past the last collection — but WHEN matters as much as
@@ -393,7 +394,16 @@ unsafe fn run() {
         // then advance the tick clock once. Same order as the sim's replay
         // (pocketvoxel-sim/src/trace.rs `close!`), so what a .vtrace records
         // and what the console plays come from the same sequence.
-        audio_pump(scene, &pak);
+        // The PCM pump for this tick's ops runs AFTER the GE kick (below):
+        // rendering 3 ticks' worth of catch-up PCM measured 6-8 ms on the
+        // slow outdoor frames, and after the kick that work runs inside the
+        // GE's execution window — time the CPU otherwise spends blocked in
+        // next frame's sceGuSync. The ring sequence is unchanged (tick N's
+        // ops are still applied before tick N+1's), at the price of the
+        // fade stepper (`audio.tick`, inside scene.tick) sitting one tick
+        // ahead of the render — a deterministic 1-3% level offset during a
+        // fade, and only there. render_audio itself reads no clock.
+        let t_gc_done = sys::sceKernelGetSystemTimeLow();
         scene.tick();
 
         // ---- PIPELINED PRESENT: the GE has been executing frame N-1's
@@ -422,8 +432,21 @@ unsafe fn run() {
             sys::sceKernelDcacheWritebackAll();
             sys::sceGuFinish(); // kick list N — the GE draws during N+1's CPU
             let t_kicked = sys::sceKernelGetSystemTimeLow();
+            // This tick's PCM, inside the GE's execution window (see the
+            // comment at scene.tick above).
+            audio_pump(scene, &pak);
+            let t_pump_done = sys::sceKernelGetSystemTimeLow();
             #[cfg(not(feature = "telemetry"))]
-            let _ = (t_guest_done, t_synced, t_present, t_recorded, t_kicked);
+            let _ = (
+                t_guest_done,
+                t_synced,
+                t_present,
+                t_recorded,
+                t_kicked,
+                t_js_done,
+                t_gc_done,
+                t_pump_done,
+            );
             #[cfg(feature = "telemetry")]
             {
                 let (mut tris, mut draws) = (0u32, 0u32);
@@ -458,6 +481,9 @@ unsafe fn run() {
                 t_recorded.wrapping_sub(t_present),
                 t_kicked.wrapping_sub(t_recorded),
                 gc_us,
+                t_js_done.wrapping_sub(t_frame_start),
+                t_pump_done.wrapping_sub(t_kicked),
+                t_guest_done.wrapping_sub(t_gc_done),
             );
         }
 
@@ -761,6 +787,9 @@ unsafe fn autopilot_sample(
     rec_us: u32,
     kick_us: u32,
     gc_us: u32,
+    js_us: u32,
+    pump_us: u32,
+    tick_us: u32,
 ) {
     use core::fmt::Write as _;
     let log = PILOT_LOG.get_or_insert_with(|| {
@@ -768,10 +797,10 @@ unsafe fn autopilot_sample(
         s.reserve(PILOT_CAP);
         s
     });
-    if log.len() + 128 <= PILOT_CAP {
+    if log.len() + 160 <= PILOT_CAP {
         let _ = write!(
             log,
-            "a{} g {} b {} s {} v {} r {} k {} gc {} tris {} draws {} pv {} pus {}\n",
+            "a{} g {} b {} s {} v {} r {} k {} gc {} tris {} draws {} pv {} pus {} js {} ap {} tk {}\n",
             frame,
             guest_us,
             build_us,
@@ -784,6 +813,9 @@ unsafe fn autopilot_sample(
             GEO_DRAWS,
             gu::PULL_VERTS,
             gu::PULL_US,
+            js_us,
+            pump_us,
+            tick_us,
         );
     }
     if frame % 300 == 0 {

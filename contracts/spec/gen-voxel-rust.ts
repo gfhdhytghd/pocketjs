@@ -66,6 +66,7 @@ import {
   QUALITY,
   QUALITY_TIER,
   QUALITY_TIER_DEFAULT,
+  QUALITY_OFF,
   QUALITY_UNBOUNDED,
   RIG,
   RIG_DOLLY,
@@ -229,6 +230,10 @@ export function generateVoxelRust(): string {
   put('/// "No limit" for a distance dial, in world px (a finite sentinel: the');
   put("/// widened compare `(limit + half)^2` must never reach a NaN).");
   put(`pub const QUALITY_UNBOUNDED: f32 = ${f32(QUALITY_UNBOUNDED)};`);
+  put('/// "Never draws" for a distance dial: negative, refused explicitly by');
+  put("/// `draw::within_dist` (a 0 dial still admits the chunk underfoot via");
+  put("/// the half-extent widening; off needs its own value).");
+  put(`pub const QUALITY_OFF: f32 = ${f32(QUALITY_OFF)};`);
   put("/// The chunk distance cap: 2.5 view-heights, held at every rung.");
   put(`pub const CHUNK_DRAW_DIST_PX: f32 = ${f32(CHUNK_DRAW_DIST_PX)};`);
   put("");

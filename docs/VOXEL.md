@@ -296,17 +296,39 @@ pixel-identical to the top rung across both tapes on the v1 maps, because
 128 px chunks inside a 340 px cap leave room for only two distinct settings
 here. It is a labelled rung owed a number from the machine itself.
 
-**What is still over budget after this rung.** With the coarse carve in,
-the worst sampled story frame at the shipped rung is **81 792** triangles
-(was 110 144): grass 26 208, terrain 24 784, coarse trees 13 440, fine
-underfoot trees 10 968, flowers 6 016, boxes 376. Trees stopped being the
-largest item; **grass and terrain now are**, and terrain has nothing left to
-fade because terrain is the silhouette. The remaining levers, in order:
-far-chunk impostors (the fixed field azimuth and five pitch rungs make the
-bake exact — the only lever with an order of magnitude in it), a grass
-density dial, and hull instancing through the STMP shape (which is also the
-pak lever: carved hulls are 7.3 MB of the chunk data, and the coarse level
-added its share on top).
+**What is still over budget after this rung.** With the coarse carve in
+(and the fine dial then turned OFF on the psp rung — `QUALITY_OFF`, the
+carve ring at 96), the worst sampled story frame at the shipped rung is
+~70 k triangles: grass ~26 k, terrain ~22 k, coarse trees ~15 k, flowers
+~5 k. Trees stopped being the largest item; **grass and terrain now are**,
+and the ring report (geostat) says both are NEAR-dominated — ROUTE_1's
+grass sits entirely inside 64 px and most of its terrain inside 96 px, so
+no distance dial reaches either. The planned next rung is the
+**ground bake**, below.
+
+**The ground bake (planned, the 60 fps rung).** At cook time, every chunk
+whose terrain stays low-relief (max height ≤ 16 px — no buildings) also
+gets a BAKED GROUND IMAGE: its terrain, grass and flower quads obliquely
+projected along the rung-2 view direction onto the y=0 plane (`z' = z −
+y·tan 35°`, x unchanged — the projection is exact for the pitch the game
+plays at), composited in draw order **in CLUT-index space** (the bake page
+stays in the terrain page's palette domain, so RED++ world palettes and the
+day tint keep working unchanged), at half resolution (1 texel = 2 world
+px ≈ 1 screen px at the 2× view scale). At runtime a `groundBakeDist` dial
+(psp ≈ 64–96, measured before shipping; top rung unbounded-off) draws one
+textured quad instead of that chunk's terrain + grass + flower meshes —
+trees, water and stamps stay geometry on top. The bake is gated to the
+rung-2 rest pitch and to field play (any pitch tween, another rung, or an
+active battle rig falls back to full geometry — slower, never wrong).
+What it buys, from the ring report: ~11 k terrain triangles on ROUTE_1 and
+~15 k on PALLET_TOWN at a 64 px dial, plus painted-in grass and flowers
+where today's rung draws bare ground beyond 96 px. What it costs: one
+128×128 CLUT8 page per bakeable chunk (~16 KB, ~1–2 MB over the seven v1
+maps), no AO variation in the baked ground, and ledge steps painted rather
+than stepped beyond the dial. Buildings chunks are simply ineligible.
+After it: hull instancing through the STMP shape (also the pak lever:
+carved hulls are 7.3 MB of chunk data), and a 16-byte vertex (u16 UVs) for
+a ~20% cut in GE fetch bytes across every stream.
 
 **Why `pullDepthBias` exists, and what it changes.** The mod's camera-ward
 pull displaces every pulled vertex toward the eye along its own ray — a

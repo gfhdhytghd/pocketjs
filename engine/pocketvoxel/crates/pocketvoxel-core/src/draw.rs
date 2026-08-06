@@ -86,9 +86,15 @@ pub fn resolve_pal(pak: &Pak, page: u16, kind: u16, pal: u16, selection: i32) ->
 /// the chunk cap and the grass/flower fades cannot drift apart, and a dial
 /// added for a later rung measures exactly what the goldens were recorded
 /// with. `QUALITY_UNBOUNDED` is finite by construction, so the widened
-/// square stays a number.
+/// square stays a number; `QUALITY_OFF` (any negative limit) admits
+/// NOTHING — the half-extent widening means even a 0 dial still reaches
+/// the chunk under the view centre, so "off" is a sign, not a small number,
+/// and squaring must not be allowed to erase it.
 #[inline]
 pub fn within_dist(dist2: f32, half: f32, limit: f32) -> bool {
+    if limit < 0.0 {
+        return false;
+    }
     let r = limit + half;
     dist2 <= r * r
 }
@@ -974,22 +980,32 @@ mod tests {
         );
         assert_eq!(count(&psp, mesh_kind::GRASS), 2, "the far grass faded");
         assert_eq!(count(&psp, mesh_kind::FLOWER), 2);
-        // The three rings of the tree ladder: the chunk underfoot stays
-        // FINE (a 0 fine dial still reaches it through the half-extent
-        // widening — the tree beside the player keeps every voxel), the
-        // middle ring carves coarse, the far ring boxes. Swapped, never
-        // dropped.
+        // The psp rung's fine dial is OFF (`QUALITY_OFF`): every carved
+        // tree in reach — the chunk underfoot included — is the coarse one,
+        // and the far ring boxes. Swapped, never dropped.
         assert_eq!(
             count(&psp, mesh_kind::TREE_HULL),
-            1,
-            "the chunk underfoot keeps the fine carve"
+            0,
+            "fine never draws on this rung"
         );
         assert_eq!(
             count(&psp, mesh_kind::TREE_COARSE),
-            1,
-            "the middle ring carves at 2x2"
+            2,
+            "underfoot and the middle ring both carve at 2x2"
         );
         assert_eq!(count(&psp, mesh_kind::TREE_BOX), 1, "the far ring boxes");
+    }
+
+    /// `QUALITY_OFF` means off: the half-extent widening lets even a 0 dial
+    /// reach the chunk underfoot, so "never" must survive the squared
+    /// compare as a sign check, not a magnitude.
+    #[test]
+    fn a_negative_dial_admits_nothing() {
+        assert!(!within_dist(0.0, 64.0, spec::QUALITY_OFF));
+        assert!(
+            within_dist(0.0, 64.0, 0.0),
+            "a zero dial still reaches the chunk underfoot"
+        );
     }
 
     /// A pak that carries only ONE tree level says so (no META flag), and
