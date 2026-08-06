@@ -77,36 +77,17 @@ function roundTemplate(
     ];
   };
 
-  // A canvas pixel is a step x step art block, and the point-sampled faces
-  // below (side walls, disc-step tops, undersides) each speak with ONE texel
-  // of it. That texel must not land on the outline when the block also holds
-  // material: a coarse rim block usually mixes both, and corner-sampling it
-  // dressed whole flanks in outline black (a light round tree's body turned
-  // tree-palette dark on the psp rung while its cap stayed white). The
-  // representative is the block's most common non-outline, non-clear pixel,
-  // first-seen on tie; a block of pure outline keeps its corner. At step 1
-  // the block IS its corner pixel, so the fine carve is untouched.
-  const blockTexel = (px: number, py: number): [number, number] => {
-    const [ax, ay] = texel(px, py);
-    if (step === 1) return [ax, ay];
-    const counts = new Map<number, number>();
-    let best: [number, number] | null = null;
-    let bestN = 0;
-    for (let dy = 0; dy < step; dy++) {
-      for (let dx = 0; dx < step; dx++) {
-        const p = art.px(ax + dx, ay + dy);
-        const c = shadeClassOf(p);
-        if (c === "black" || c === "off") continue;
-        const n = (counts.get(p) ?? 0) + 1;
-        counts.set(p, n);
-        if (n > bestN) {
-          bestN = n;
-          best = [ax + dx, ay + dy];
-        }
-      }
-    }
-    return best ?? [ax, ay];
-  };
+  // A canvas pixel is a step x step art block. The point-sampled faces
+  // below (side walls, disc-step tops, undersides) borrow a representative
+  // texel because the drawing has no art for those directions — and at
+  // step 1 one texel IS the block, so the borrowed pixel participates in
+  // the art's own dither. A coarse block cannot be spoken for by any single
+  // pixel: GB canopies are dithered white-on-dark, so every pure pick is
+  // wrong somewhere (corner picks dressed a light tree's flanks in outline
+  // black; majority picks painted white slabs over dense crowns). Coarse
+  // faces therefore carry the whole block as a UV SPAN — the mix renders
+  // as the mix — via blockUv below; the helpers keep returning the chosen
+  // block's origin texel.
 
   // Shade class of every canvas pixel. A coarse canvas pixel classifies its
   // whole art block, solidest class first: the outline ("black") must stay
@@ -279,15 +260,12 @@ function roundTemplate(
   const deepTexel = (ix: number, iy: number): [number, number] => {
     for (let iy2 = iy + 2; iy2 <= Math.min(NY - 1, iy + 4); iy2++) {
       const i = iy2 * NX + ix;
-      if (mask.has(i) && cls[i] !== "black") return blockTexel(ix, iy2);
+      if (mask.has(i) && cls[i] !== "black") return texel(ix, iy2);
     }
-    return blockTexel(ix, iy);
+    return texel(ix, iy);
   };
 
-  // side walls read as material: de-outline walk (Structures.lua:1067-1085).
-  // The class test steers the walk; blockTexel picks within the block it
-  // lands on, so a walk that exhausts its 3 steps against all-"black"
-  // blocks still surfaces interior material when any block holds some.
+  // side walls read as material: de-outline walk (Structures.lua:1067-1085)
   const sideTexel = (ix: number, iy: number): [number, number] => {
     const r = yBot !== undefined && iy > yBot ? yBot : src[iy * NX + ix];
     const dir = ix + ix < loRow[iy]! + hiRow[iy] ? 1 : -1;
@@ -295,10 +273,29 @@ function roundTemplate(
       const x2 = ix + dir * step;
       const i2 = r * NX + x2;
       if (x2 < 0 || x2 > NX - 1 || !mask.has(i2)) break;
-      if (cls[i2] !== "black") return blockTexel(x2, r);
+      if (cls[i2] !== "black") return texel(x2, r);
     }
-    return blockTexel(ix, r);
+    return texel(ix, r);
   };
+
+  // The span-or-point choice for a borrowed-texel face (see blockUv note
+  // above): fine faces keep their single texel; coarse faces stretch the
+  // block across the quad so dithered material renders as the mix. The
+  // 0.05 inset mirrors the drawing faces' seam guard.
+  const blockUv = (
+    ax: number,
+    ay: number,
+  ): { u?: number; v?: number; uv?: [number, number][] } =>
+    step === 1
+      ? { u: ax + 0.5, v: ay + 0.5 }
+      : {
+          uv: [
+            [ax + 0.05, ay + step - 0.05],
+            [ax + step - 0.05, ay + step - 0.05],
+            [ax + step - 0.05, ay + 0.05],
+            [ax + 0.05, ay + 0.05],
+          ],
+        };
 
   const quads: Quad[] = [];
 
@@ -379,14 +376,13 @@ function roundTemplate(
       ix = ix2 + 1;
     }
 
-    // sides, steps, undersides: constant-texel quads over the z runs a
+    // sides, steps, undersides: borrowed-texel quads over the z runs a
     // neighbour doesn't cover (Structures.lua:1165-1262)
     for (let ix3 = loRow[iy]!; ix3 <= hiRow[iy]; ix3++) {
       const i = iy * NX + ix3;
       if (z0[i] === undefined) continue;
-      const [ax, ayp] = blockTexel(ix3, src[i]);
-      const u = ax + 0.5;
-      const v = ayp + 0.5;
+      const [ax, ayp] = texel(ix3, src[i]);
+      const ownUv = blockUv(ax, ayp);
       const x0 = ix3 - N2;
       const x1 = ix3 - N2 + 1;
 
@@ -408,8 +404,7 @@ function roundTemplate(
       };
 
       const [sax, say] = sideTexel(ix3, iy);
-      const su = sax + 0.5;
-      const sv = say + 0.5;
+      const sideUv = blockUv(sax, say);
       pieces(ix3 - 1, iy, (zA, zB) => {
         quads.push({
           c: [
@@ -418,8 +413,7 @@ function roundTemplate(
             [x0, yT, zB],
             [x0, yT, zA],
           ],
-          u: su,
-          v: sv,
+          ...sideUv,
           shade: ROUND_SHADE.side,
           f: FACE.west,
         });
@@ -432,14 +426,17 @@ function roundTemplate(
             [x1, yT, zA],
             [x1, yT, zB],
           ],
-          u: su,
-          v: sv,
+          ...sideUv,
           shade: ROUND_SHADE.side,
           f: FACE.east,
         });
       });
       pieces(ix3, iy - 1, (zA, zB, izA, izB) => {
-        const top = (za: number, zb: number, tu: number, tv: number): void => {
+        const top = (
+          za: number,
+          zb: number,
+          tuv: ReturnType<typeof blockUv>,
+        ): void => {
           quads.push({
             c: [
               [x0, yT, za],
@@ -447,8 +444,7 @@ function roundTemplate(
               [x1, yT, zb],
               [x0, yT, zb],
             ],
-            u: tu,
-            v: tv,
+            ...tuv,
             shade: ROUND_SHADE.top,
             f: FACE.up,
           });
@@ -456,11 +452,11 @@ function roundTemplate(
         if (izA === z0[i] && izB === z1[i] - 1 && izB - izA >= 2) {
           // the dome cap: outline on the rim cells, canopy inside
           const [du, dv] = deepTexel(ix3, iy);
-          top(zA, zA + 1, u, v);
-          top(zA + 1, zB - 1, du + 0.5, dv + 0.5);
-          top(zB - 1, zB, u, v);
+          top(zA, zA + 1, ownUv);
+          top(zA + 1, zB - 1, blockUv(du, dv));
+          top(zB - 1, zB, ownUv);
         } else {
-          top(zA, zB, u, v);
+          top(zA, zB, ownUv);
         }
       });
       if (iy < NY - 1) {
@@ -472,8 +468,7 @@ function roundTemplate(
               [x1, yB, zA],
               [x0, yB, zA],
             ],
-            u: u,
-            v: v,
+            ...ownUv,
             shade: ROUND_SHADE.bottom,
             f: FACE.down,
           });
