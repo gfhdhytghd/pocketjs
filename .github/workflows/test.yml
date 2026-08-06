@@ -1,0 +1,63 @@
+name: Test suite
+
+# The suite that release.yml already gates a tag on, run per branch instead of
+# only at publish time. Everything here is host-independent: the PSP/Vita
+# golden suites need PPSSPP, Vita3K and the pinned PSP toolchain, so they stay
+# a local step (tests/e2e/) and are not reachable from a runner.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: JS suite + typecheck + Rust core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo + wasm target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/wasm/target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('engine/wasm/Cargo.toml', 'engine/core/Cargo.toml', 'engine/wasm/src/**', 'engine/core/src/**') }}
+          restore-keys: ${{ runner.os }}-wasm-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # hosts/web/pocketjs.wasm is a build artifact (gitignored); the browser
+      # stages eval it, so it has to exist before the suite runs.
+      - name: Build wasm (core + software rasterizer)
+        run: bun tools/wasm.ts
+
+      - name: Test JavaScript and package contracts
+        run: bun run test
+
+      # The app build at the start of `bun run test` generates the local style
+      # module that TypeScript intentionally imports.
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      - name: Test Rust core
+        run: cargo test --locked --manifest-path engine/core/Cargo.toml
