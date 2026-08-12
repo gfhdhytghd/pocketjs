@@ -17,7 +17,7 @@ mod blit;
 mod render;
 
 pub use blit::Blit;
-pub use render::UiRenderer;
+pub use render::{SceneQuad, UiRenderer, scene_quads};
 // The backend-agnostic surface (UiSurface + pak walk) — re-exported so desktop
 // consumers (uihost, OpenStrike) stay source-compatible after the split.
 pub use pocket_ui_surface::{PakEntry, UiSurface, walk_pak};

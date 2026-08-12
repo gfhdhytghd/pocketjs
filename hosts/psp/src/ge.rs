@@ -808,6 +808,12 @@ pub unsafe fn render_over(ui: &Ui, words: &[u32]) {
                 }
                 i += 1;
             }
+            spec::draw_op::SCENE_QUAD if i + 4 <= n => {
+                // Host-composited 3D backdrop — the PSP scene3d core lands
+                // with pocket-scene3d-gu; until then the box stays empty
+                // (graceful absence, same as hosts without video decode).
+                i += 4;
+            }
             _ => break, // unknown/truncated op: stop rather than desync
         }
     }

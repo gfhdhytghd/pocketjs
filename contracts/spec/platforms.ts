@@ -174,6 +174,14 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // window resizes and relayouts (framework resizeViewport). Console
   // targets never provide this — their viewport is a platform constant.
   "display.viewport.live",
+  // A retained 3D scene surface (`globalThis.s3`, the scene3d contract) the
+  // host renders under bound ui viewports. Registered ahead of any stock
+  // TARGET advertising it: the desktop uihost example mounts and renders the
+  // surface and a renderless reference sim exercises the contract, so apps
+  // can already declare the requirement and fail admission on targets
+  // without a 3D core (<Viewport3D> degrades to an empty laid-out box where
+  // the namespace is absent).
+  "display.scene3d",
   "text.glyphs.baked",
   // Codepoints outside the baked charset still render: the host extends
   // the font atlases at runtime (system-font rasterization + loadFontAtlas

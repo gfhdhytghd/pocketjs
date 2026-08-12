@@ -608,6 +608,12 @@ impl Renderer {
                     }
                     i += 12;
                 }
+                spec::draw_op::SCENE_QUAD if i + 4 <= words.len() => {
+                    // Host-composited 3D backdrop — the PPA backend has no
+                    // scene3d core; the box stays empty (graceful absence,
+                    // same as hosts without video decode).
+                    i += 4;
+                }
                 _ => return None,
             }
         }

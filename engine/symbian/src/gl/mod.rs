@@ -809,6 +809,12 @@ impl Renderer {
                     clip = clip_stack.pop().unwrap_or(full);
                     index += 1;
                 }
+                spec::draw_op::SCENE_QUAD if index + 4 <= words.len() => {
+                    // Host-composited 3D backdrop — the Symbian host has no
+                    // scene3d core; the box stays empty (graceful absence,
+                    // same as hosts without video decode).
+                    index += 4;
+                }
                 _ => break,
             }
         }

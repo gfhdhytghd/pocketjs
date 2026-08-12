@@ -355,6 +355,7 @@ describe("semantic resolution", () => {
       settings: [true, true, false],
       stats: [true, true, false],
       "vue-sfc-lab": [true, true, false],
+      wild: [false, false, false], // requires display.scene3d — no stock target ships a 3D core yet (docs/WILD.md)
       zoomlab: [true, true, false],
     };
     const targets = ["psp", "vita", "macos-widget"] as const;

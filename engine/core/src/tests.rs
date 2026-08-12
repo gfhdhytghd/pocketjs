@@ -201,7 +201,7 @@ fn decode_wh(word: u32) -> (i32, i32) {
 /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
 /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
 /// balanced, only known ops. Returns per-op counts (indexed by op code).
-fn validate_drawlist(words: &[u32]) -> [u32; 9] {
+fn validate_drawlist(words: &[u32]) -> [u32; 10] {
     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
     let xy_ok = |w: u32| {
         let (x, y) = decode_xy(w);
@@ -213,7 +213,7 @@ fn validate_drawlist(words: &[u32]) -> [u32; 9] {
         let (w, h) = decode_wh(whw);
         assert!(x + w <= sw && y + h <= sh, "rect exceeds screen: {x},{y} {w}x{h}");
     };
-    let mut counts = [0u32; 9];
+    let mut counts = [0u32; 10];
     let mut depth = 0i32;
     let mut i = 0usize;
     while i < words.len() {
@@ -272,6 +272,10 @@ fn validate_drawlist(words: &[u32]) -> [u32; 9] {
                 }
                 i += 12;
             }
+            spec::draw_op::SCENE_QUAD => {
+                rect_ok(words[i + 1], words[i + 2]);
+                i += 4;
+            }
             other => panic!("unknown draw op {other} at word {i}"),
         }
     }
@@ -307,6 +311,7 @@ fn tex_tri_runs(words: &[u32]) -> Vec<(u32, usize)> {
             spec::draw_op::SCISSOR => { previous_was_tex_tri = false; i += 3; }
             spec::draw_op::SCISSOR_POP => { previous_was_tex_tri = false; i += 1; }
             spec::draw_op::TRI => { previous_was_tex_tri = false; i += 7; }
+            spec::draw_op::SCENE_QUAD => { previous_was_tex_tri = false; i += 4; }
             other => panic!("unknown draw op {other} at word {i}"),
         }
     }

@@ -74,6 +74,7 @@ const SUITE: readonly Stage[] = [
       "tests/npm-package.test.ts",
       "tests/video-outro.test.ts",
       "tests/osk-layout.test.ts",
+      "tests/wild.test.ts",
       "tests/test-suite.test.ts",
     ],
   },
@@ -135,6 +136,12 @@ const SUITE: readonly Stage[] = [
     prep: [["bun", "tools/build.ts", "music-main"]],
     browser: true,
     tests: ["tests/audio-sim.test.ts"],
+  },
+  {
+    name: "wild sim",
+    prep: [["bun", "tools/build.ts", "wild-main"]],
+    browser: true,
+    tests: ["tests/wild-sim.test.ts"],
   },
   {
     name: "launcher sim",

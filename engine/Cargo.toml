@@ -20,6 +20,7 @@ members = [
     "crates/pocket-ui-wgpu",
     "crates/pocket-vrm",
     "crates/pocket-widget",
+    "pocket3d/crates/pocket-scene3d",
     "pocket3d/crates/pocket3d",
     "pocket3d/crates/pocket3d-bsp",
     "pocket3d/crates/pocket3d-cook",
@@ -50,6 +51,7 @@ pocket-db = { path = "crates/pocket-db" }
 pocket-fs = { path = "crates/pocket-fs" }
 pocket-mod = { path = "crates/pocket-mod" }
 pocket-net = { path = "crates/pocket-net" }
+pocket-scene3d = { path = "pocket3d/crates/pocket-scene3d" }
 pocket-ui-surface = { path = "crates/pocket-ui-surface" }
 pocket-ui-wgpu = { path = "crates/pocket-ui-wgpu" }
 pocket-vrm = { path = "crates/pocket-vrm" }

@@ -1788,6 +1788,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pocket-scene3d"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "glam",
+ "libm",
+ "log",
+ "pocket-mod",
+ "pocket3d",
+ "wgpu",
+]
+
+[[package]]
 name = "pocket-stage"
 version = "0.1.0"
 dependencies = [
@@ -2597,6 +2611,7 @@ dependencies = [
  "log",
  "png",
  "pocket-mod",
+ "pocket-scene3d",
  "pocket-ui-wgpu",
  "pocket3d",
  "pocketjs-core",

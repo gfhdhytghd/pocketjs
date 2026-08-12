@@ -238,6 +238,17 @@ export const GOLDEN_SPECS: GoldenSpec[] = [
       return [];
     },
   },
+  {
+    // Wild's HUD journey (the 3D scene itself needs a scene3d host; on the
+    // WASM oracle the viewport is an empty box and these pixels pin the HUD:
+    // title, contextual prompt, and the ticker after the campfire catches).
+    // D-pad UP walks the player from spawn to the campfire (camera-relative),
+    // TRIANGLE strikes flint.
+    name: "wild-main",
+    frames: 140,
+    capture: [2, 60, 134],
+    input: (f) => (f >= 30 && f < 93 ? BTN.UP : f >= 120 && f < 124 ? BTN.TRIANGLE : 0),
+  },
 ];
 
 export function encodeThresholdInput(spec: GoldenSpec): string {

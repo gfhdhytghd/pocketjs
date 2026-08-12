@@ -750,6 +750,12 @@ pub unsafe fn render_over(ui: &Ui, words: &[u32]) {
                 }
                 i += 1;
             }
+            spec::draw_op::SCENE_QUAD if i + 4 <= words.len() => {
+                // Host-composited 3D backdrop — the Vita host has no scene3d
+                // core; the box stays empty (graceful absence, same as hosts
+                // without video decode).
+                i += 4;
+            }
             _ => break,
         }
     }
@@ -802,6 +808,9 @@ fn validate_texture_residency(ui: &Ui, words: &[u32]) -> io::Result<()> {
             }
             spec::draw_op::SCISSOR => i.checked_add(3),
             spec::draw_op::SCISSOR_POP => i.checked_add(1),
+            // Host-composited 3D backdrop: references no texture (graceful
+            // absence — the capture oracle draws nothing there either).
+            spec::draw_op::SCENE_QUAD => i.checked_add(4),
             op => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

@@ -424,6 +424,7 @@ impl<'a> DamageDecoder<'a> {
             spec::draw_op::SCISSOR_POP => 1,
             spec::draw_op::TRI => 7,
             spec::draw_op::TEX_TRI => 12,
+            spec::draw_op::SCENE_QUAD => 4,
             _ => return Err(()),
         };
         let end = start.checked_add(len).ok_or(())?;
@@ -455,6 +456,10 @@ impl<'a> DamageDecoder<'a> {
             }
             spec::draw_op::TRI => triangle_bounds([words[1], words[2], words[3]], self.clip),
             spec::draw_op::TEX_TRI => triangle_bounds([words[2], words[5], words[8]], self.clip),
+            // Host-composited 3D backdrop: the software raster paints nothing
+            // there, but a changed quad still dirties its rect so incremental
+            // hosts re-raster what the 2D layer owns of it.
+            spec::draw_op::SCENE_QUAD => logical_rect(words[1], words[2]).intersect(self.clip),
             _ => return Err(()),
         };
         Ok(Some(DecodedOp {
