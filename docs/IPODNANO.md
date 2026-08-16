@@ -44,6 +44,32 @@ The daemon exposes a mode-`0600` Unix socket under
 guest command namespace, allowed operations, daemon event namespace, and a 64 KiB line
 limit. The PocketJS guest cannot invoke AppleScript or open the HID device directly.
 
+## USB connection branding
+
+Rockbox compiles the nano 2G connection graphic from
+`apps/bitmaps/native/usblogo.128x37x16.bmp`. The PocketJS replacement is stored at
+`hosts/ipodnano/rockbox/usblogo.128x37x16.bmp`; its SVG source is next to it.
+**The bitmap remains 128×37, 24-bit BMP, and is positioned so `PocketJS` is centered
+on the 176-pixel display.** The `Multimedia` line remains the active HID mode name.
+
+Apply the bitmap to a Rockbox checkout:
+
+```sh
+bun ipodnano:rockbox apply /path/to/rockbox
+```
+
+Rockbox recommends `arm-elf-eabi-gcc` 9.5.0 for this target. With that toolchain in
+`PATH`, build only the firmware core needed for deployment:
+
+```sh
+bun ipodnano:rockbox build /path/to/rockbox /path/to/build-ipodnano2g
+```
+
+The output is `/path/to/build-ipodnano2g/rockbox.ipod`. Replace
+`.rockbox/rockbox.ipod` on the mounted FAT32 iPod, eject it, reboot, and reconnect it.
+**Only the Rockbox firmware file changes; the installed bootloader and its preserved
+Apple firmware entry do not change.**
+
 ## Build and run
 
 Build the Objective-C daemon with warnings as errors, run its mapping self-test, build
@@ -80,13 +106,13 @@ macOS. Rockbox adds the USB HID interface used by the daemon. The official Rockb
 manual states that **Rockbox on this target requires FAT32 and does not run from an
 HFS+ iPod**.
 
-The attached 4 GB unit is currently HFS. Converting it to FAT32 erases its music and
-settings. Do not convert or install the bootloader until all of these checks pass:
+Converting an HFS+ iPod to FAT32 erases its music and settings. Before conversion,
+confirm all of these device-specific facts:
 
-1. Copy the mounted volume to a separate local backup and verify the copied file count
-   and hashes.
-2. Save a raw image of the whole 4.1 GB device and verify that the image size matches
-   `diskutil info`.
+1. Confirm the exact generation and capacity; Nano 1G, Nano 2G, and iPod Classic
+   partition layouts are not interchangeable.
+2. Decide whether the existing music and settings are disposable. If they are not,
+   copy them elsewhere before formatting.
 3. Confirm Finder can restore this exact iPod and that the original Apple firmware can
    still boot.
 4. Use the official `ipodnano2g` Rockbox build and the Nano 2G `.ipodx` bootloader;

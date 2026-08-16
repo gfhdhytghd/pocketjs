@@ -27,7 +27,9 @@ export interface IPodNanoFacts {
 }
 
 export function parseIPodNanoUSB(ioreg: string): IPodNanoFacts {
-  const block = ioreg.match(/\+-o iPod@[^\n]*[\s\S]*?(?=\n\s*[+|]?-o |$)/)?.[0] ?? "";
+  const block =
+    ioreg.match(/\+-o (?:iPod|Rockbox media player)@[^\n]*[\s\S]*?(?=\n\s*[+|]?-o |$)/)?.[0] ??
+    "";
   const vendorId = Number(block.match(/"idVendor"\s*=\s*(\d+)/)?.[1]);
   const productId = Number(block.match(/"idProduct"\s*=\s*(\d+)/)?.[1]);
   const serial = block.match(/"USB Serial Number"\s*=\s*"([^"]+)"/)?.[1];
@@ -44,8 +46,10 @@ export function parseIPodNanoUSB(ioreg: string): IPodNanoFacts {
 }
 
 export function parseIPodFilesystem(diskutil: string): "hfs" | "fat32" | "unknown" {
-  if (/Apple_HFS\s+iPod/.test(diskutil)) return "hfs";
-  if (/(Microsoft Basic Data|DOS_FAT_32|Windows_FAT_32)\s+iPod/.test(diskutil)) return "fat32";
+  if (/Apple_HFS\s+iPod\s/i.test(diskutil)) return "hfs";
+  if (/(Microsoft Basic Data|DOS_FAT_32|Windows_FAT_32)\s+iPod\s/i.test(diskutil)) {
+    return "fat32";
+  }
   return "unknown";
 }
 
@@ -188,7 +192,10 @@ async function doctor(): Promise<void> {
   console.log(`device: ${device.model === "ipod-nano-2g" ? "iPod nano 2G (05ac:1260)" : "not verified"}`);
   console.log(`serial: ${device.serial ?? "unavailable"}`);
   console.log(`filesystem: ${filesystem}`);
-  console.log(`rockbox: ${existsSync("/Volumes/iPod/.rockbox/rockbox-info.txt") ? "installed" : "not installed"}`);
+  const rockboxInstalled = ["/Volumes/iPod", "/Volumes/IPOD"].some((mount) =>
+    existsSync(join(mount, ".rockbox/rockbox-info.txt")),
+  );
+  console.log(`rockbox: ${rockboxInstalled ? "installed" : "not installed"}`);
   console.log(`hid: ${/"VendorID"\s*=\s*1452[\s\S]*"ProductID"\s*=\s*4704/.test(hid) ? "available" : "not enumerated"}`);
   console.log(`daemon: ${existsSync(INSTALL_BINARY) ? "installed" : "not installed"}`);
   if (device.model !== "ipod-nano-2g") throw new Error("the attached device is not iPod nano 2G");

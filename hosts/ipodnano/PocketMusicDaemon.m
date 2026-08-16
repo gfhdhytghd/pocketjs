@@ -339,10 +339,16 @@ static void HIDDeviceRemoved(void *context, IOReturn result, void *sender, IOHID
 
 static void HIDValueReceived(void *context, IOReturn result, void *sender, IOHIDValueRef value) {
     (void)result; (void)sender;
-    if (IOHIDValueGetIntegerValue(value) <= 0) return;
+    CFIndex integerValue = IOHIDValueGetIntegerValue(value);
+    if (integerValue <= 0) return;
     IOHIDElementRef element = IOHIDValueGetElement(value);
     if (IOHIDElementGetUsagePage(element) != 0x0c) return;
     NSString *control = ControlForConsumerUsage(IOHIDElementGetUsage(element));
+    if (!control && integerValue <= UINT32_MAX) {
+        // Rockbox emits Consumer Control as an array. In that report shape the
+        // selected usage is the value; the element usage describes the array.
+        control = ControlForConsumerUsage((uint32_t)integerValue);
+    }
     if (!control) return;
     PocketMusicDaemon *daemon = (__bridge PocketMusicDaemon *)context;
     [daemon performControl:control source:@"ipod-nano-2g"];

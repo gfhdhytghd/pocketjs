@@ -7,6 +7,7 @@ import {
   parsePocketMusicState,
 } from "../apps/pocket-music/service.ts";
 import { parseIPodFilesystem, parseIPodNanoUSB } from "../tools/pocket-music.ts";
+import { parseBmpFacts } from "../tools/ipodnano-rockbox.ts";
 
 const state = {
   t: "pocket-music.state",
@@ -78,11 +79,39 @@ describe("iPod nano 2G discovery", () => {
     expect(parseIPodNanoUSB("no device")).toEqual({ connected: false });
   });
 
+  test("identifies the same hardware under Rockbox's USB product name", () => {
+    const ioreg = `+-o Rockbox media player@01130000  <class IOUSBHostDevice>\n  {\n    "idVendor" = 1452\n    "idProduct" = 4704\n  }`;
+    expect(parseIPodNanoUSB(ioreg)).toEqual({
+      connected: true,
+      vendorId: 0x05ac,
+      productId: 0x1260,
+      model: "ipod-nano-2g",
+    });
+  });
+
   test("keeps the destructive HFS to FAT32 gate explicit", () => {
     expect(parseIPodFilesystem("3: Apple_HFS iPod 4.0 GB disk6s3")).toBe("hfs");
     expect(parseIPodFilesystem("3: Microsoft Basic Data iPod 4.0 GB disk6s3")).toBe("fat32");
+    expect(parseIPodFilesystem("1: DOS_FAT_32 IPOD 4.0 GB disk6s2")).toBe("fat32");
+    expect(parseIPodFilesystem("2: Apple_HFS ipodpatcher-5.0 10.6 MB disk9s2")).toBe(
+      "unknown",
+    );
     expect(parseIPodFilesystem("internal APFS")).toBe("unknown");
   });
+});
+
+test("Rockbox USB branding is the exact nano 2G bitmap contract", () => {
+  const logo = readFileSync(
+    new URL("../hosts/ipodnano/rockbox/usblogo.128x37x16.bmp", import.meta.url),
+  );
+  const source = readFileSync(
+    new URL("../hosts/ipodnano/rockbox/usblogo.128x37x16.svg", import.meta.url),
+    "utf8",
+  );
+  expect(parseBmpFacts(logo)).toEqual({ width: 128, height: 37, bitsPerPixel: 24 });
+  expect(source).toContain(">PocketJS</text>");
+  expect(source).toContain('x="40"');
+  expect(source).toContain('text-anchor="middle"');
 });
 
 test("native daemon maps the Rockbox consumer usages and seizes only the nano", () => {
@@ -93,6 +122,7 @@ test("native daemon maps the Rockbox consumer usages and seizes only the nano", 
   expect(daemon).toContain("kIPodVendorID = 0x05ac");
   expect(daemon).toContain("kIPodNano2ProductID = 0x1260");
   expect(daemon).toContain("kIOHIDOptionsTypeSeizeDevice");
+  expect(daemon).toContain("ControlForConsumerUsage((uint32_t)integerValue)");
   for (const usage of ["0x00e9", "0x00ea", "0x00e2", "0x00cd", "0x00b7", "0x00b5", "0x00b6"]) {
     expect(daemon).toContain(usage);
   }
