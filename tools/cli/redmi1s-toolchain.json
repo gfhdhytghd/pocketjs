@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "toolchainVersion": "android-4.3-armv7-gles2-v1",
+  "device": {
+    "model": "HM 1S",
+    "codename": "armani",
+    "boardPlatform": "msm8226",
+    "androidRelease": "4.3",
+    "sdk": "18",
+    "abi": "armeabi-v7a",
+    "physicalViewport": [720, 1280],
+    "density": 320,
+    "gpuRenderer": "Adreno (TM) 305",
+    "requiredGlEsVersion": "0x00020000"
+  },
+  "compiler": {
+    "androidSdkRoot": "/opt/homebrew/share/android-commandlinetools",
+    "compileSdk": "34",
+    "buildToolsVersion": "34.0.0",
+    "ndkVersion": "21.4.7075529",
+    "minimumSdk": "18",
+    "rustToolchain": "nightly-2026-07-02",
+    "rustTarget": "armv7-linux-androideabi",
+    "quickJsRepository": "https://github.com/pocket-stack/quickjs-rs.git",
+    "quickJsRevision": "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b",
+    "quickJsVersion": "2026-06-04"
+  }
+}

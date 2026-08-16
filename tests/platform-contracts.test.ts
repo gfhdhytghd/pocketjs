@@ -348,6 +348,7 @@ describe("semantic resolution", () => {
       "iphone4s-demo": [false, false, false], // admitted only by the private iphone4s-dev profile
       "ipodtouch-demo": [false, false, false], // admitted only by the private ipodtouch-dev profile
       "meizu-m8-demo": [false, false, false], // admitted only by the private meizu-m8-dev profile
+      "redmi1s-demo": [false, false, false], // admitted only by the private android-redmi1s-dev profile
       nsengine: [false, true, false], // targets the private ios-dev profile; vita shares its touch + integer-fit contract
       "ipod-nano": [false, false, false], // admitted by the package-shaped macos-embedded target
       launcher: [true, true, false], // the Cover Flow deck (docs/LAUNCHER.md) is an ordinary console app

@@ -74,4 +74,15 @@ describe("declared test suite", () => {
     expect(ipodtouchTests).not.toHaveLength(0);
     expect(ipodtouchTests.filter((file) => !declared.has(file))).toEqual([]);
   });
+
+  test("runs every Redmi 1S test in the CI unit stage", () => {
+    const declared = unitTestFiles();
+    const redmi1sTests = readdirSync(join(repository, "tests"))
+      .filter((file) => /^redmi1s-.*\.test\.ts$/.test(file))
+      .map((file) => `tests/${file}`)
+      .sort();
+
+    expect(redmi1sTests).not.toHaveLength(0);
+    expect(redmi1sTests.filter((file) => !declared.has(file))).toEqual([]);
+  });
 });

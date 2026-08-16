@@ -1,0 +1,24 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.redmi1s-demo",
+  "name": "pocketjs-redmi1s-hero",
+  "title": "PocketJS: Redmi 1S Hero",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": ["input.touch", "text.glyphs.baked"]
+    }
+  },
+  "app": {
+    "entry": "apps/redmi1s-demo/main.tsx",
+    "output": "redmi1s-demo-main",
+    "framework": "solid",
+    "viewport": {
+      "fixed": {
+        "logical": [360, 640],
+        "presentation": "native"
+      }
+    }
+  }
+}

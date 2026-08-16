@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const REPOSITORY = fileURLToPath(new URL("..", import.meta.url));
 
-/** The installed iPhone 2G artwork is the single source for legacy iPhone icons. */
+/** Source artwork for the classic Pocket icon and its high-resolution reconstruction. */
 export const IPHONE_CLASSIC_ICON_SOURCE = resolve(REPOSITORY, "hosts/iphone2g/Icon.png");
 export const IPHONE_CLASSIC_RETINA_SOURCE = resolve(REPOSITORY, "hosts/iphone4s/Icon.svg");
 export const IPHONE_CLASSIC_ICON_FILE = "PocketClassic-v3.png";
@@ -62,6 +62,18 @@ async function rasterizeRetinaArtwork(width: number, height: number): Promise<Ca
   const supersampled = createCanvas(rasterWidth, rasterHeight);
   supersampled.getContext("2d").drawImage(image, 0, 0);
   return exactAreaDownsample(supersampled, width, height);
+}
+
+/** Rasterize the classic chrome Pocket mark into a square launcher-icon canvas. */
+export async function rasterizeClassicPocketIcon(size: number): Promise<Canvas> {
+  if (!Number.isInteger(size) || size <= 0) {
+    throw new TypeError("pocket classic artwork: icon size must be a positive integer");
+  }
+  const artworkWidth = Math.max(1, Math.round(size * 590 / 600));
+  const artwork = await rasterizeRetinaArtwork(artworkWidth, size);
+  const output = createCanvas(size, size);
+  output.getContext("2d").drawImage(artwork, Math.floor((size - artworkWidth) / 2), 0);
+  return output;
 }
 
 function assertOpaque(canvas: Canvas): void {
