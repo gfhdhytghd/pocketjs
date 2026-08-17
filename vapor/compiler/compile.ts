@@ -2367,7 +2367,7 @@ class AppCompiler {
     const deps = new Set<string>();
     const prev = this.curDeps;
     this.curDeps = deps;
-    const { decls, body } = this.withHoist((out) => {
+    const { decls, body } = this.withOwner(`unit${this.unitCounter++}`, () => this.withHoist((out) => {
       const readNumber = (name: Exclude<RpgScreenProp, "map">): { c: string; ty: Ty } => {
         const value = this.compileExpr(attrs.get(name)!, out, "  ");
         if (value.ty.k !== "num") this.err(attrs.get(name)!, `RpgScreen ${name} must be a number`);
@@ -2391,7 +2391,7 @@ class AppCompiler {
           `${playerOffsetX.c}, ${playerOffsetY.c}, (u8)(${facing.c}), (u8)(${playerFrame.c}), ` +
           `${quest.c}, ${dialog.c}, ${choice.c}, ${heroHp.c}, ${enemyHp.c}, ${battleCursor.c});`,
       );
-    });
+    }));
     this.curDeps = prev;
     /* The RPG host maintains BG0 UI incrementally. Clearing the full character
      * grid before every movement effect would erase the cached fixed HUD. */
@@ -2553,13 +2553,13 @@ class AppCompiler {
       if (!param) this.err(this.repeatHandler, "onButtonRepeat arrow needs a (b) param");
       this.scope.set(param, { kind: "local", cName: "b_arg", ty: NUM });
       const repeatHandlerArrow = this.repeatHandler;
-      const { decls, body } = this.withHoist((out) => {
+      const { decls, body } = this.withOwner("app_on_button_repeat", () => this.withHoist((out) => {
         if (ts.isBlock(repeatHandlerArrow.body)) {
           for (const stmt of repeatHandlerArrow.body.statements) this.compileStmt(stmt, out, "  ");
         } else {
           this.compileExprStmt(repeatHandlerArrow.body, out, "  ");
         }
-      });
+      }));
       repeatHandlerOut = [...decls, ...body];
       this.scope = saved;
     }
@@ -2578,13 +2578,13 @@ class AppCompiler {
         });
       }
       const frameHandlerArrow = this.frameHandler;
-      const { decls, body } = this.withHoist((out) => {
+      const { decls, body } = this.withOwner("app_on_frame", () => this.withHoist((out) => {
         if (ts.isBlock(frameHandlerArrow.body)) {
           for (const stmt of frameHandlerArrow.body.statements) this.compileStmt(stmt, out, "  ");
         } else {
           this.compileExprStmt(frameHandlerArrow.body, out, "  ");
         }
-      });
+      }));
       frameHandlerOut = [...decls, ...body];
       this.scope = saved;
     }
