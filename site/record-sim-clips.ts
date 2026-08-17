@@ -16,7 +16,7 @@
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createWasmUi } from "../hosts/web/wasm-ops.js";
-import { BTN, SCREEN_H, SCREEN_W } from "../spec/spec.ts";
+import { BTN, SCREEN_H, SCREEN_W } from "../contracts/spec/spec.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const SITE = ROOT + "site/";
@@ -55,20 +55,13 @@ export const WALL_APPS: Record<string, Script> = {
     : f === 1040 ? BTN.LTRIGGER
     : f === 1280 ? BTN.RTRIGGER
     : 0,
-  // Settings: walk the list, flip toggles, ride the brightness slider.
-  "settings-main": (f) => {
-    const step = f % 720; // run the golden walk twice
-    return step === 40 ? BTN.DOWN
-      : step === 100 ? BTN.CIRCLE
-      : step === 160 ? BTN.DOWN
-      : step === 220 ? BTN.CIRCLE
-      : step === 280 ? BTN.DOWN
-      : step === 340 ? BTN.CIRCLE
-      : step === 400 || step === 440 || step === 480 ? BTN.DOWN
-      : step === 540 ? BTN.CIRCLE
-      : step === 620 ? BTN.UP
-      : 0;
-  },
+  // DeepZoom poster: zoom to 100%, pan onto the rings, settle, then fit and
+  // repeat. Frame 720 (the baked poster) holds the full-color ring view.
+  "zoomlab-main": (f) =>
+    (f >= 60 && f < 180) || (f >= 840 && f < 960) ? BTN.RTRIGGER
+    : (f >= 180 && f < 360) || (f >= 960 && f < 1140) ? BTN.LEFT
+    : f === 780 || f === 1380 ? BTN.CROSS
+    : 0,
   // Mission Control: tab across the dashboard panels.
   "stats-main": (f) => (f > 0 && f % 300 === 0 ? BTN.RIGHT : 0),
   // Game Library: browse covers, open a game, back out, open another.
@@ -80,25 +73,6 @@ export const WALL_APPS: Record<string, Script> = {
     : f === 840 ? BTN.CIRCLE
     : f === 1240 ? BTN.TRIANGLE
     : 0,
-  // Feature Cards: slide focus across the cards, expanding as we go.
-  "cards-main": (f) =>
-    f === 60 || f === 120 ? BTN.RIGHT
-    : f === 260 ? BTN.CIRCLE
-    : f === 500 ? BTN.RIGHT
-    : f === 640 ? BTN.CIRCLE
-    : f === 880 ? BTN.RIGHT
-    : f === 1020 ? BTN.CIRCLE
-    : f === 1260 ? BTN.RIGHT
-    : 0,
-  // Notifications: walk the feed, act on one, keep walking.
-  "notifications-main": (f) => {
-    const step = f % 800;
-    return step === 100 || step === 200 ? BTN.DOWN
-      : step === 300 ? BTN.CIRCLE
-      : step === 500 ? BTN.DOWN
-      : step === 620 ? BTN.CIRCLE
-      : 0;
-  },
   // Pocket Talk: open a thread, scroll history, then type on the OSK and
   // send — the delivery receipt lands before the loop cut.
   "im-main": (f) =>
@@ -113,6 +87,18 @@ export const WALL_APPS: Record<string, Script> = {
     : f === 920 ? BTN.RIGHT
     : f === 960 ? BTN.CIRCLE
     : f === 1160 ? BTN.START
+    : 0,
+  // Deterministic café: build two carts and place two orders. Frame 720 lands
+  // on the first green confirmation receipt; the final menu holds into the cut.
+  "cafe-main": (f) =>
+    f === 60 ? BTN.CIRCLE
+    : f === 90 ? BTN.DOWN
+    : f === 120 || f === 180 ? BTN.CIRCLE
+    : f === 630 ? BTN.START
+    : f === 840 ? BTN.CIRCLE
+    : f === 900 || f === 1020 ? BTN.DOWN
+    : f === 960 || f === 1080 ? BTN.CIRCLE
+    : f === 1200 ? BTN.START
     : 0,
 };
 
@@ -167,8 +153,15 @@ async function recordOne(app: string): Promise<void> {
     b.frame(script(f));
     b.tick();
     if (f % (SIM_HZ / OUT_FPS) === 0) {
-      ff.stdin.write(b.render().slice());
-      if (f % 120 === 0) await ff.stdin.flush();
+      const rgba = b.render().slice();
+      const expectedBytes = SCREEN_W * SCREEN_H * 4;
+      if (rgba.byteLength !== expectedBytes) {
+        throw new Error(
+          `record-sim: ${app} frame ${f} has ${rgba.byteLength} RGBA bytes; expected ${expectedBytes}`,
+        );
+      }
+      ff.stdin.write(rgba);
+      await ff.stdin.flush();
     }
   }
   await ff.stdin.end();

@@ -147,6 +147,7 @@ describe("platform registry", () => {
       "input.analog.left",
       "input.buttons",
       "input.cursor",
+      "audio.pcm",
       "text.glyphs.baked",
     ]);
     expect(POCKET_TARGETS.vita.capabilities).toEqual([
@@ -342,6 +343,12 @@ describe("semantic resolution", () => {
       "hero-vue-sfc": [true, true, false],
       "hero-vue-vapor": [true, true, false],
       im: [true, true, false],
+      "iphone16-demo": [false, true, false], // targets the private ios-dev profile; vita shares its touch + integer-fit contract
+      "iphone2g-demo": [false, false, false], // admitted only by the private iphone2g-dev profile
+      "iphone4s-demo": [false, false, false], // admitted only by the private iphone4s-dev profile
+      "ipodtouch-demo": [false, false, false], // admitted only by the private ipodtouch-dev profile
+      "meizu-m8-demo": [false, false, false], // admitted only by the private meizu-m8-dev profile
+      nsengine: [false, true, false], // targets the private ios-dev profile; vita shares its touch + integer-fit contract
       "ipod-nano": [false, false, false], // admitted by the package-shaped macos-embedded target
       launcher: [true, true, false], // the Cover Flow deck (docs/LAUNCHER.md) is an ordinary console app
       library: [true, true, false],

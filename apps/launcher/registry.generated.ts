@@ -18,6 +18,7 @@ export interface RegistryApp {
 
 export const REGISTRY: readonly RegistryApp[] = [
   { output: "note-main", id: "dev.pocket-stack.note", title: "Pocket Note", cover: "covers/cover-note-main.png", refl: "covers/refl-note-main.png" },
+  { output: "nsengine-main", id: "dev.pocket-stack.nsengine", title: "PocketJS NS Engine", cover: "covers/cover-nsengine-main.png", refl: "covers/refl-nsengine-main.png" },
   { output: "cafe-main", id: "dev.pocket-stack.cafe", title: "PocketJS: Café", cover: "covers/cover-cafe-main.png", refl: "covers/refl-cafe-main.png" },
   { output: "chrome-main", id: "dev.pocket-stack.chrome", title: "PocketJS: Chrome", cover: "covers/cover-chrome-main.png", refl: "covers/refl-chrome-main.png" },
   { output: "cursor-main", id: "dev.pocket-stack.cursor", title: "PocketJS: Cursor", cover: "covers/cover-cursor-main.png", refl: "covers/refl-cursor-main.png" },
@@ -34,5 +35,6 @@ export const REGISTRY: readonly RegistryApp[] = [
   { output: "settings-main", id: "dev.pocket-stack.settings", title: "PocketJS: Settings", cover: "covers/cover-settings-main.png", refl: "covers/refl-settings-main.png" },
   { output: "im-main", id: "dev.pocket-stack.im", title: "PocketJS: Talk", cover: "covers/cover-im-main.png", refl: "covers/refl-im-main.png" },
   { output: "vue-sfc-lab-main", id: "dev.pocket-stack.vue.sfc.lab", title: "PocketJS: Vue SFC Feature Lab", cover: "covers/cover-vue-sfc-lab-main.png", refl: "covers/refl-vue-sfc-lab-main.png" },
+  { output: "iphone16-demo-main", id: "dev.pocket-stack.iphone16-demo", title: "PocketJS: iPhone 16 Hero", cover: "covers/cover-iphone16-demo-main.png", refl: "covers/refl-iphone16-demo-main.png" },
   { output: "zoomlab-main", id: "dev.pocket-stack.zoomlab", title: "Zoom Lab", cover: "covers/cover-zoomlab-main.png", refl: "covers/refl-zoomlab-main.png" },
 ] as const;

@@ -16,6 +16,8 @@
 
 import { createWasmUi, FB_W as DEFAULT_FB_W, FB_H as DEFAULT_FB_H } from "./wasm-ops.js";
 import { drawHud, wasmMemoryBytes } from "./hud.js";
+import { createAudioHost } from "./audio.js";
+import { createNetHost } from "./net.js";
 
 const query = new URLSearchParams(location.search);
 function positiveIntParam(name, fallback, max = 32000) {
@@ -102,6 +104,8 @@ let rafId = 0;
 let acc = 0;
 let last = 0;
 let frameCb = null;
+let audioHost = null; // hosts/web/audio.js — created on first load()
+let netHost = null; // hosts/web/net.js — browser fetch behind the NET contract
 // Virtual clock policy (docs/DETERMINISM.md): virtual frames per second. One
 // frame(buttons) transaction + 60/simHz core ticks per virtual frame, so
 // ms-based animations cover the same VIRTUAL time at every rate. ?hz=2
@@ -211,6 +215,10 @@ async function devtoolsSeek(frame) {
 function safeFrame() {
   if (!frameCb) return;
   try {
+    // Audio module: fold the audio clock's facts into this tick's event
+    // batch BEFORE the guest's single turn (poll() drains them inside it).
+    if (audioHost) audioHost.beginFrame();
+    if (netHost) netHost.beginFrame();
     // JS: one virtual-frame transaction (input, effects, sweep)
     frameCb(held, packedAnalog());
     const ticks = 60 / simHz;
@@ -347,6 +355,16 @@ export async function load(name, opts = {}) {
   // EVERY load so nothing stale leaks across reloads.
   globalThis.ui = wasm.ops;
   globalThis.frame = undefined;
+  // Audio module (contracts/spec/audio.ts): mounted as its own namespace,
+  // reset per load like every other contract slot (streams die with the app).
+  if (!audioHost) audioHost = createAudioHost();
+  audioHost.reset();
+  globalThis.audio = audioHost.ns;
+  // NET module: browser fetch is transport-only; guest code sees the same
+  // bounded globalThis.net contract as native runtimes.
+  if (!netHost) netHost = createNetHost();
+  netHost.reset();
+  globalThis.net = netHost.ns;
   globalThis.__simHz = simHz; // clock policy — before eval, like __pak
   // DevTools: identity + transport BEFORE eval; render() picks them up.
   globalThis.__pocketApp = name;

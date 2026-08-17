@@ -3,6 +3,366 @@
 Engine and site milestones, newest first. Versions track the
 `@pocketjs/framework` npm package.
 
+## 0.10.1 — August 16, 2026
+
+**Three more physical phones run PocketJS, Pocket Vapor compiles a smaller reactive graph, and Pocket3D gains a deterministic systemic world.**
+0.10.1 carries the connected-device work completed after 0.10.0 together with
+the compiler, renderer and tooling fixes those devices exposed. The new phone
+profiles remain private development targets: each one records an exact
+hardware and firmware tuple, and none advertises a production capability from
+a build or upload alone.
+
+- **Windows CE runs a real Solid guest on the Meizu M8.** One ARM executable
+  embeds QuickJS, the app and its assets, and the Rust software renderer; the
+  native host copies a 480×720 BGRA framebuffer to the LCD through GDI without
+  stretching. The host turns WinCE messages into wide touch coordinates,
+  closes cleanly on Home or Escape, registers a build-qualified MiniOneShell
+  icon, and deploys over the phone's ActiveSync serial function through PPP
+  and RAPI. Status requires advancing guest frames, successful GDI composites
+  and matching logical and physical viewports; acceptance additionally
+  requires a completed touch and changed application action. The
+  [field report](/blog/pocketjs-on-windows-ce/) follows the port from the first
+  clipped 320×480 frame to the native, readable result.
+- **The sixth-generation iPod touch has a transactional native host.** The
+  tested `iPod7,1` on iOS 12.5.8 runs an arm64 UIKit application at a 320×568
+  logical viewport and density 2. Each deploy re-identifies the device, opens
+  a fresh UDID-scoped USB tunnel, verifies the staged bundle byte by byte, and
+  keeps a rollback copy until SpringBoard registration succeeds. Wide touch
+  words preserve the bottom of the 568-point surface, while the device receipt
+  proves a live process, advancing frames, completed release and `hero_tap`.
+- **The iPhone 4S runs the retained UI through OpenGL ES 1.1 at Retina
+  density.** The private iOS 6.1.3 host builds an ARMv7 bundle against locally
+  derived, hash-pinned linker stubs and requires the physical runtime to report
+  a 640×960 GLES1 drawable for its 320×480 logical viewport. Transaction leases,
+  staged file hashes, signature checks and rollback keep a failed install from
+  replacing the working application; the captured device frame comes from the
+  actual Retina renderbuffer.
+- **The modern iOS shell's 120 Hz path is complete.** Its NativeScript plugin
+  pin moves to `@nativescript/pocketjs` 0.2.1, whose native bridge publishes the
+  requested tick rate before guest evaluation. This closes 0.10.0's known
+  limitation: a 120 Hz bundle and host now establish the same mount invariant
+  instead of refusing the unpublished 0.2.0 bridge.
+- **Pocket Vapor removes work that static analysis proves unreachable.** A
+  sparse conditional constant-propagation pass folds constant ref reads,
+  selects decidable branches, and removes their dead dependencies and ROM.
+  Frame-local view and bounded-string temporaries now share statically colored
+  overlay slots when their generated owners cannot be live together, reducing
+  permanent RAM and stack pressure on the NES and Game Boy. Linux parity runs
+  can supply `MGBA_PREFIX` and `CC65_LIB` without changing the macOS defaults.
+- **`pocket3d-world` is a renderer-independent fixed-step simulation.** Stable
+  entity IDs, seeded randomness and ordered phases cover sphere and capsule
+  bodies, attachments, structural damage, retained water, heat, fuel and
+  combustion. Inputs, initial state and configuration replay to a stable state
+  hash; shared collision and reaction laws are tested as general invariants,
+  while concrete material recipes remain application-owned. Pocket3D model
+  sockets and the optional stylized scene path present that state without
+  moving simulation policy into the renderer.
+- **Font and desktop-host regressions are closed.** The font baker now closes
+  implicitly closed CFF contours before scanline filling, retaining their final
+  edge, and the Note and widget launchers resolve their Cargo outputs from the
+  current `engine/` workspace rather than the retired nested path.
+- **Release automation runs on the current Node 24-backed GitHub Actions.** The
+  checkout, cache and setup-node upgrades preserve the existing OIDC trusted
+  publishing, build gates and deployment behavior.
+
+## 0.10.0 — August 15, 2026
+
+**Apps reach the network, a database and their own files, and a realm declares the rate its virtual time runs at.**
+0.10.0 adds three modules — `net`, `db` and `fs` — each behind its own
+append-only op spec, a deterministic sim host and a reference Rust core, and
+turns the core's fixed 1/60 s step into a per-realm constant chosen before the
+first tick. Every default remains 60 and the 60 Hz path is the identical
+expression throughout, so existing bundles, tapes and frame-hash goldens are
+byte-for-byte unchanged.
+
+- **`net` — bounded whole-response HTTP.** `fetch()` and `globalThis.net` over
+  five ops (`start`, `take`, `cancel`, `poll`, `lastError`), with the bounds in
+  the spec rather than in each host: **2 in flight**, **64 KB** of request,
+  **128 KB** of response by default and **256 KB** at most, 32 headers. The
+  transport never calls into QuickJS — completions are staged to tick
+  boundaries and drained one batch per tick — so a network answer cannot land
+  in the middle of a frame. Transport adapters stay host-owned; the browser dev
+  host, the sim and `engine/crates/pocket-net` exercise the contract without
+  granting network access to every host.
+- **`db` — SQLite behind five synchronous ops.** `open`, `close`, `exec`,
+  `query`, `lastError`, with rows arriving as one JSON line per `query()` call
+  rather than a cursor: at most **4 databases** per app, **4096 rows** per
+  result, names matched against a fixed pattern, and storage the host confines
+  to the app. `:memory:` is spelled the same as SQLite spells it.
+- **`fs` — a per-app file tree behind nine ops.** `read`, `write`, `remove`,
+  `list`, `stat`, `mkdir`, `rename`, `usage`, `lastError`, plus a
+  `readFileSync`/`writeFileSync` surface for code that expects one. **Every
+  path is confined to the app's own data root** — apps cannot name, let alone
+  reach, each other's trees — and the shape of a path is bounded too: **160
+  bytes**, **8 levels**, 64 bytes per segment.
+- **No stock target advertises the three capabilities yet.** `net.http`,
+  `data.sqlite` and `data.fs` are registered ahead of any console host shipping
+  them, exactly as `audio.pcm` was: the sim host and the reference cores
+  implement the whole contract, so an app can declare the requirement today,
+  run against the sim (and, for `net`, the browser dev host), and fail
+  admission cleanly where the module is absent. A device target appends the id
+  to its profile when its native host ships the module — not before.
+- **A realm declares its tick rate before its first tick.** `Ui::set_tick_rate`
+  threads `dt` through the spring integrators and every ms-to-frame conversion,
+  keeping exact integer hz alongside it so frame counts stay integers;
+  `tools/build.ts --hz` bakes the same rate into the bundle, and clock,
+  kinetics, input, deepzoom and the styles.bin ANIM TABLE all derive their
+  per-tick constants from it. The rate is **fixed for the whole run** — a
+  realm's frame content stays a pure function of its frame index, which is what
+  keeps goldens byte-exact.
+- **A bundle refuses a host that drives another rate.** The host publishes its
+  rate as `ui.__tickHz` and the bundle checks it where it already checks target
+  and host ABI. **An absent `__tickHz` means 60**, so every host that predates
+  per-realm rates keeps mounting every bundle built the ordinary way. Without
+  this a 120-baked bundle mounted on a 60-stepped core and ran at half speed
+  silently; it now fails at mount with both rates named.
+- **Modern iOS runs guests, as a transitional target.** `pocket ios
+  doctor|build|stage|play` builds against an `ios-dev` plan and launches inside
+  a NativeScript shell on an arm64 simulator, over the `pocket-apple` crate:
+  one guest realm, one UI surface, and the software rasterizer driven
+  incrementally through a damage tracker behind a small C ABI, with a UIKit
+  view compositing only what changed. The profile stays **out of
+  `POCKET_TARGETS`** until it has device-level acceptance, following the same
+  convention the iPhone 2G target used. **Known limitation:** the 120 Hz path
+  needs `@nativescript/pocketjs` 0.2.1, which is not published yet — against
+  the current 0.2.0 plugin a 120 Hz bundle refuses to mount (loudly, by the
+  rule above) while 60 Hz is unaffected.
+- **Hosts choose the guest allocator**, so an embedder with its own arena no
+  longer has to accept the default one.
+- **Site**: the landing page leads with a machine collage and per-audience
+  `/for/` pages, the in-browser playground reuses the landing PSP model, and
+  every playground demo is validated and restored on build.
+
+## 0.9.3 — August 8, 2026
+
+**The PSP arena no longer strands the memory a QuickJS boot needs.**
+A guest whose boot parses a megabyte of JSON could exhaust the heap while
+megabytes sat free, because the arena's power-of-two size classes never hand a
+block to a different class. 0.9.3 closes that, and
+[Pocket Voxel](https://github.com/pocket-stack/pocket-voxel) boots on a real
+PSP-2000 at the default arena size again.
+
+- **`realloc` keeps the pointer when the new size stays inside the block's
+  class.** The arena rounds every request up to a power of two, so a grow that
+  stays in class already owns those bytes. QuickJS grows its string and array
+  builders geometrically, and the previous allocator answered every one of those
+  grows with an allocate, a copy, and a free that put the old block into a class
+  nothing asked for again. A boot parsing 1.15 MB of game data stranded
+  megabytes this way.
+- **`arena::alloc` splits a larger free block when the bump is spent**, halving
+  down to the class it needs. It runs last on purpose: a heap with room behaves
+  exactly as it did in 0.9.2, and large blocks stay whole for the callers that
+  want them.
+- **A null exception object is an out-of-memory signature.** `[PocketJS js
+  error] null` followed by `JS_Eval threw` means QuickJS could not allocate an
+  `Error` to throw, so the guest source is not the suspect. The same halt line
+  covers every eval failure, which is what made this one read as a code bug for
+  a day.
+- **`globalThis.audio` mounts without the `ui` surface.** `register_audio` is
+  split out of `register`, so a host that owns its own surface can still offer
+  the `audio.pcm` capability. The credit mirror also decays with the hardware
+  stream: `poll()` never subtracted what `write()` accepted, so a ring the mixer
+  drained completely between two polls sent no credit and the guest went
+  permanently silent after a couple of seconds.
+
+Measured on the hardware that found it. The same guest bundle peaks at
+**12.3 MB** under desktop QuickJS and needed more than **15.5 MB** on the device
+before this release; it now boots inside the **14.3 MB** an XMB launch leaves
+after a 32 MB pak, with the emulator journey green at 11 of 11 marks and
+frame-hash goldens byte-identical at both quality rungs.
+
+## 0.9.2 — August 6, 2026
+
+**A locked 60 fps on a 2007 iPhone, because the composite was the only stage that was never damage-limited.**
+PocketJS 0.9.2 makes the software rasterizer scope its screen composite to the
+damaged rectangle, which takes the original iPhone from 22–26 fps to **59.99**,
+and exposes the damage statistics that made the diagnosis possible. The
+[deep dive](/blog/pocketjs-on-the-first-iphone/) has the numbers.
+
+- **The composite now follows the damage plan.** The rasterizer was always
+  incremental; the composite was not. The tick called `setNeedsDisplay` on the
+  whole view and `drawRect:` discarded the dirty rectangle UIKit passes, so every
+  frame rebuilt a `CGImage` over all 320×480 — **22–27 ms**. An empty plan now
+  invalidates nothing (626 of 961 frames in one sample), and a non-empty plan
+  goes to `setNeedsDisplayInRect:` with `drawRect:` clipping to what it is
+  handed. The composite costs **0.26 ms**, and the frame **7.63 ms** of a
+  16.67 ms budget. No preservation guarantee is relied on: when UIKit discards
+  the backing store it passes full bounds and the full frame is drawn.
+- **Damage is observable.** `engine/symbian` was discarding the `DamagePlan` the
+  incremental rasterizer returns. Six new C ABI accessors expose attempts,
+  failures, policy-chosen full redraws, region count, pixel area and union
+  bounds, and four of them ride in the device record. **`damage_failures` is the
+  one that matters:** planning that errors silently draws a complete frame, and
+  without a counter that is indistinguishable from a slow machine. A
+  `composites` counter sits beside it, because a scoped invalidation that never
+  fires looks exactly like a very fast one.
+- **The software rasterizer is now the default on this target**, and the OpenGL
+  ES 1.1 backend is opt-in. The GL path is correct and pixel-verified but costs
+  17.2–19.7 ms and delivers 48.6–50.7 fps, because it re-submits and re-fills
+  the entire DrawList every frame. **This supersedes rather than corrects
+  0.9.1:** the GPU path really was faster than the CPU path as that code stood;
+  the CPU path then got an optimization the GPU path still lacks.
+- **Both paths can be captured and diffed.** The capture works on the software
+  path too, which is the test that matters for a damage-limited rasterizer —
+  the framebuffer persists and only damaged spans are rewritten, so
+  under-reported damage would accumulate as staleness. After **2,581 frames**:
+  mean absolute channel difference 0.039 of 255, with the only residue inside
+  the animating spinner's own 40×40 box. Note the two captures disagree about
+  format — `glReadPixels` is R,G,B,A bottom-up, the core's ARGB32 words are
+  B,G,R,A top-down — and comparing the software one unswapped reports a
+  convincing 9.3/255 failure that is entirely in the comparison.
+
+## 0.9.1 — August 6, 2026
+
+**The GPU path on the original iPhone was never losing; three stacked measurement bugs said it was.**
+PocketJS 0.9.1 corrects the central performance claim of 0.9.0, fixes the two
+real defects that produced it, and adds the instrument that settled it — the
+device's own framebuffer, read back and diffed against the reference
+rasterizer. The [rewritten deep
+dive](/blog/pocketjs-on-the-first-iphone/) tells it in order.
+
+- **Correction to 0.9.0.** That release reported the OpenGL ES 1.1 path as
+  **2.4× slower** than the software rasterizer on the original iPhone. It is
+  **1.8–2× faster**: 46.7–49.4 fps against 21.9–26.5, and 19.4–20.5 ms per
+  frame against 33.9–40.8. The old comparison timed GL's rasterize *and*
+  present against software's rasterize *only*, because the software
+  composite runs in `drawRect:` later in the run loop. (0.9.2 then scoped that
+  composite and the ordering flipped again — see above.)
+- **Fixed: the software fallback never composited.** `+layerClass` returned
+  `CAEAGLLayer` unconditionally, and a GL-backed layer never receives
+  `drawRect:`. The documented fallback — the one the host drops to whenever GL
+  fails — computed frames that could not reach the screen. The layer class now
+  agrees with the selected renderer.
+- **Fixed: the GPU drew colour blocks.** In OpenGL ES 1.1 texturing is a
+  per-unit enable, and `glEnable(GL_TEXTURE_2D)` was missing, so every fragment
+  took only its vertex colour: flat fills looked right while all text, images
+  and font-atlas content silently vanished. ES 2 has no equivalent, which is
+  exactly why deriving the ES 1 pipeline from the ES 2 one hid it. Also states
+  `GL_MODULATE`, `glShadeModel(GL_SMOOTH)` and an identity texture matrix, with
+  a test pinning all four.
+- **Pixel parity, off the device.** A one-shot `glReadPixels` capture writes the
+  phone's framebuffer to a file the host pulls over USB. Against the same guest
+  rendered by the reference core: **mean absolute channel difference 0.04 of
+  255**, no channel off by more than 32, worst single channel 7 — the residue
+  being antialiased glyph edges. First PocketJS host verified by reading pixels
+  back off physical hardware.
+- **A frame rate you can trust.** The device now reports `window_frames` and
+  `window_us`, so the rate is computed from exact on-device counters instead of
+  differencing two status records with one-second timestamps — the ±4 fps of
+  slop that let the original discrepancy hide.
+
+## 0.9.0 — August 6, 2026
+
+**The runtime reaches the original iPhone, and its GPU backend learns a second generation.**
+PocketJS 0.9.0 adds an experimental ARMv6 target for the 2007 `iPhone1,1`
+running iPhone OS 3.1.3, generalizes the hardware DrawList backend so it
+serves both OpenGL ES 2 and the fixed-function OpenGL ES 1.1 that older
+GPUs speak, and hardens what the project accepts as proof that something
+ran on hardware. Its performance claim about that GPU path was wrong and is
+corrected in 0.9.1 above.
+
+- **An ARMv6 UIKit host for the original iPhone.** Current Xcode still
+  emits ARMv6 and `ld-classic` still links a 2008 sysroot, so the host is
+  built against an iPhone OS 1.1.4 ABI floor and targets 3.1.3, probing
+  both UIKit generations at runtime with `respondsToSelector:` and
+  `dlsym`. It contains **no Objective-C**: the classic linker crashes on
+  the ObjC1 relocations current Clang emits, so the view and app delegate
+  are registered through `objc_allocateClassPair` at startup. The guest
+  JavaScript and asset pack ride inside the executable as Mach-O sections,
+  and deployment is a signed transaction with byte-exact readback and
+  rollback over key-only USB SSH. The target stays deliberately outside
+  the production registry, with a test asserting it.
+- **The GL backend now serves two GPU generations.** `engine/symbian`'s
+  renderer split into a generation-independent DrawList walker plus two
+  pipelines: the existing ES 2 shader program, and a new fixed-function ES
+  1.1 path for GPUs that predate shaders. The two shader lines turned out
+  to have exact fixed-function equivalents — the pixel-to-NDC transform is
+  `glOrthof`, and `texture2D(…) * v_color` is `GL_MODULATE` — so the
+  interleaved vertex layout is reused byte for byte. All ten backend tests
+  pass on either pipeline, and Symbian's verified ES 2 output is unchanged.
+- **A GPU path measured, and reported wrongly — see 0.9.1.** This release
+  reported the hardware path as 2.4× slower than the software rasterizer. That
+  conclusion was the product of three stacked measurement bugs and is exactly
+  backwards; the corrected figures and the two defects behind them are in
+  0.9.1 above. What stands from this entry: the device record reports which
+  renderer and which clock actually ran rather than leaving it to be inferred,
+  and a marker file selects between both paths so they can be measured from
+  one binary.
+- **Runtime acceptance got harder to fool.** A review found that the
+  first "it runs on hardware" receipt could pass before the finger lifted
+  and could be re-read from a process that had already died. The record is
+  now schema 2 and requires a live PID, an advancing heartbeat, a
+  completed touch release, and an application-reported action — which
+  arrives through the new `reportAppAction` framework surface and its
+  optional host sink, so the evidence path runs through the reactive
+  graph. Frame-loop timings ride in the same record.
+
+## 0.8.0 — August 5, 2026
+
+**The runtime learns to be touched and heard, and reaches four new kinds
+of machine.** PocketJS 0.8.0 makes Octane the third first-class framework
+beside Solid and Vue Vapor, grows a real touch system with gesture
+physics and a deterministic audio pipeline, and adds four machine
+families: Symbian phones, PocketBook e-readers, the ESP32-P4, and the
+Playdate. The [landing page](/) now tells that story: rich interactive
+JavaScript where no browser fits.
+
+- **Octane, the third framework.** Dominic Gannaway's compiled
+  implementation of the React programming model (`useState`, `useEffect`,
+  JSX, no virtual DOM) drives the same native tree as Solid and Vue Vapor
+  through a universal framework driver. Every Vue Vapor demo has an Octane
+  twin; 14 of the 23 committed Octane PSP goldens are byte-identical to
+  the Vue Vapor frame, and the [three-framework
+  benchmark](/blog/octane-on-psp/) lands every demo inside the 16.7 ms
+  frame budget on real hardware. The port also uncovered that every PSP
+  build since 2021 had shipped an unoptimized QuickJS interpreter; the fix
+  speeds up every guest app.
+- **A real touch system.** Per-contact snapshots carry host-resolved hit
+  facts; a gesture layer sits on top with a kinetic scroller tuned to
+  iOS-feel physics, axis dominance that defers instead of killing so a
+  thumb can arc, and tap activation that presses any focusable.
+  `VirtualList` turns the IM thread pattern into a component. The OSK
+  gains a modern touch press model, backspace auto-repeat, and
+  `TextField`, the editable activation semantic. DevTools tapes add a
+  sparse touch track, e2e gains scripted touch input and the first touch
+  goldens, and
+  [docs/TOUCH.md](https://github.com/pocket-stack/pocketjs/blob/main/docs/TOUCH.md)
+  writes down the measured cost model.
+- **Audio, credit-based and deterministic.** `globalThis.audio` is a
+  spec-first PCM streaming interface: apps push samples against a credit
+  budget and hosts drain it, with a web worklet, a sim sink, and a PSP
+  hardware channel behind the same contract. Playback defers until fed, so
+  replays stay byte-stable, and the music demo plays real WAV files.
+- **Symbian, the first phone family.** PocketJS apps run natively on a
+  2011 Nokia E7 as installed Symbian applications with their own UIDs: a
+  GLES2 renderer, an app catalog, live portrait and landscape relayout,
+  and the slide-out QWERTY. The write-up is [Symbian Wanted a Frame
+  Function](/blog/pocketjs-on-symbian/).
+- **PocketBook, the first e-ink surface.** The inkview host renders
+  incrementally and chooses partial, dynamic, or full refresh per update
+  from tile diffs, on a display that fights every frame.
+- **ESP32-P4, rendered by damage.** An RGB565 raster path and a hybrid
+  PPA hardware backend (contributed by @HalfSweet, hardware-verified on an
+  M5Stack Tab5 at 1280×720), built on new backend-independent damage
+  rendering and transactional strip rendering with a strip-equals-full
+  parity suite.
+- **Playdate, the fifth Pocket Vapor target.** The 400×240 1-bit panel
+  as a 50×30 grid, `.pdx` packaging for device and Simulator, and the
+  crank arriving through the hardware-neutral `RelativeAxis` contract:
+  hosts preserve signed millidegrees, apps own their detents, and
+  admission is checked per target against the real Vue oracle.
+- **Vita system services.** The Cover Flow launcher ports to Vita, and
+  the svc mailbox goes wireless: a PKNT wire protocol, RAM-assembled
+  `.pkst` streams, a video plane, and audio over WiFi TCP.
+- **Toolchain.** `--font-regular`/`--font-bold` source overrides in the
+  build, Vue SFC template comments handled correctly, and the npm files
+  map pinned to its governed surface.
+- **Compatibility:** apps and the npm packages build unchanged.
+  **Breaking** for native embedders only: `render_scaled_argb` now emits
+  the documented little-endian ARGB8888 word layout instead of the
+  byte-swapped surface it produced before; re-check any code that consumed
+  the old order.
+
 ## 0.7.0 — July 23, 2026
 
 **Vue compiles all the way down.** Pocket Vapor takes a real Vue Vapor

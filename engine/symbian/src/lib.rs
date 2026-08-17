@@ -11,56 +11,100 @@
 //! packed, top-left-origin ARGB32 pixels; those pointers remain valid until
 //! the next capture, viewport change, init, or shutdown call.
 
-#![cfg_attr(target_os = "none", no_std)]
-#![cfg_attr(target_os = "none", feature(alloc_error_handler))]
+#![cfg_attr(any(target_os = "none", feature = "bare-platform"), no_std)]
+#![cfg_attr(
+    any(target_os = "none", feature = "bare-platform"),
+    feature(alloc_error_handler)
+)]
 #![allow(static_mut_refs)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 use core::ffi::c_void;
 use pocketjs_core::damage::{DamagePolicy, DamageTracker, DEFAULT_DAMAGE_REGIONS};
 use pocketjs_core::raster;
 use pocketjs_core::Ui;
 
-#[cfg(any(target_os = "none", test))]
-mod gles2;
 pub mod extension;
+#[cfg(all(
+    any(target_os = "none", feature = "bare-platform", test),
+    not(feature = "software-only")
+))]
+mod gl;
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "none", feature = "bare-platform", test))]
 const C_MALLOC_ALIGNMENT: usize = 8;
 
-#[cfg(any(target_os = "none", test))]
+#[cfg(any(target_os = "none", feature = "bare-platform", test))]
 #[inline]
 const fn c_allocator_supports_alignment(alignment: usize) -> bool {
     alignment <= C_MALLOC_ALIGNMENT
 }
 
-#[cfg(target_os = "none")]
+#[cfg(all(
+    any(target_os = "none", feature = "bare-platform"),
+    not(feature = "host-allocator")
+))]
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
+}
+
+#[cfg(all(
+    any(target_os = "none", feature = "bare-platform"),
+    feature = "host-allocator"
+))]
+unsafe extern "C" {
+    fn pocket_host_alloc(size: usize) -> *mut c_void;
+    fn pocket_host_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+    fn pocket_host_free(ptr: *mut c_void);
+}
+
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
+unsafe extern "C" {
     fn abort() -> !;
 }
 
-#[cfg(target_os = "none")]
+#[cfg(feature = "boot-stage")]
+unsafe extern "C" {
+    fn pocket_host_boot_stage(stage: i32);
+}
+
+#[inline]
+fn report_boot_stage(stage: i32) {
+    #[cfg(feature = "boot-stage")]
+    unsafe {
+        pocket_host_boot_stage(stage);
+    }
+    #[cfg(not(feature = "boot-stage"))]
+    let _ = stage;
+}
+
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 struct CAllocator;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 unsafe impl GlobalAlloc for CAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if !c_allocator_supports_alignment(layout.align()) {
             return core::ptr::null_mut();
         }
-        malloc(layout.size().max(1)).cast()
+        #[cfg(feature = "host-allocator")]
+        return pocket_host_alloc(layout.size().max(1)).cast();
+        #[cfg(not(feature = "host-allocator"))]
+        return malloc(layout.size().max(1)).cast();
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        #[cfg(feature = "host-allocator")]
+        pocket_host_free(ptr.cast());
+        #[cfg(not(feature = "host-allocator"))]
         free(ptr.cast());
     }
 
@@ -68,21 +112,24 @@ unsafe impl GlobalAlloc for CAllocator {
         if !c_allocator_supports_alignment(layout.align()) {
             return core::ptr::null_mut();
         }
-        realloc(ptr.cast(), size.max(1)).cast()
+        #[cfg(feature = "host-allocator")]
+        return pocket_host_realloc(ptr.cast(), size.max(1)).cast();
+        #[cfg(not(feature = "host-allocator"))]
+        return realloc(ptr.cast(), size.max(1)).cast();
     }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[global_allocator]
 static ALLOCATOR: CAllocator = CAllocator;
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     unsafe { abort() }
 }
 
-#[cfg(target_os = "none")]
+#[cfg(any(target_os = "none", feature = "bare-platform"))]
 #[alloc_error_handler]
 fn allocation_error(_layout: Layout) -> ! {
     unsafe { abort() }
@@ -91,6 +138,21 @@ fn allocation_error(_layout: Layout) -> ! {
 static mut UI: Option<Ui> = None;
 static mut FRAMEBUFFER: Vec<u8> = Vec::new();
 static mut DAMAGE_TRACKER: DamageTracker<DEFAULT_DAMAGE_REGIONS> = DamageTracker::new();
+/*
+ * Damage statistics for the incremental raster path.
+ *
+ * These exist because the failure mode they describe is invisible without
+ * them: when damage planning returns Err the renderer quietly draws a complete
+ * frame, and a per-frame failure is then indistinguishable from the machine
+ * simply being slow. `failures` counts planning that FAILED; `full_redraws`
+ * counts a plan that legitimately chose to cover everything.
+ */
+static mut DAMAGE_ATTEMPTS: u64 = 0;
+static mut DAMAGE_FAILURES: u64 = 0;
+static mut DAMAGE_FULL_REDRAWS: u64 = 0;
+static mut DAMAGE_REGIONS: u32 = 0;
+static mut DAMAGE_PIXELS: u64 = 0;
+static mut DAMAGE_BOUNDS: [i32; 4] = [0, 0, 0, 0];
 static mut FRAMEBUFFER_WIDTH: u32 = 0;
 static mut FRAMEBUFFER_HEIGHT: u32 = 0;
 static mut FRAMEBUFFER_STRIDE: u32 = 0;
@@ -145,24 +207,33 @@ fn clear_framebuffer() {
 /// Reset the single UI instance. `raster_density == 0` selects density 1.
 #[no_mangle]
 pub extern "C" fn ui_init(raster_density: u32) {
-    #[cfg(target_os = "none")]
+    report_boot_stage(101);
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
         // This call may happen without a current GL context, so the backend
         // only marks its caches stale and defers replacement until render.
-        gles2::invalidate_resources();
+        gl::invalidate_resources();
     }
     unsafe {
         UI = Some(Ui::new_with_raster_density(raster_density.max(1)));
     }
+    report_boot_stage(102);
     clear_framebuffer();
+    report_boot_stage(103);
 }
 
 /// Drop all retained UI, texture, font, and framebuffer allocations.
 #[no_mangle]
 pub extern "C" fn ui_shutdown() {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        gles2::invalidate_resources();
+        gl::invalidate_resources();
     }
     unsafe {
         UI = None;
@@ -347,6 +418,11 @@ pub extern "C" fn ui_hit_test(x: f32, y: f32) -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn ui_hit_test_bounds(x: f32, y: f32) -> i32 {
+    ui().hit_test_bounds(x, y)
+}
+
+#[no_mangle]
 pub extern "C" fn ui_set_cursor(texture: i32, hot_x: f32, hot_y: f32, width: f32, height: f32) {
     ui().set_cursor(texture, hot_x, hot_y, width, height);
 }
@@ -365,13 +441,16 @@ pub extern "C" fn ui_load_styles(ptr: *const u8, len: usize) -> i32 {
 pub extern "C" fn ui_load_font_atlas(ptr: *const u8, len: usize) -> i32 {
     let blob = unsafe { bytes(ptr, len) };
     let loaded = ui().load_font_atlas(blob);
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     if loaded {
         if let Some(&slot) = blob.get(12) {
             unsafe {
                 // Loading happens in a host callback, not necessarily with
                 // QGLWidget's context current. Defer GL deletion/re-upload.
-                gles2::invalidate_font(slot);
+                gl::invalidate_font(slot);
             }
         }
     }
@@ -392,27 +471,39 @@ pub extern "C" fn ui_tick() {
 
 #[no_mangle]
 pub extern "C" fn ui_gl_initialize() -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        return gles2::initialize() as i32;
+        return gl::initialize() as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(any(
+        feature = "software-only",
+        not(any(target_os = "none", feature = "bare-platform"))
+    ))]
     0
 }
 
 #[no_mangle]
 pub extern "C" fn ui_gl_reset_resources() {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        gles2::reset_resources();
+        gl::reset_resources();
     }
 }
 
 #[no_mangle]
 pub extern "C" fn ui_gl_shutdown() {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        gles2::shutdown();
+        gl::shutdown();
     }
 }
 
@@ -425,9 +516,12 @@ pub extern "C" fn ui_gl_render(
     window_width: i32,
     window_height: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        return gles2::render(
+        return gl::render(
             ui(),
             target_x,
             target_y,
@@ -437,7 +531,10 @@ pub extern "C" fn ui_gl_render(
             window_height,
         ) as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(any(
+        feature = "software-only",
+        not(any(target_os = "none", feature = "bare-platform"))
+    ))]
     {
         let _ = (
             target_x,
@@ -463,9 +560,12 @@ pub extern "C" fn ui_gl_render_over(
     window_width: i32,
     window_height: i32,
 ) -> i32 {
-    #[cfg(target_os = "none")]
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
     unsafe {
-        return gles2::render_over(
+        return gl::render_over(
             ui(),
             target_x,
             target_y,
@@ -475,7 +575,10 @@ pub extern "C" fn ui_gl_render_over(
             window_height,
         ) as i32;
     }
-    #[cfg(not(target_os = "none"))]
+    #[cfg(any(
+        feature = "software-only",
+        not(any(target_os = "none", feature = "bare-platform"))
+    ))]
     {
         let _ = (
             target_x,
@@ -566,31 +669,104 @@ fn render_at_scale(scale: u32, incremental: bool) -> *const u8 {
         }
 
         if incremental {
-            if raster::render_scaled_argb_incremental(
+            DAMAGE_ATTEMPTS = DAMAGE_ATTEMPTS.wrapping_add(1);
+            match raster::render_scaled_argb_incremental(
                 instance_ref,
                 &(*draw_list).words,
                 &mut FRAMEBUFFER,
                 scale,
                 &mut DAMAGE_TRACKER,
                 DamagePolicy::default(),
-            )
-            .is_err()
-            {
-                raster::render_scaled_argb(
-                    instance_ref,
-                    &(*draw_list).words,
-                    &mut FRAMEBUFFER,
-                    scale,
-                );
-                DAMAGE_TRACKER.invalidate();
+            ) {
+                Ok(plan) => {
+                    // The plan is the only evidence that damage is doing
+                    // anything. Discarding it is what made a per-frame
+                    // full-redraw regression indistinguishable from a slow
+                    // machine, so record it instead.
+                    let bounds = plan.bounds();
+                    DAMAGE_REGIONS = plan.region_count() as u32;
+                    DAMAGE_PIXELS = plan.area();
+                    DAMAGE_BOUNDS = [bounds.x0, bounds.y0, bounds.x1, bounds.y1];
+                    if plan.is_full_redraw() {
+                        DAMAGE_FULL_REDRAWS = DAMAGE_FULL_REDRAWS.wrapping_add(1);
+                    }
+                }
+                Err(_) => {
+                    // Silent fallback to a complete frame. Counted separately
+                    // from a policy-chosen full redraw, because this one means
+                    // damage planning FAILED.
+                    DAMAGE_FAILURES = DAMAGE_FAILURES.wrapping_add(1);
+                    DAMAGE_REGIONS = 0;
+                    DAMAGE_PIXELS = (width as u64) * (height as u64);
+                    DAMAGE_BOUNDS = [0, 0, width as i32, height as i32];
+                    raster::render_scaled_argb(
+                        instance_ref,
+                        &(*draw_list).words,
+                        &mut FRAMEBUFFER,
+                        scale,
+                    );
+                    DAMAGE_TRACKER.invalidate();
+                }
             }
         } else {
             raster::render_scaled_argb(instance_ref, &(*draw_list).words, &mut FRAMEBUFFER, scale);
             DAMAGE_TRACKER.invalidate();
+            DAMAGE_REGIONS = 0;
+            DAMAGE_PIXELS = (width as u64) * (height as u64);
+            DAMAGE_BOUNDS = [0, 0, width as i32, height as i32];
         }
 
         remember_framebuffer_geometry(width, height);
         FRAMEBUFFER.as_ptr()
+    }
+}
+
+/// Incremental-raster statistics, so a host can tell a working damage plan
+/// from a silent per-frame fallback. Counts are cumulative; the region,
+/// pixel and bounds values describe the most recent frame.
+#[no_mangle]
+pub extern "C" fn ui_damage_attempts() -> u64 {
+    unsafe { DAMAGE_ATTEMPTS }
+}
+
+/// Times damage planning returned an error and a complete frame was drawn.
+#[no_mangle]
+pub extern "C" fn ui_damage_failures() -> u64 {
+    unsafe { DAMAGE_FAILURES }
+}
+
+/// Times a successful plan covered the whole target by policy.
+#[no_mangle]
+pub extern "C" fn ui_damage_full_redraws() -> u64 {
+    unsafe { DAMAGE_FULL_REDRAWS }
+}
+
+/// Regions in the most recent plan; 0 means nothing changed.
+#[no_mangle]
+pub extern "C" fn ui_damage_regions() -> u32 {
+    unsafe { DAMAGE_REGIONS }
+}
+
+/// Logical pixels the most recent plan covers.
+#[no_mangle]
+pub extern "C" fn ui_damage_pixels() -> u64 {
+    unsafe { DAMAGE_PIXELS }
+}
+
+/// Union bounds of the most recent plan, packed x0,y0,x1,y1 into the caller's
+/// four ints. Half-open, logical pixels, top-left origin — the same space the
+/// DrawList uses. Returns 0 when the plan is empty.
+#[no_mangle]
+pub extern "C" fn ui_damage_bounds(out: *mut i32) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    unsafe {
+        let bounds = DAMAGE_BOUNDS;
+        for (index, value) in bounds.iter().enumerate() {
+            *out.add(index) = *value;
+        }
+        i32::from(bounds[2] > bounds[0] && bounds[3] > bounds[1])
     }
 }
 

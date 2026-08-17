@@ -8,6 +8,12 @@
   "covers/refl-note-main.png": {
     "linear": true
   },
+  "covers/cover-nsengine-main.png": {
+    "linear": true
+  },
+  "covers/refl-nsengine-main.png": {
+    "linear": true
+  },
   "covers/cover-cafe-main.png": {
     "linear": true
   },
@@ -102,6 +108,12 @@
     "linear": true
   },
   "covers/refl-vue-sfc-lab-main.png": {
+    "linear": true
+  },
+  "covers/cover-iphone16-demo-main.png": {
+    "linear": true
+  },
+  "covers/refl-iphone16-demo-main.png": {
     "linear": true
   },
   "covers/cover-zoomlab-main.png": {

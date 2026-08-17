@@ -28,6 +28,7 @@ import {
   bakedTimelines,
   registerAnimationTheme,
   resetAnimationBake,
+  setAnimationTickRate,
 } from "../framework/compiler/animation.ts";
 
 function props(rec: StyleRecord | null, variant: "base" | "focus" | "active" = "base"): Map<number, number> {
@@ -189,6 +190,12 @@ describe("text", () => {
     const m = props(parseClassLiteral("text-2xl font-bold text-white"));
     expect(m.get(PROP.fontSlot)).toBe(fontSlotFor(24, true));
     expect(m.get(PROP.textColor)).toBe(abgr(255, 255, 255));
+  });
+  test("appends 54px regular and bold slots without renumbering legacy slots", () => {
+    expect(fontSlotFor(36, true)).toBe(13);
+    expect(fontSlotFor(54, false)).toBe(14);
+    expect(fontSlotFor(54, true)).toBe(15);
+    expect(props(parseClassLiteral("text-5xl font-bold")).get(PROP.fontSlot)).toBe(15);
   });
   test("font-bold alone defaults to 16px bold", () => {
     const m = props(parseClassLiteral("font-bold"));
@@ -396,6 +403,28 @@ describe("baked keyframe animations", () => {
     expect(tl.tracks[0].segments[0].from).toBe(f32Bits(0));
     expect(tl.tracks[0].segments[0].to).toBe(f32Bits(360));
     expect(tl.tracks[0].segments[0].easing).toBe(ENUMS.Easing.Linear);
+  });
+
+  test("timelines bake at the declared tick rate", () => {
+    try {
+      setAnimationTickRate(120);
+      const rec = parseClassLiteral("animate-spin");
+      const tl = bakedTimelines()[rec!.animation!.anims[0]];
+      expect(tl.periodFrames).toBe(120); // 1 s of virtual time is hz frames
+      registerAnimationTheme({
+        keyframes: { fade: { from: { opacity: 0 }, to: { opacity: 1 } } },
+        animation: { fade: { value: "fade 0.5s linear 0.25s", loop: "2s" } },
+      });
+      const fade = parseClassLiteral("animate-fade")!;
+      const ftl = bakedTimelines()[fade.animation!.anims[0]];
+      expect(ftl.periodFrames).toBe(60); // 0.5 s
+      expect(ftl.delayFrames).toBe(30); // 0.25 s
+      expect(fade.animation!.loopFrames).toBe(240); // 2 s
+      expect(() => setAnimationTickRate(59.94)).toThrow(/integer from 1 through 240/);
+    } finally {
+      registerAnimationTheme(undefined);
+      setAnimationTickRate(60);
+    }
   });
 
   test("theme keyframes bake per-prop segments with frame-exact stops", () => {

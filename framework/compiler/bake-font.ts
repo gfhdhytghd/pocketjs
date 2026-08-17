@@ -1,7 +1,8 @@
 // framework/compiler/bake-font.ts — bakes Inter into FONT ATLAS blobs (spec.ts format).
 //
 // One blob per font slot (a (weight, px) pair — slot table pinned in
-// framework/compiler/tailwind.ts, sizes 12/14/16/18/20/24/36, regular + bold [R]).
+// framework/compiler/tailwind.ts, legacy sizes 12/14/16/18/20/24/36 in slots
+// 0..13 plus append-only 54px regular/bold slots 14..15 [R]).
 // Charset = codepoints collected from the AST scan + ASCII 32..126 ALWAYS +
 // an extraChars option [R]. Codepoints the font does not map are simply left
 // out — the core resolves cmap misses to gid 0 (tofu) at runtime.
@@ -81,8 +82,22 @@ function flatten(path: Path, curveSteps = CURVE_STEPS): Contour[] {
   let sy = 0;
   let cx = 0;
   let cy = 0;
+  // A contour has to end where it began, or the scanline fill below sees an
+  // unpaired edge and the row leaks. `Z` would say so explicitly, but
+  // opentype.js emits no `Z` for either outline format: a TrueType contour
+  // happens to end on its start point already, so the closing edge is
+  // degenerate and nothing was ever wrong here. A CFF contour is closed
+  // implicitly by the format and left open in the command list, so the edge
+  // from the last point back to the first is simply missing. Closing it costs
+  // one compare per contour and makes the fill independent of which format the
+  // outline came from.
   const close = () => {
-    if (cur.length > 1) contours.push(cur);
+    if (cur.length > 1) {
+      const first = cur[0];
+      const last = cur[cur.length - 1];
+      if (first.x !== last.x || first.y !== last.y) cur.push({ x: first.x, y: first.y });
+      contours.push(cur);
+    }
     cur = [];
   };
   for (const cmd of path.commands) {

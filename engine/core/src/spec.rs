@@ -473,3 +473,112 @@ pub mod btn {
 /// axis 0..255 with 128 = center. Hosts without a stick omit the arg;
 /// the runtime defaults to this value (so old tapes/goldens hold).
 pub const ANALOG_CENTER: u32 = 0x8080;
+
+/// AUDIO module boundary (contracts/spec/audio.ts — `globalThis.audio`).
+/// Credit-based PCM streaming; events batch to tick boundaries via poll().
+/// Frames consumed on virtual tick n at 60 ticks/s (the determinism
+/// contract): floor((n+1)*rate/60) - floor(n*rate/60).
+pub mod audio {
+    pub const OP_CREATE_STREAM: u8 = 1;
+    pub const OP_DESTROY_STREAM: u8 = 2;
+    pub const OP_WRITE_PCM: u8 = 3;
+    pub const OP_PLAY: u8 = 4;
+    pub const OP_PAUSE: u8 = 5;
+    pub const OP_STOP: u8 = 6;
+    pub const OP_SET_VOLUME: u8 = 7;
+    pub const OP_END_STREAM: u8 = 8;
+    pub const OP_POLL: u8 = 9;
+    /// Accepted stream rates: integer divisors of the PSP's native 44.1 kHz.
+    pub const RATES: [u32; 3] = [44100, 22050, 11025];
+    pub const MAX_CHANNELS: u32 = 2;
+    /// Per-stream ring capacity in SOURCE sample frames (credit ceiling).
+    pub const RING_FRAMES: usize = 16384;
+    pub const MAX_STREAMS: usize = 4;
+    pub const EVENT_CREDIT: &str = "credit";
+    pub const EVENT_UNDERRUN: &str = "underrun";
+    pub const EVENT_ENDED: &str = "ended";
+}
+
+/// DB module boundary (contracts/spec/db.ts — `globalThis.db`).
+/// SQLite behind five synchronous ops; rows cross as one JSON line per
+/// query() call. The module owns no clock and emits no events.
+pub mod db {
+    pub const OP_OPEN: u8 = 1;
+    pub const OP_CLOSE: u8 = 2;
+    pub const OP_EXEC: u8 = 3;
+    pub const OP_QUERY: u8 = 4;
+    pub const OP_LAST_ERROR: u8 = 5;
+    /// The in-memory database name (private to the handle).
+    pub const MEMORY: &str = ":memory:";
+    /// Marker key for a BLOB value inside a row or a parameter list.
+    pub const BLOB_KEY: &str = "$b";
+    /// Largest integer magnitude that crosses the boundary losslessly.
+    pub const MAX_SAFE_INTEGER: i64 = 9007199254740991;
+    pub const MAX_DATABASES: usize = 4;
+    /// Result-row ceiling per query() call (exceeding it fails the op).
+    pub const MAX_RESULT_ROWS: usize = 4096;
+}
+
+/// FS module boundary (contracts/spec/fs.ts — `globalThis.fs`).
+/// A per-app file tree behind nine synchronous ops; every path resolves
+/// under the app's own data root. No clock, no events, no mtime.
+pub mod fs {
+    pub const OP_READ: u8 = 1;
+    pub const OP_WRITE: u8 = 2;
+    pub const OP_REMOVE: u8 = 3;
+    pub const OP_LIST: u8 = 4;
+    pub const OP_STAT: u8 = 5;
+    pub const OP_MKDIR: u8 = 6;
+    pub const OP_RENAME: u8 = 7;
+    pub const OP_USAGE: u8 = 8;
+    pub const OP_LAST_ERROR: u8 = 9;
+    /// write() modes.
+    pub const WRITE_TRUNCATE: u32 = 0;
+    pub const WRITE_APPEND: u32 = 1;
+    /// Marker key for a bytes payload (db's blob spelling).
+    pub const BLOB_KEY: &str = "$b";
+    /// Maximum UTF-8 bytes in one path segment.
+    pub const MAX_SEGMENT_BYTES: usize = 64;
+    /// Maximum segments in a path.
+    pub const MAX_DEPTH: usize = 8;
+    /// Maximum total path length in bytes.
+    pub const MAX_PATH_BYTES: usize = 160;
+    /// Payload ceiling per read()/write() call, in bytes.
+    pub const MAX_IO_BYTES: usize = 65536;
+    /// Entries per list() call (paged via offset + eof).
+    pub const MAX_DIR_ENTRIES: usize = 256;
+}
+
+/// NET module boundary (contracts/spec/net.ts — `globalThis.net`).
+/// Bounded whole-response HTTP; completions batch to tick boundaries.
+pub mod net {
+    pub const OP_START: u8 = 1;
+    pub const OP_TAKE: u8 = 2;
+    pub const OP_CANCEL: u8 = 3;
+    pub const OP_POLL: u8 = 4;
+    pub const OP_LAST_ERROR: u8 = 5;
+    pub const MAX_INFLIGHT: usize = 2;
+    pub const MAX_REQUEST_BYTES: usize = 65536;
+    pub const DEFAULT_RESPONSE_BYTES: usize = 131072;
+    pub const MAX_RESPONSE_BYTES: usize = 262144;
+    pub const MAX_HEADERS: usize = 32;
+    pub const MAX_HEADER_BYTES: usize = 8192;
+    pub const DEFAULT_TIMEOUT_MS: u32 = 30000;
+    pub const MAX_TIMEOUT_MS: u32 = 120000;
+    pub const MAX_REDIRECTS: usize = 3;
+    pub const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    pub const EVENT_DONE: &str = "done";
+    pub const EVENT_ERROR: &str = "error";
+    pub const ERROR_UNAVAILABLE: &str = "unavailable";
+    pub const ERROR_INVALID_REQUEST: &str = "invalid_request";
+    pub const ERROR_BUSY: &str = "busy";
+    pub const ERROR_DNS: &str = "dns";
+    pub const ERROR_CONNECT: &str = "connect";
+    pub const ERROR_TLS: &str = "tls";
+    pub const ERROR_TIMEOUT: &str = "timeout";
+    pub const ERROR_REDIRECT: &str = "redirect";
+    pub const ERROR_RESPONSE_TOO_LARGE: &str = "response_too_large";
+    pub const ERROR_PROTOCOL: &str = "protocol";
+    pub const ERROR_CANCELLED: &str = "cancelled";
+    pub const ERROR_OTHER: &str = "other";
+}

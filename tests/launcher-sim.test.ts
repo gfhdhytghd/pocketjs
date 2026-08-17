@@ -71,6 +71,10 @@ describe("launcher registry admission", () => {
     expect(outputs).toContain("hero-main");
     expect(outputs).toContain("cafe-main");
     expect(outputs).toContain("im-main");
+    expect(outputs).toContain("motions-main");
+    expect(
+      registry.apps.find((app) => app.output === "motions-main")?.title,
+    ).toContain("yui540");
     expect(registry.apps.length).toBeGreaterThanOrEqual(15);
     // One entry per output (the root manifest duplicates apps/hero).
     expect(new Set(outputs).size).toBe(outputs.length);
@@ -83,9 +87,21 @@ describe("launcher registry admission", () => {
     }
   });
 
-  test("Vita admits the same current demo set through its own target profile", () => {
-    expect(vitaRegistry.apps).toEqual(registry.apps);
-    expect(vitaRegistry.apps).toHaveLength(17);
+  test("Vita admits every PSP demo, plus the touch-only surfaces", () => {
+    // Everything PSP admits, Vita admits (same entries, same metadata).
+    for (const app of registry.apps) {
+      expect(vitaRegistry.apps).toContainEqual(app);
+    }
+    // The Vita-only delta is exactly the demos requiring input.touch, which
+    // PSP does not advertise. The committed display registry is the union
+    // (scanDisplayRegistry); each host intersects at runtime.
+    const pspOutputs = new Set(registry.apps.map((a) => a.output));
+    const vitaOnly = vitaRegistry.apps
+      .map((a) => a.output)
+      .filter((output) => !pspOutputs.has(output));
+    expect(vitaOnly.sort()).toEqual(["iphone16-demo-main", "nsengine-main"]);
+    expect(registry.apps).toHaveLength(17);
+    expect(vitaRegistry.apps).toHaveLength(19);
   });
 
   test("committed registry.generated.ts is fresh (re-run tools/launcher.ts scan)", async () => {

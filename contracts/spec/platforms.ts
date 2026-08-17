@@ -136,6 +136,38 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // is the fallback spelling on targets without it.
   "input.text",
   "input.touch",
+  // Credit-based s16 PCM streaming through the audio module's own namespace
+  // (`globalThis.audio`, contracts/spec/audio.ts). Registered ahead of any
+  // stock TARGET advertising it: the web dev host and the sim host implement
+  // and test the whole contract, so apps can already declare the enhancement
+  // and degrade cleanly where the namespace is absent. A console target
+  // appends the id to its profile only when its native host ships the module
+  // (the ring/thread discipline to copy is hosts/psp/src/audio.rs).
+  "audio.pcm",
+  // Bounded whole-response HTTP through `fetch()` and the net module's own
+  // namespace (`globalThis.net`, contracts/spec/net.ts). Transport adapters
+  // remain host-owned; the browser dev host, deterministic sim and reference
+  // core exercise the contract without granting network access to every host.
+  "net.http",
+  // SQLite behind the db module's own namespace (`globalThis.db`,
+  // contracts/spec/db.ts): five synchronous ops, rows as one JSON line per
+  // query() call, per-app storage the host confines. Registered ahead of any
+  // stock TARGET advertising it: the sim host and the engine/crates/pocket-db
+  // reference core implement and test the whole contract, so apps can already
+  // declare the requirement and fail admission where the module is absent. A
+  // device target appends the id to its profile only when its native host
+  // ships the module.
+  "data.sqlite",
+  // A per-app file tree behind the fs module's own namespace
+  // (`globalThis.fs`, contracts/spec/fs.ts): nine synchronous ops, every
+  // path confined to the app's own data root — apps cannot name, let alone
+  // reach, each other's trees. Registered ahead of any stock TARGET
+  // advertising it: the sim host and the engine/crates/pocket-fs reference
+  // core implement and test the whole contract, so apps can already declare
+  // the requirement and fail admission where the module is absent. A device
+  // target appends the id to its profile only when its native host ships
+  // the module.
+  "data.fs",
   // Copy/cut/paste round-trips with the OS clipboard.
   "host.clipboard",
   // The logical viewport is runtime-mutable: the app is told about live
@@ -181,6 +213,9 @@ export const POCKET_TARGETS = defineTargetRegistry<PocketCapabilityId, {
       "input.analog.left",
       "input.buttons",
       "input.cursor",
+      // hosts/psp/src/audio_mod.rs: the audio module mounted as
+      // globalThis.audio (4-stream mixer on one 44.1 kHz normal channel).
+      "audio.pcm",
       "text.glyphs.baked",
     ],
   },

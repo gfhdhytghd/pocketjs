@@ -1,4 +1,4 @@
-// Deterministic codegen: contracts/spec/spec.ts -> engine/core/src/spec.rs.
+// Deterministic codegen: contracts/spec/{spec,audio,db,net}.ts -> engine/core/src/spec.rs.
 //
 // Run from PocketJS/:  bun contracts/spec/gen-rust.ts
 //
@@ -7,6 +7,49 @@
 // spec.ts. Keep this generator free of anything non-deterministic (no dates,
 // no env, no object-key sorting surprises — insertion order only).
 
+import {
+  AUDIO_EVENT,
+  AUDIO_MAX_CHANNELS,
+  AUDIO_MAX_STREAMS,
+  AUDIO_OP,
+  AUDIO_RATES,
+  AUDIO_RING_FRAMES,
+  audioFramesForTick,
+} from "./audio.ts";
+import {
+  DB_BLOB_KEY,
+  DB_MAX_DATABASES,
+  DB_MAX_RESULT_ROWS,
+  DB_MAX_SAFE_INTEGER,
+  DB_MEMORY,
+  DB_OP,
+} from "./db.ts";
+import {
+  FS_BLOB_KEY,
+  FS_MAX_DEPTH,
+  FS_MAX_DIR_ENTRIES,
+  FS_MAX_IO_BYTES,
+  FS_MAX_PATH_BYTES,
+  FS_MAX_SEGMENT_BYTES,
+  FS_OP,
+  FS_WRITE_APPEND,
+  FS_WRITE_TRUNCATE,
+} from "./fs.ts";
+import {
+  NET_DEFAULT_RESPONSE_BYTES,
+  NET_DEFAULT_TIMEOUT_MS,
+  NET_ERROR,
+  NET_EVENT,
+  NET_MAX_HEADER_BYTES,
+  NET_MAX_HEADERS,
+  NET_MAX_INFLIGHT,
+  NET_MAX_REDIRECTS,
+  NET_MAX_REQUEST_BYTES,
+  NET_MAX_RESPONSE_BYTES,
+  NET_MAX_TIMEOUT_MS,
+  NET_METHODS,
+  NET_OP,
+} from "./net.ts";
 import {
   ANALOG_CENTER,
   ANIMATABLE,
@@ -425,6 +468,114 @@ export function generateRust(): string {
   put("/// axis 0..255 with 128 = center. Hosts without a stick omit the arg;");
   put("/// the runtime defaults to this value (so old tapes/goldens hold).");
   put(`pub const ANALOG_CENTER: u32 = ${hex(ANALOG_CENTER, 4)};`);
+  put("");
+
+  // --- audio module -------------------------------------------------------------
+  // The audio MODULE's boundary (contracts/spec/audio.ts): its own op space,
+  // mounted as `globalThis.audio`, independent of the ui surface. A native
+  // host implementing it reads these constants; the ring/thread discipline to
+  // copy is hosts/psp/src/audio.rs (currently serving the video plane).
+  if (audioFramesForTick(22050, 0) !== 367 || audioFramesForTick(22050, 1) !== 368) {
+    throw new Error("audioFramesForTick drifted from the pinned Bresenham formula");
+  }
+  put("/// AUDIO module boundary (contracts/spec/audio.ts — `globalThis.audio`).");
+  put("/// Credit-based PCM streaming; events batch to tick boundaries via poll().");
+  put("/// Frames consumed on virtual tick n at 60 ticks/s (the determinism");
+  put("/// contract): floor((n+1)*rate/60) - floor(n*rate/60).");
+  put("pub mod audio {");
+  for (const [name, v] of Object.entries(AUDIO_OP)) {
+    put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
+  }
+  put(`    /// Accepted stream rates: integer divisors of the PSP's native 44.1 kHz.`);
+  put(`    pub const RATES: [u32; ${AUDIO_RATES.length}] = [${AUDIO_RATES.join(", ")}];`);
+  put(`    pub const MAX_CHANNELS: u32 = ${AUDIO_MAX_CHANNELS};`);
+  put(`    /// Per-stream ring capacity in SOURCE sample frames (credit ceiling).`);
+  put(`    pub const RING_FRAMES: usize = ${AUDIO_RING_FRAMES};`);
+  put(`    pub const MAX_STREAMS: usize = ${AUDIO_MAX_STREAMS};`);
+  for (const [name, v] of Object.entries(AUDIO_EVENT)) {
+    put(`    pub const EVENT_${screaming(name)}: &str = ${JSON.stringify(v)};`);
+  }
+  put("}");
+  put("");
+
+  // --- db module -----------------------------------------------------------
+  // The db MODULE's boundary (contracts/spec/db.ts): SQLite behind five
+  // synchronous ops, mounted as `globalThis.db`, independent of the ui
+  // surface. A native host implementing it reads these constants; the
+  // reference implementation is engine/crates/pocket-db.
+  put("/// DB module boundary (contracts/spec/db.ts — `globalThis.db`).");
+  put("/// SQLite behind five synchronous ops; rows cross as one JSON line per");
+  put("/// query() call. The module owns no clock and emits no events.");
+  put("pub mod db {");
+  for (const [name, v] of Object.entries(DB_OP)) {
+    put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
+  }
+  put(`    /// The in-memory database name (private to the handle).`);
+  put(`    pub const MEMORY: &str = ${JSON.stringify(DB_MEMORY)};`);
+  put(`    /// Marker key for a BLOB value inside a row or a parameter list.`);
+  put(`    pub const BLOB_KEY: &str = ${JSON.stringify(DB_BLOB_KEY)};`);
+  put(`    /// Largest integer magnitude that crosses the boundary losslessly.`);
+  put(`    pub const MAX_SAFE_INTEGER: i64 = ${DB_MAX_SAFE_INTEGER};`);
+  put(`    pub const MAX_DATABASES: usize = ${DB_MAX_DATABASES};`);
+  put(`    /// Result-row ceiling per query() call (exceeding it fails the op).`);
+  put(`    pub const MAX_RESULT_ROWS: usize = ${DB_MAX_RESULT_ROWS};`);
+  put("}");
+  put("");
+
+  // --- fs module -----------------------------------------------------------
+  // The fs MODULE's boundary (contracts/spec/fs.ts): a per-app file tree
+  // behind nine synchronous ops, mounted as `globalThis.fs`, independent of
+  // the ui surface. A native host implementing it reads these constants; the
+  // reference implementation is engine/crates/pocket-fs.
+  put("/// FS module boundary (contracts/spec/fs.ts — `globalThis.fs`).");
+  put("/// A per-app file tree behind nine synchronous ops; every path resolves");
+  put("/// under the app's own data root. No clock, no events, no mtime.");
+  put("pub mod fs {");
+  for (const [name, v] of Object.entries(FS_OP)) {
+    put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
+  }
+  put(`    /// write() modes.`);
+  put(`    pub const WRITE_TRUNCATE: u32 = ${FS_WRITE_TRUNCATE};`);
+  put(`    pub const WRITE_APPEND: u32 = ${FS_WRITE_APPEND};`);
+  put(`    /// Marker key for a bytes payload (db's blob spelling).`);
+  put(`    pub const BLOB_KEY: &str = ${JSON.stringify(FS_BLOB_KEY)};`);
+  put(`    /// Maximum UTF-8 bytes in one path segment.`);
+  put(`    pub const MAX_SEGMENT_BYTES: usize = ${FS_MAX_SEGMENT_BYTES};`);
+  put(`    /// Maximum segments in a path.`);
+  put(`    pub const MAX_DEPTH: usize = ${FS_MAX_DEPTH};`);
+  put(`    /// Maximum total path length in bytes.`);
+  put(`    pub const MAX_PATH_BYTES: usize = ${FS_MAX_PATH_BYTES};`);
+  put(`    /// Payload ceiling per read()/write() call, in bytes.`);
+  put(`    pub const MAX_IO_BYTES: usize = ${FS_MAX_IO_BYTES};`);
+  put(`    /// Entries per list() call (paged via offset + eof).`);
+  put(`    pub const MAX_DIR_ENTRIES: usize = ${FS_MAX_DIR_ENTRIES};`);
+  put("}");
+  put("");
+
+  // --- net module ---------------------------------------------------------------
+  put("/// NET module boundary (contracts/spec/net.ts — `globalThis.net`).");
+  put("/// Bounded whole-response HTTP; completions batch to tick boundaries.");
+  put("pub mod net {");
+  for (const [name, v] of Object.entries(NET_OP)) {
+    put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
+  }
+  put(`    pub const MAX_INFLIGHT: usize = ${NET_MAX_INFLIGHT};`);
+  put(`    pub const MAX_REQUEST_BYTES: usize = ${NET_MAX_REQUEST_BYTES};`);
+  put(`    pub const DEFAULT_RESPONSE_BYTES: usize = ${NET_DEFAULT_RESPONSE_BYTES};`);
+  put(`    pub const MAX_RESPONSE_BYTES: usize = ${NET_MAX_RESPONSE_BYTES};`);
+  put(`    pub const MAX_HEADERS: usize = ${NET_MAX_HEADERS};`);
+  put(`    pub const MAX_HEADER_BYTES: usize = ${NET_MAX_HEADER_BYTES};`);
+  put(`    pub const DEFAULT_TIMEOUT_MS: u32 = ${NET_DEFAULT_TIMEOUT_MS};`);
+  put(`    pub const MAX_TIMEOUT_MS: u32 = ${NET_MAX_TIMEOUT_MS};`);
+  put(`    pub const MAX_REDIRECTS: usize = ${NET_MAX_REDIRECTS};`);
+  put(`    pub const METHODS: [&str; ${NET_METHODS.length}] = [${NET_METHODS.map((method) => JSON.stringify(method)).join(", ")}];`);
+  for (const [name, v] of Object.entries(NET_EVENT)) {
+    put(`    pub const EVENT_${screaming(name)}: &str = ${JSON.stringify(v)};`);
+  }
+  for (const [name, v] of Object.entries(NET_ERROR)) {
+    put(`    pub const ERROR_${screaming(name)}: &str = ${JSON.stringify(v)};`);
+  }
+  put("}");
 
   return L.join("\n") + "\n";
 }
