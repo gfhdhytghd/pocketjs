@@ -1,0 +1,29 @@
+{
+  "$schema": "https://pocketjs.dev/schema/pocket-2.json",
+  "pocket": 2,
+  "id": "dev.pocket-stack.nokia-n9-demo",
+  "name": "pocketjs-nokia-n9-hero",
+  "title": "PocketJS: Nokia N9 Hero",
+  "version": "0.1.0",
+  "engine": {
+    "capabilities": {
+      "requires": [
+        "input.touch",
+        "display.viewport.live",
+        "text.glyphs.baked"
+      ]
+    }
+  },
+  "app": {
+    "entry": "apps/nokia-n9-demo/main.tsx",
+    "output": "nokia-n9-demo-main",
+    "framework": "solid",
+    "viewport": {
+      "dynamic": {
+        "default": [854, 480],
+        "min": [480, 480],
+        "max": [854, 854]
+      }
+    }
+  }
+}

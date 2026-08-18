@@ -12,13 +12,10 @@ use std::ffi::CString;
 
 use pocket_apple::{
     pocket_apple_create, pocket_apple_destroy, pocket_apple_eval_bundle, pocket_apple_frame,
-    pocket_apple_last_error, pocket_apple_load_pak, pocket_apple_render,
+    pocket_apple_last_error, pocket_apple_load_pak, pocket_apple_render, pocket_apple_set_identity,
     pocket_apple_set_tick_rate, PocketAppleFrame,
 };
 
-const WIDTH: u32 = 480;
-const HEIGHT: u32 = 272;
-const DENSITY: u32 = 2;
 const FRAMES: u32 = 180;
 
 fn last_error() -> String {
@@ -29,8 +26,16 @@ fn last_error() -> String {
     }
 }
 
-fn run_instance(bundle: &[u8], pak: &[u8], tick_hz: Option<u32>) -> (Vec<u8>, u32, u32, u64) {
-    let handle = pocket_apple_create(DENSITY, WIDTH, HEIGHT);
+fn run_instance(
+    bundle: &[u8],
+    pak: &[u8],
+    tick_hz: Option<u32>,
+    host: Option<(&CString, u32)>,
+    width: u32,
+    height: u32,
+    density: u32,
+) -> (Vec<u8>, u32, u32, u64) {
+    let handle = pocket_apple_create(density, width, height);
     assert!(!handle.is_null(), "create failed: {}", last_error());
     assert_eq!(
         pocket_apple_load_pak(handle, pak.as_ptr(), pak.len()),
@@ -38,6 +43,14 @@ fn run_instance(bundle: &[u8], pak: &[u8], tick_hz: Option<u32>) -> (Vec<u8>, u3
         "load_pak failed: {}",
         last_error()
     );
+    if let Some((id, abi)) = host {
+        assert_eq!(
+            pocket_apple_set_identity(handle, id.as_ptr(), abi),
+            0,
+            "set_identity failed: {}",
+            last_error()
+        );
+    }
     if let Some(hz) = tick_hz {
         assert_eq!(
             pocket_apple_set_tick_rate(handle, hz),
@@ -106,25 +119,66 @@ static LOGGER: StderrLogger = StderrLogger;
 fn main() {
     let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Debug));
     let args: Vec<String> = std::env::args().collect();
-    let bundle_path = args.get(1).map(String::as_str).unwrap_or("../dist/hero-main.js");
-    let pak_path = args.get(2).map(String::as_str).unwrap_or("../dist/hero-main.pak");
+    let bundle_path = args
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("../dist/hero-main.js");
+    let pak_path = args
+        .get(2)
+        .map(String::as_str)
+        .unwrap_or("../dist/hero-main.pak");
     let out_base = args.get(3).map(String::as_str).unwrap_or("/tmp/hero");
 
     let bundle = std::fs::read(bundle_path).expect("read bundle");
     let pak = std::fs::read(pak_path).expect("read pak");
-    let tick_hz = std::env::var("POCKET_TICK_HZ")
+    let tick_hz = std::env::var("POCKET_TICK_HZ").ok().map(|raw| {
+        raw.parse::<u32>()
+            .expect("POCKET_TICK_HZ must be an integer")
+    });
+    let width = std::env::var("POCKET_WIDTH")
         .ok()
-        .map(|raw| raw.parse::<u32>().expect("POCKET_TICK_HZ must be an integer"));
+        .map(|raw| raw.parse::<u32>().expect("POCKET_WIDTH must be an integer"))
+        .unwrap_or(480);
+    let height = std::env::var("POCKET_HEIGHT")
+        .ok()
+        .map(|raw| {
+            raw.parse::<u32>()
+                .expect("POCKET_HEIGHT must be an integer")
+        })
+        .unwrap_or(272);
+    let density = std::env::var("POCKET_DENSITY")
+        .ok()
+        .map(|raw| {
+            raw.parse::<u32>()
+                .expect("POCKET_DENSITY must be an integer")
+        })
+        .unwrap_or(2);
+    let host_id = std::env::var("POCKET_HOST_ID")
+        .ok()
+        .map(|id| CString::new(id).unwrap());
+    let host_abi = std::env::var("POCKET_HOST_ABI").ok().map(|raw| {
+        raw.parse::<u32>()
+            .expect("POCKET_HOST_ABI must be an integer")
+    });
+    let host = match (&host_id, host_abi) {
+        (Some(id), Some(abi)) => Some((id, abi)),
+        (None, None) => None,
+        _ => panic!("POCKET_HOST_ID and POCKET_HOST_ABI must be set together"),
+    };
 
-    let (first, w, h, damage_a) = run_instance(&bundle, &pak, tick_hz);
-    let (second, _, _, damage_b) = run_instance(&bundle, &pak, tick_hz);
+    let (first, w, h, damage_a) =
+        run_instance(&bundle, &pak, tick_hz, host, width, height, density);
+    let (second, _, _, damage_b) =
+        run_instance(&bundle, &pak, tick_hz, host, width, height, density);
 
-    let non_blank = first.chunks_exact(4).any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0);
+    let non_blank = first
+        .chunks_exact(4)
+        .any(|px| px[0] != 0 || px[1] != 0 || px[2] != 0);
     let deterministic = first == second;
 
     write_ppm(&format!("{out_base}-frame{FRAMES}.ppm"), &first, w, h);
     println!(
-        "rendered {FRAMES} frames at {w}x{h} (density {DENSITY}) | non_blank={non_blank} deterministic={deterministic} damage_px_a={damage_a} damage_px_b={damage_b}"
+        "rendered {FRAMES} frames at {w}x{h} (density {density}) | non_blank={non_blank} deterministic={deterministic} damage_px_a={damage_a} damage_px_b={damage_b}"
     );
     if !non_blank || !deterministic {
         std::process::exit(1);

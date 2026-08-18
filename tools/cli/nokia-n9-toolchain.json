@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "toolchainVersion": "qtsdk-1.2.1-harmattan-v1",
+  "container": {
+    "platform": "linux/amd64",
+    "baseImage": "debian:bullseye-slim@sha256:de70627667ac77b32ab6858f1acddfb04a4ff3acc1095ac17dbc19fe5725bcb6",
+    "debianSnapshot": "20260712T202631Z",
+    "debianSecuritySnapshot": "20260712T194830Z",
+    "image": "pocketjs-nokia-n9-toolchain:qtsdk-1.2.1-v1",
+    "volume": "pocketjs-nokia-n9-toolchain-v1"
+  },
+  "sdk": {
+    "asset": "QtSdk-offline-linux-x86_64-v1.2.1.zip",
+    "url": "https://n9.dy.fi/wp-content/uploads/2015/08/QtSdk-offline-linux-x86_64-v1.2.1.zip",
+    "bytes": 795165690,
+    "sha256": "04f0dbbac9be5c30104159af287beb44baed3ade5d24fc31649418b7c5d1e3ca",
+    "installer": "QtSdk-offline-linux-x86_64-v1.2.1.run",
+    "installerMd5": "d200c6aa8684e9963d2ea4354266da3f",
+    "installerSha256": "c95f2da84f4925a6d7f8bc6b3257a5565b097e51bb851223614378fc61772a0c"
+  },
+  "quickjs": {
+    "version": "2026-06-04",
+    "repository": "https://github.com/pocket-stack/quickjs-rs",
+    "rev": "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b",
+    "asset": "quickjs-rs-ba5bdd0dc013518768e76cd9e05cd30ed53dd35b.tar.gz",
+    "url": "https://codeload.github.com/pocket-stack/quickjs-rs/tar.gz/ba5bdd0dc013518768e76cd9e05cd30ed53dd35b",
+    "sha256": "c721a3645e4c8df526482c544450fe2bb6351e820471727511ac054c35f44fc3"
+  },
+  "downloadsCachePath": "nokia-n9/downloads",
+  "receipt": ".pocket-stack-nokia-n9.json",
+  "markers": [
+    "Madde/bin/mad",
+    "Madde/bin/mad-admin",
+    "Madde/sysroots/harmattan_sysroot_10.2011.34-1_slim/usr/include/qt4/QtCore/qglobal.h",
+    "Madde/sysroots/harmattan_sysroot_10.2011.34-1_slim/usr/include/meegotouch/MWindow",
+    "Madde/sysroots/harmattan_sysroot_10.2011.34-1_slim/usr/lib/libGLESv2.so"
+  ],
+  "device": {
+    "usbVendorId": "0421",
+    "storageProductId": "0518",
+    "model": "Nokia N9",
+    "defaultHost": "192.168.2.15",
+    "user": "developer"
+  },
+  "runtime": {
+    "rustToolchain": "nightly-2026-07-02",
+    "tickHz": 60,
+    "target": "nokia-n9-dev",
+    "hostAbi": 9
+  }
+}

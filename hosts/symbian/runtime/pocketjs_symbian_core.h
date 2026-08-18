@@ -98,6 +98,16 @@ int32_t ui_gl_render_over(
     int32_t window_width,
     int32_t window_height
 );
+int32_t ui_gl_render_rotated(
+    int32_t target_x,
+    int32_t target_y,
+    int32_t target_width,
+    int32_t target_height,
+    int32_t window_width,
+    int32_t window_height,
+    uint32_t quarter_turns
+);
+int32_t ui_hit_test_bounds(float x, float y);
 const uint8_t *ui_render_incremental(void);
 uint32_t ui_framebuffer_width(void);
 uint32_t ui_framebuffer_height(void);

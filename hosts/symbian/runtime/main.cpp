@@ -8,6 +8,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QList>
+#include <QMap>
 #include <QRect>
 #include <QResizeEvent>
 #include <QSize>
@@ -15,13 +16,25 @@
 #include <QStringList>
 #include <QTimerEvent>
 #include <QTouchEvent>
-#ifdef POCKETJS_PERF_TRACE
+#if defined(POCKETJS_PERF_TRACE) || defined(POCKETJS_HARMATTAN)
 #include <QTime>
+#endif
+#ifdef POCKETJS_HARMATTAN
+#include <QtAlgorithms>
 #endif
 #include <QVector>
 #include <QWidget>
 #include <QtGlobal>
 #include <QtOpenGL/QGLWidget>
+
+#ifdef POCKETJS_HARMATTAN
+#include <MApplication>
+#include <MWindow>
+#include <MExport>
+#include <stdio.h>
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #include <stdint.h>
 #include <string.h>
@@ -33,6 +46,38 @@ extern "C" {
 #include "pocketjs_symbian_core.h"
 #include "pocketjs_symbian_extension.h"
 #include "pocketjs_symbian_keys.h"
+#ifdef POCKETJS_HARMATTAN
+#include "pocketjs_n9_build.h"
+#endif
+
+#ifndef POCKETJS_TARGET_ID
+#ifdef POCKETJS_HARMATTAN
+#define POCKETJS_TARGET_ID "nokia-n9-dev"
+#else
+#define POCKETJS_TARGET_ID "symbian-e7-dev"
+#endif
+#endif
+
+#ifndef POCKETJS_MAXIMUM_VIEWPORT_EXTENT
+#define POCKETJS_MAXIMUM_VIEWPORT_EXTENT 640
+#endif
+
+#ifndef POCKETJS_RUNTIME_NAME
+#ifdef POCKETJS_HARMATTAN
+#define POCKETJS_RUNTIME_NAME "PocketJS Nokia N9"
+#else
+#define POCKETJS_RUNTIME_NAME "PocketJS E7"
+#endif
+#endif
+
+#ifdef POCKETJS_HARMATTAN
+#ifndef POCKETJS_BUILD_ID
+#error POCKETJS_BUILD_ID is required for the Harmattan acceptance paths
+#endif
+#ifndef POCKETJS_CAPTURE_FRAME_PERIOD
+#define POCKETJS_CAPTURE_FRAME_PERIOD 1
+#endif
+#endif
 
 typedef char PocketJsQuickJsValueMustBeEightBytes[
     sizeof(JSValue) == 8 ? 1 : -1
@@ -58,7 +103,34 @@ typedef char PocketJsQuickJsValueMustBeEightBytes[
 
 namespace {
 
-const int kMaximumViewportExtent = 640;
+#ifdef POCKETJS_HARMATTAN
+qint64 pocketJsMonotonicMicros()
+{
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return 0;
+    return static_cast<qint64>(value.tv_sec) * Q_INT64_C(1000000) +
+        static_cast<qint64>(value.tv_nsec / 1000);
+}
+
+bool pocketJsWriteAtomicFile(const QString &destination, const QByteArray &bytes)
+{
+    const QString temporary = destination + ".tmp";
+    QFile file(temporary);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    const bool written = file.write(bytes) == bytes.size() && file.flush();
+    if (written) fsync(file.handle());
+    file.close();
+    if (!written || ::rename(
+            temporary.toLocal8Bit().constData(),
+            destination.toLocal8Bit().constData()) != 0) {
+        QFile::remove(temporary);
+        return false;
+    }
+    return true;
+}
+#endif
+
+const int kMaximumViewportExtent = POCKETJS_MAXIMUM_VIEWPORT_EXTENT;
 const int kAnalogCenter = 0x8080;
 const int kMaximumTouches = 8;
 const int kCoreTicksPerFrame = 60 / POCKETJS_FRAME_RATE;
@@ -97,6 +169,9 @@ QGLFormat pocketJsGlFormat()
     QGLFormat format;
     format.setRgba(true);
     format.setDoubleBuffer(true);
+#ifdef POCKETJS_HARMATTAN
+    format.setSwapInterval(1);
+#endif
     const PocketJsSymbianExtensionV1 *extension =
         pocketJsNativeExtension();
     format.setDepth(
@@ -152,7 +227,9 @@ enum HostOperation {
     HostDebugRectXY,
     HostDebugRectWH,
     HostDebugPause,
-    HostDebugStep
+    HostDebugStep,
+    HostHitTestBounds,
+    HostReportAppAction
 };
 
 struct EmbeddedApp
@@ -180,6 +257,13 @@ bool lookupActivePackEntry(
     size_t keyLength,
     const uint8_t **data,
     size_t *length
+);
+
+void recordActiveAppAction(
+    PocketJsRuntime *runtime,
+    const char *name,
+    size_t nameLength,
+    int32_t value
 );
 
 JSValue hostAppTable(
@@ -471,7 +555,7 @@ bool parsePocketPackage(
             *error = "embedded .pocket variant is truncated";
             return false;
         }
-        if (target != "symbian-e7-dev") continue;
+        if (target != POCKETJS_TARGET_ID) continue;
         if (hostAbi != static_cast<uint32_t>(POCKETJS_HOST_ABI)) {
             *error = "embedded .pocket host ABI does not match this runtime";
             return false;
@@ -515,7 +599,7 @@ bool parsePocketPackage(
     }
 
     if (!foundVariant) {
-        *error = "embedded .pocket has no symbian-e7-dev variant";
+        *error = "embedded .pocket has no variant for this Qt host";
         return false;
     }
     if (identityOffset < 0 || javaScriptOffset < 0 ||
@@ -849,6 +933,16 @@ JSValue hostOperation(
             ui_hit_test(static_cast<float>(da), static_cast<float>(db))
         );
 
+    case HostHitTestBounds:
+        if (!floatArgument(context, argc, argv, 0, &da) ||
+            !floatArgument(context, argc, argv, 1, &db)) {
+            return JS_EXCEPTION;
+        }
+        return JS_NewInt32(
+            context,
+            ui_hit_test_bounds(static_cast<float>(da), static_cast<float>(db))
+        );
+
     case HostSetCursor:
         if (!intArgument(context, argc, argv, 0, &a) ||
             !floatArgument(context, argc, argv, 1, &da) ||
@@ -964,6 +1058,22 @@ JSValue hostOperation(
     case HostDebugStep:
         ui_debug_step();
         return JS_UNDEFINED;
+
+    case HostReportAppAction: {
+        if (!stringArgument(context, argc, argv, 0, &text, &textLength) ||
+            !intArgument(context, argc, argv, 1, &a)) {
+            if (text != 0) JS_FreeCString(context, text);
+            return JS_EXCEPTION;
+        }
+        recordActiveAppAction(
+            static_cast<PocketJsRuntime *>(JS_GetContextOpaque(context)),
+            text,
+            textLength,
+            a
+        );
+        JS_FreeCString(context, text);
+        return JS_UNDEFINED;
+    }
     }
 
     return JS_ThrowInternalError(context, "unknown PocketJS HostOp");
@@ -1018,6 +1128,7 @@ bool installHostOps(
     addHostOperation(context, ui, "setFocus", 1, HostSetFocus);
     addHostOperation(context, ui, "setActive", 2, HostSetActive);
     addHostOperation(context, ui, "hitTest", 2, HostHitTest);
+    addHostOperation(context, ui, "hitTestBounds", 2, HostHitTestBounds);
     addHostOperation(context, ui, "setCursor", 5, HostSetCursor);
     addHostOperation(context, ui, "setCursorPos", 2, HostSetCursorPos);
     addHostOperation(context, ui, "loadStyles", 1, HostLoadStyles);
@@ -1031,6 +1142,13 @@ bool installHostOps(
     addHostOperation(context, ui, "debugRectWH", 0, HostDebugRectWH);
     addHostOperation(context, ui, "debugPause", 1, HostDebugPause);
     addHostOperation(context, ui, "debugStep", 0, HostDebugStep);
+    addHostOperation(
+        context,
+        ui,
+        "__reportAppAction",
+        2,
+        HostReportAppAction
+    );
     if (multiApp) {
         JS_SetPropertyStr(
             context,
@@ -1071,13 +1189,19 @@ bool installHostOps(
         context,
         ui,
         "__host",
-        JS_NewString(context, "symbian-e7-dev")
+        JS_NewString(context, POCKETJS_TARGET_ID)
     );
     JS_SetPropertyStr(
         context,
         ui,
         "__hostAbi",
         JS_NewInt32(context, POCKETJS_HOST_ABI)
+    );
+    JS_SetPropertyStr(
+        context,
+        ui,
+        "__tickHz",
+        JS_NewInt32(context, POCKETJS_FRAME_RATE)
     );
 
     // Deliberately publish neither __textures nor __sprites. The target-bound
@@ -1166,6 +1290,13 @@ public:
         size_t *length
     ) const;
     bool requestAppLaunch(const QString &output);
+    void recordAppAction(const QString &name, int value);
+#ifdef POCKETJS_HARMATTAN
+    void beginHarmattanOrientation(M::OrientationAngle angle);
+    void finishHarmattanOrientation(M::OrientationAngle angle);
+    void setHarmattanDisplayActive(bool active);
+    QByteArray nokiaN9StatusJson() const;
+#endif
 
 protected:
     bool event(QEvent *event);
@@ -1199,6 +1330,12 @@ private:
     void requestSummon();
     void runFrame();
     void updateTouches(QTouchEvent *event);
+#ifdef POCKETJS_HARMATTAN
+    void captureNokiaN9Frame();
+    void resetNokiaN9PerformanceWindow();
+    void writeNokiaN9Status();
+    QString nokiaN9Path(const char *suffix) const;
+#endif
 
     JSRuntime *runtime_;
     JSContext *context_;
@@ -1217,6 +1354,8 @@ private:
     const PocketJsSymbianExtensionV1 *extension_;
     QLabel *errorLabel_;
     QVector<uint32_t> touches_;
+    QVector<int32_t> touchHits_;
+    QMap<int, int32_t> touchHitById_;
     QSize viewportSize_;
     QSize pendingViewportSize_;
     QSize windowSize_;
@@ -1228,6 +1367,10 @@ private:
     int pendingApp_;
     int resumeApp_;
     int frozenShotHandle_;
+    QString actionName_;
+    int actionValue_;
+    uint32_t actionSequence_;
+    uint32_t completedTouchSequences_;
     bool coreInitialized_;
     bool initialized_;
     bool guestLiveViewport_;
@@ -1236,6 +1379,33 @@ private:
     bool selectLatched_;
     bool failed_;
     bool glInitialized_;
+#ifdef POCKETJS_HARMATTAN
+    uint32_t quarterTurns_;
+    uint32_t orientationTransitions_;
+    bool displayActive_;
+    bool orientationAnimating_;
+    QString runtimeError_;
+    QString glVersion_;
+    QString glVendor_;
+    QString glRenderer_;
+    int glMaximumTextureSize_;
+    uint64_t heartbeat_;
+    uint64_t guestFrames_;
+    uint64_t presentedFrames_;
+    uint32_t contextGeneration_;
+    uint32_t preparedContextGeneration_;
+    qint64 lastPresentUs_;
+    qint64 lastStatusWriteUs_;
+    qint64 lastJavaScriptUs_;
+    qint64 lastPendingJobsUs_;
+    qint64 lastCoreTickUs_;
+    qint64 lastGlSubmitUs_;
+    qint64 lastSwapUs_;
+    qint64 lastTotalFrameUs_;
+    QVector<qint64> frameIntervalsUs_;
+    int warmupFramesRemaining_;
+    bool skipNextFrameInterval_;
+#endif
 };
 
 bool lookupActivePackEntry(
@@ -1281,6 +1451,9 @@ PocketJsRuntime::PocketJsRuntime()
       pendingApp_(-1),
       resumeApp_(-1),
       frozenShotHandle_(-1),
+      actionValue_(0),
+      actionSequence_(0),
+      completedTouchSequences_(0),
       coreInitialized_(false),
       initialized_(false),
       guestLiveViewport_(true),
@@ -1289,13 +1462,39 @@ PocketJsRuntime::PocketJsRuntime()
       selectLatched_(true),
       failed_(false),
       glInitialized_(false)
+#ifdef POCKETJS_HARMATTAN
+      , quarterTurns_(0),
+      orientationTransitions_(0),
+      displayActive_(true),
+      orientationAnimating_(false),
+      glMaximumTextureSize_(0),
+      heartbeat_(0),
+      guestFrames_(0),
+      presentedFrames_(0),
+      contextGeneration_(0),
+      preparedContextGeneration_(0),
+      lastPresentUs_(0),
+      lastStatusWriteUs_(0),
+      lastJavaScriptUs_(0),
+      lastPendingJobsUs_(0),
+      lastCoreTickUs_(0),
+      lastGlSubmitUs_(0),
+      lastSwapUs_(0),
+      lastTotalFrameUs_(0),
+      warmupFramesRemaining_(120),
+      skipNextFrameInterval_(true)
+#endif
 {
 #ifdef POCKETJS_PERF_TRACE
     QFile::remove("E:/Installs/pocketjs-perf.tsv");
 #endif
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+#ifndef POCKETJS_HARMATTAN
     setAttribute(Qt::WA_AutoOrientation, true);
+#else
+    setAutoBufferSwap(false);
+#endif
     // This surface is a controller, not a Qt text editor. Do not advertise
     // input-method capabilities; controller identity comes from nativeScanCode.
     setAttribute(Qt::WA_InputMethodEnabled, false);
@@ -1317,7 +1516,12 @@ PocketJsRuntime::PocketJsRuntime()
     // QApplication::exec() starts only after main() calls showFullScreen().
     // The first timer event therefore observes the native fullscreen extent
     // instead of QWidget's pre-show default geometry.
-    const int interval = qMax(1, 1000 / POCKETJS_FRAME_RATE);
+    const int interval =
+#ifdef POCKETJS_HARMATTAN
+        0;
+#else
+        qMax(1, 1000 / POCKETJS_FRAME_RATE);
+#endif
     timer_.start(interval, this);
 }
 
@@ -1340,6 +1544,8 @@ void PocketJsRuntime::clearInput()
     nativeKeys_ = 0;
     pressedNativeKeys_ = 0;
     touches_.clear();
+    touchHits_.clear();
+    touchHitById_.clear();
 }
 
 void PocketJsRuntime::destroyGuest()
@@ -1830,6 +2036,96 @@ int PocketJsRuntime::frozenShotHandle() const
     return frozenShotHandle_;
 }
 
+void PocketJsRuntime::recordAppAction(const QString &name, int value)
+{
+    actionName_ = name;
+    actionValue_ = value;
+    ++actionSequence_;
+}
+
+#ifdef POCKETJS_HARMATTAN
+void PocketJsRuntime::resetNokiaN9PerformanceWindow()
+{
+    frameIntervalsUs_.clear();
+    warmupFramesRemaining_ = 120;
+    lastPresentUs_ = 0;
+    skipNextFrameInterval_ = true;
+}
+
+void PocketJsRuntime::beginHarmattanOrientation(M::OrientationAngle angle)
+{
+    uint32_t turns = 0;
+    if (angle == M::Angle270) {
+        turns = 3;
+    } else if (angle != M::Angle0) {
+        fail("PocketJS Nokia N9 supports only normal landscape and portrait.");
+        return;
+    }
+    const QSize viewport = (turns & 1U) != 0
+        ? QSize(480, 854)
+        : QSize(854, 480);
+    orientationAnimating_ = true;
+    if (turns != quarterTurns_) {
+        quarterTurns_ = turns;
+        ++orientationTransitions_;
+    }
+    clearInput();
+    resetNokiaN9PerformanceWindow();
+    queueViewport(viewport);
+}
+
+void PocketJsRuntime::finishHarmattanOrientation(M::OrientationAngle angle)
+{
+    beginHarmattanOrientation(angle);
+    orientationAnimating_ = false;
+    update();
+}
+
+void PocketJsRuntime::setHarmattanDisplayActive(bool active)
+{
+    displayActive_ = active;
+    if (!active) {
+        clearInput();
+        resetNokiaN9PerformanceWindow();
+        preparedContextGeneration_ = 0;
+    }
+    if (active) {
+        resetNokiaN9PerformanceWindow();
+        if (coreInitialized_ && isValid() &&
+            preparedContextGeneration_ != contextGeneration_) {
+            makeCurrent();
+            glInitialized_ = ui_gl_initialize() != 0;
+            preparedContextGeneration_ = contextGeneration_;
+            doneCurrent();
+            if (!glInitialized_) fail("PocketJS could not restore the GLES2 renderer.");
+        }
+        update();
+    }
+}
+
+
+QString PocketJsRuntime::nokiaN9Path(const char *suffix) const
+{
+    return QString("/tmp/pocketjs-n9-%1%2")
+        .arg(POCKETJS_BUILD_ID)
+        .arg(QString::fromLatin1(suffix));
+}
+#endif
+
+void recordActiveAppAction(
+    PocketJsRuntime *runtime,
+    const char *name,
+    size_t nameLength,
+    int32_t value
+)
+{
+    if (runtime == 0 || name == 0) return;
+    runtime->recordAppAction(
+        QString::fromUtf8(name, static_cast<int>(nameLength)),
+        value
+    );
+}
+
 bool PocketJsRuntime::requestAppLaunch(const QString &output)
 {
     for (int index = 0; index < apps_.size(); ++index) {
@@ -1924,9 +2220,13 @@ void PocketJsRuntime::fail(const QString &message)
 {
     if (failed_) return;
     failed_ = true;
+#ifdef POCKETJS_HARMATTAN
+    runtimeError_ = message;
+    writeNokiaN9Status();
+#endif
     timer_.stop();
     errorLabel_->setText(
-        QString("PocketJS E7 runtime stopped\n\n%1").arg(message)
+        QString(POCKETJS_RUNTIME_NAME " runtime stopped\n\n%1").arg(message)
     );
     errorLabel_->setGeometry(rect());
     errorLabel_->show();
@@ -2080,6 +2380,10 @@ QRect PocketJsRuntime::presentationRect() const
 
 void PocketJsRuntime::runFrame()
 {
+#ifdef POCKETJS_HARMATTAN
+    const qint64 frameStartUs = pocketJsMonotonicMicros();
+    const qint64 javaScriptStartUs = frameStartUs;
+#endif
 #ifdef POCKETJS_PERF_TRACE
     static QTime frameClock;
     int frameDeltaMs = 0;
@@ -2118,6 +2422,7 @@ void PocketJsRuntime::runFrame()
     }
 
     JSValue touchArray = JS_NewArray(context_);
+    JSValue hitArray = JS_NewArray(context_);
     for (int index = 0; index < touches_.size(); ++index) {
         JS_SetPropertyUint32(
             context_,
@@ -2125,29 +2430,47 @@ void PocketJsRuntime::runFrame()
             static_cast<uint32_t>(index),
             JS_NewUint32(context_, touches_.at(index))
         );
+        JS_SetPropertyUint32(
+            context_,
+            hitArray,
+            static_cast<uint32_t>(index),
+            JS_NewInt32(context_, touchHits_.value(index, 0))
+        );
     }
 
-    JSValue arguments[3];
+    JSValue arguments[4];
     arguments[0] = JS_NewInt32(context_, frameButtons);
     arguments[1] = JS_NewInt32(context_, kAnalogCenter);
     arguments[2] = touchArray;
+    arguments[3] = hitArray;
     JSValue result = JS_Call(
         context_,
         frame_,
         global_,
-        3,
+        4,
         arguments
     );
     JS_FreeValue(context_, arguments[0]);
     JS_FreeValue(context_, arguments[1]);
     JS_FreeValue(context_, touchArray);
+    JS_FreeValue(context_, hitArray);
+#ifdef POCKETJS_HARMATTAN
+    const qint64 javaScriptEndUs = pocketJsMonotonicMicros();
+#endif
 
     if (JS_IsException(result)) {
         fail(takeException(context_));
         return;
     }
     JS_FreeValue(context_, result);
+#ifdef POCKETJS_HARMATTAN
+    ++guestFrames_;
+    const qint64 pendingJobsStartUs = pocketJsMonotonicMicros();
+#endif
     if (!drainJobs()) return;
+#ifdef POCKETJS_HARMATTAN
+    const qint64 pendingJobsEndUs = pocketJsMonotonicMicros();
+#endif
     if (extension_ != 0 &&
         extension_->after_guest != 0 &&
         extension_->after_guest(context_) == 0) {
@@ -2157,17 +2480,58 @@ void PocketJsRuntime::runFrame()
 #ifdef POCKETJS_PERF_TRACE
     const int jsMs = perfTimer.elapsed();
 #endif
+#ifdef POCKETJS_HARMATTAN
+    const qint64 coreTickStartUs = pocketJsMonotonicMicros();
+#endif
 
     for (int tick = 0; tick < kCoreTicksPerFrame; ++tick) {
         ui_tick();
     }
+#ifdef POCKETJS_HARMATTAN
+    const qint64 coreTickEndUs = pocketJsMonotonicMicros();
+#endif
 #ifdef POCKETJS_PERF_TRACE
     const int tickEndMs = perfTimer.elapsed();
 #endif
-    // QGLWidget::updateGL() is synchronous: paintGL() submits this frame and
-    // auto-swaps before a pending guest switch can release its DrawList and
-    // texture storage.
+    // updateGL() submits synchronously. Harmattan disables QGLWidget's
+    // implicit swap so the blocking, interval-1 present is measured and the
+    // next zero-delay event cannot run before it completes.
     updateGL();
+#ifdef POCKETJS_HARMATTAN
+    if (failed_) return;
+    const qint64 glSubmitEndUs = pocketJsMonotonicMicros();
+    swapBuffers();
+    const qint64 presentUs = pocketJsMonotonicMicros();
+    lastJavaScriptUs_ = javaScriptEndUs - javaScriptStartUs;
+    lastPendingJobsUs_ = pendingJobsEndUs - pendingJobsStartUs;
+    lastCoreTickUs_ = coreTickEndUs - coreTickStartUs;
+    lastGlSubmitUs_ = glSubmitEndUs - coreTickEndUs;
+    lastSwapUs_ = presentUs - glSubmitEndUs;
+    lastTotalFrameUs_ = presentUs - frameStartUs;
+
+    if (lastPresentUs_ > 0 && !skipNextFrameInterval_) {
+        const qint64 intervalUs = presentUs - lastPresentUs_;
+        if (intervalUs > 0) {
+            if (warmupFramesRemaining_ > 0) {
+                --warmupFramesRemaining_;
+            } else {
+                frameIntervalsUs_.append(intervalUs);
+                if (frameIntervalsUs_.size() > 600) {
+                    frameIntervalsUs_.remove(0);
+                }
+            }
+        }
+    }
+    lastPresentUs_ = presentUs;
+    skipNextFrameInterval_ = false;
+    ++presentedFrames_;
+    ++heartbeat_;
+    if (lastStatusWriteUs_ == 0 ||
+        presentUs - lastStatusWriteUs_ >= Q_INT64_C(1000000)) {
+        writeNokiaN9Status();
+        lastStatusWriteUs_ = presentUs;
+    }
+#endif
 #ifdef POCKETJS_PERF_TRACE
     const int presentEndMs = perfTimer.elapsed();
     static int perfFrame = 0;
@@ -2292,6 +2656,7 @@ void PocketJsRuntime::finishPendingSwitch()
 void PocketJsRuntime::updateTouches(QTouchEvent *touchEvent)
 {
     touches_.clear();
+    touchHits_.clear();
 
     if (!initialized_ ||
         hasPendingViewport_) {
@@ -2306,27 +2671,76 @@ void PocketJsRuntime::updateTouches(QTouchEvent *touchEvent)
          index < points.size() && touches_.size() < kMaximumTouches;
          ++index) {
         const QTouchEvent::TouchPoint &point = points.at(index);
-        if (point.state() == Qt::TouchPointReleased) continue;
+        if (point.state() == Qt::TouchPointReleased) {
+            if (touchHitById_.remove(point.id()) > 0) {
+                ++completedTouchSequences_;
+            }
+            continue;
+        }
 
         const QPointF position = point.pos();
         if (position.x() < target.left() ||
             position.x() >= target.left() + target.width() ||
             position.y() < target.top() ||
             position.y() >= target.top() + target.height()) {
+            touchHitById_.remove(point.id());
             continue;
         }
-        int x = static_cast<int>(
+        int x = 0;
+        int y = 0;
+#ifdef POCKETJS_HARMATTAN
+        const int orientedWidth = (quarterTurns_ & 1U) != 0
+            ? viewportSize_.height()
+            : viewportSize_.width();
+        const int orientedHeight = (quarterTurns_ & 1U) != 0
+            ? viewportSize_.width()
+            : viewportSize_.height();
+        const int orientedX = static_cast<int>(
+            (position.x() - target.left()) * orientedWidth / target.width()
+        );
+        const int orientedY = static_cast<int>(
+            (position.y() - target.top()) * orientedHeight / target.height()
+        );
+        switch (quarterTurns_ & 3U) {
+        case 1:
+            x = orientedY;
+            y = viewportSize_.height() - 1 - orientedX;
+            break;
+        case 2:
+            x = viewportSize_.width() - 1 - orientedX;
+            y = viewportSize_.height() - 1 - orientedY;
+            break;
+        case 3:
+            x = viewportSize_.width() - 1 - orientedY;
+            y = orientedX;
+            break;
+        default:
+            x = orientedX;
+            y = orientedY;
+            break;
+        }
+#else
+        x = static_cast<int>(
             (position.x() - target.left()) *
             viewportSize_.width() /
             target.width()
         );
-        int y = static_cast<int>(
+        y = static_cast<int>(
             (position.y() - target.top()) *
             viewportSize_.height() /
             target.height()
         );
+#endif
         x = qBound(0, x, viewportSize_.width() - 1);
         y = qBound(0, y, viewportSize_.height() - 1);
+        if (point.state() == Qt::TouchPointPressed) {
+            touchHitById_.insert(
+                point.id(),
+                ui_hit_test_bounds(static_cast<float>(x), static_cast<float>(y))
+            );
+        } else if (!touchHitById_.contains(point.id())) {
+            continue;
+        }
         // Compatibility extension wire. Legacy contacts keep bit 31 clear
         // with 9-bit x/y. E7 contacts set it and carry 10-bit x/y so the
         // native 640px viewport never truncates coordinates:
@@ -2337,6 +2751,7 @@ void PocketJsRuntime::updateTouches(QTouchEvent *touchEvent)
             ((static_cast<uint32_t>(y) & 0x3ff) << 10) |
             (static_cast<uint32_t>(x) & 0x3ff);
         touches_.append(packed);
+        touchHits_.append(touchHitById_.value(point.id(), 0));
     }
 }
 
@@ -2354,6 +2769,10 @@ bool PocketJsRuntime::event(QEvent *event)
 
 void PocketJsRuntime::keyPressEvent(QKeyEvent *event)
 {
+#ifdef POCKETJS_HARMATTAN
+    QGLWidget::keyPressEvent(event);
+    return;
+#else
     const int key = pocketjsSymbianControlKey(
         event->key(),
         event->nativeScanCode()
@@ -2375,10 +2794,15 @@ void PocketJsRuntime::keyPressEvent(QKeyEvent *event)
         return;
     }
     QGLWidget::keyPressEvent(event);
+#endif
 }
 
 void PocketJsRuntime::keyReleaseEvent(QKeyEvent *event)
 {
+#ifdef POCKETJS_HARMATTAN
+    QGLWidget::keyReleaseEvent(event);
+    return;
+#else
     const int key = pocketjsSymbianControlKey(
         event->key(),
         event->nativeScanCode()
@@ -2396,6 +2820,7 @@ void PocketJsRuntime::keyReleaseEvent(QKeyEvent *event)
         return;
     }
     QGLWidget::keyReleaseEvent(event);
+#endif
 }
 
 void PocketJsRuntime::focusOutEvent(QFocusEvent *event)
@@ -2406,11 +2831,20 @@ void PocketJsRuntime::focusOutEvent(QFocusEvent *event)
 
 void PocketJsRuntime::initializeGL()
 {
+#ifdef POCKETJS_HARMATTAN
+    ++contextGeneration_;
+#endif
     const char *version = reinterpret_cast<const char *>(glGetString(GL_VERSION));
     const char *vendor = reinterpret_cast<const char *>(glGetString(GL_VENDOR));
     const char *renderer = reinterpret_cast<const char *>(glGetString(GL_RENDERER));
     GLint maximumTextureSize = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximumTextureSize);
+#ifdef POCKETJS_HARMATTAN
+    glVersion_ = QString::fromLatin1(version == 0 ? "unknown" : version);
+    glVendor_ = QString::fromLatin1(vendor == 0 ? "unknown" : vendor);
+    glRenderer_ = QString::fromLatin1(renderer == 0 ? "unknown" : renderer);
+    glMaximumTextureSize_ = maximumTextureSize;
+#endif
     qWarning(
         "PocketJS GLES2: version=%s vendor=%s renderer=%s maxTexture=%d",
         version == 0 ? "unknown" : version,
@@ -2440,6 +2874,9 @@ void PocketJsRuntime::initializeGL()
         return;
     }
     glInitialized_ = ui_gl_initialize() != 0;
+#ifdef POCKETJS_HARMATTAN
+    preparedContextGeneration_ = glInitialized_ ? contextGeneration_ : 0;
+#endif
     if (!glInitialized_) {
         fail("PocketJS could not initialize the OpenGL ES 2 renderer.");
     }
@@ -2470,16 +2907,9 @@ void PocketJsRuntime::paintGL()
         }
         nativeRendered = true;
     }
-    const int uiRendered = nativeRendered
-        ? ui_gl_render_over(
-            target.x(),
-            target.y(),
-            target.width(),
-            target.height(),
-            width(),
-            height()
-        )
-        : ui_gl_render(
+    int uiRendered = 0;
+    if (nativeRendered) {
+        uiRendered = ui_gl_render_over(
             target.x(),
             target.y(),
             target.width(),
@@ -2487,10 +2917,35 @@ void PocketJsRuntime::paintGL()
             width(),
             height()
         );
+    } else {
+#ifdef POCKETJS_HARMATTAN
+        uiRendered = ui_gl_render_rotated(
+            target.x(),
+            target.y(),
+            target.width(),
+            target.height(),
+            width(),
+            height(),
+            quarterTurns_
+        );
+#else
+        uiRendered = ui_gl_render(
+            target.x(),
+            target.y(),
+            target.width(),
+            target.height(),
+            width(),
+            height()
+        );
+#endif
+    }
     if (uiRendered == 0) {
         fail("PocketJS OpenGL ES 2 rendering failed.");
         return;
     }
+#ifdef POCKETJS_HARMATTAN
+    captureNokiaN9Frame();
+#endif
     if (pendingApp_ >= 0 && pendingSummon_) {
         // QGLWidget auto-swaps only after paintGL returns, so this captures
         // the outgoing guest's just-rendered back buffer, never an undefined
@@ -2499,9 +2954,172 @@ void PocketJsRuntime::paintGL()
     }
 }
 
+#ifdef POCKETJS_HARMATTAN
+QByteArray PocketJsRuntime::nokiaN9StatusJson() const
+{
+    QVector<qint64> sorted = frameIntervalsUs_;
+    qSort(sorted);
+    qint64 sum = 0;
+    qint64 maximum = 0;
+    int missed = 0;
+    for (int index = 0; index < sorted.size(); ++index) {
+        const qint64 value = sorted.at(index);
+        sum += value;
+        maximum = qMax(maximum, value);
+        if (value >= Q_INT64_C(25000)) ++missed;
+    }
+    const qint64 p95 = sorted.isEmpty()
+        ? 0
+        : sorted.at(qMin(
+            sorted.size() - 1,
+            (sorted.size() * 95 + 99) / 100 - 1
+        ));
+    const double averageHz = sum > 0
+        ? (1000000.0 * sorted.size()) / static_cast<double>(sum)
+        : 0.0;
+
+    QByteArray json("{");
+    json.append("\"schema\":1,\"build_id\":");
+    appendJsonString(&json, QString::fromLatin1(POCKETJS_BUILD_ID));
+    json.append(",\"target\":\"nokia-n9-dev\",\"host_abi\":9");
+    json.append(",\"pid\":");
+    json.append(QByteArray::number(static_cast<qlonglong>(getpid())));
+    json.append(",\"state\":");
+    appendJsonString(&json, failed_ ? QString("error") : QString("running"));
+    json.append(",\"error\":");
+    appendJsonString(&json, runtimeError_);
+    json.append(",\"heartbeat\":");
+    json.append(QByteArray::number(heartbeat_));
+    json.append(",\"guest_frames\":");
+    json.append(QByteArray::number(guestFrames_));
+    json.append(",\"presented_frames\":");
+    json.append(QByteArray::number(presentedFrames_));
+    json.append(",\"logical_width\":");
+    json.append(QByteArray::number(viewportSize_.width()));
+    json.append(",\"logical_height\":");
+    json.append(QByteArray::number(viewportSize_.height()));
+    json.append(",\"physical_width\":");
+    json.append(QByteArray::number(width()));
+    json.append(",\"physical_height\":");
+    json.append(QByteArray::number(height()));
+    json.append(",\"orientation\":");
+    appendJsonString(
+        &json,
+        (quarterTurns_ & 1U) != 0 ? QString("portrait") : QString("landscape")
+    );
+    json.append(",\"quarter_turns\":");
+    json.append(QByteArray::number(quarterTurns_));
+    json.append(",\"orientation_transitions\":");
+    json.append(QByteArray::number(orientationTransitions_));
+    json.append(",\"context_generation\":");
+    json.append(QByteArray::number(contextGeneration_));
+    json.append(",\"display_active\":");
+    json.append(displayActive_ ? "true" : "false");
+    json.append(",\"tick_hz\":60,\"renderer\":\"gles2\",\"gl_version\":");
+    appendJsonString(&json, glVersion_);
+    json.append(",\"gl_vendor\":");
+    appendJsonString(&json, glVendor_);
+    json.append(",\"gl_renderer\":");
+    appendJsonString(&json, glRenderer_);
+    json.append(",\"gl_max_texture_size\":");
+    json.append(QByteArray::number(glMaximumTextureSize_));
+    json.append(",\"completed_touch_sequences\":");
+    json.append(QByteArray::number(completedTouchSequences_));
+    json.append(",\"action_name\":");
+    appendJsonString(&json, actionName_);
+    json.append(",\"action_value\":");
+    json.append(QByteArray::number(actionValue_));
+    json.append(",\"action_sequence\":");
+    json.append(QByteArray::number(actionSequence_));
+    json.append(",\"timings_us\":{\"javascript\":");
+    json.append(QByteArray::number(lastJavaScriptUs_));
+    json.append(",\"pending_jobs\":");
+    json.append(QByteArray::number(lastPendingJobsUs_));
+    json.append(",\"core_tick\":");
+    json.append(QByteArray::number(lastCoreTickUs_));
+    json.append(",\"gl_submit\":");
+    json.append(QByteArray::number(lastGlSubmitUs_));
+    json.append(",\"swap\":");
+    json.append(QByteArray::number(lastSwapUs_));
+    json.append(",\"total\":");
+    json.append(QByteArray::number(lastTotalFrameUs_));
+    json.append("}");
+    json.append(",\"fps_window\":{\"samples\":");
+    json.append(QByteArray::number(sorted.size()));
+    json.append(",\"warmup_remaining\":");
+    json.append(QByteArray::number(warmupFramesRemaining_));
+    json.append(",\"average_hz\":");
+    json.append(QByteArray::number(averageHz, 'f', 3));
+    json.append(",\"p95_ms\":");
+    json.append(QByteArray::number(static_cast<double>(p95) / 1000.0, 'f', 3));
+    json.append(",\"max_ms\":");
+    json.append(QByteArray::number(static_cast<double>(maximum) / 1000.0, 'f', 3));
+    json.append(",\"missed_vblanks\":");
+    json.append(QByteArray::number(missed));
+    json.append("}}");
+    return json;
+}
+
+void PocketJsRuntime::writeNokiaN9Status()
+{
+    pocketJsWriteAtomicFile(nokiaN9Path(".status.json"), nokiaN9StatusJson());
+}
+
+void PocketJsRuntime::captureNokiaN9Frame()
+{
+    const QString request = nokiaN9Path(".capture-request");
+    if (!QFile::exists(request)) return;
+    if ((guestFrames_ % POCKETJS_CAPTURE_FRAME_PERIOD) != 0U) return;
+    const int captureWidth = width();
+    const int captureHeight = height();
+    if (captureWidth <= 0 || captureHeight <= 0) return;
+
+    QByteArray pixels(captureWidth * captureHeight * 4, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(
+        0,
+        0,
+        captureWidth,
+        captureHeight,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.data()
+    );
+    if (glGetError() != GL_NO_ERROR) return;
+
+    const QString raw = nokiaN9Path(".frame.rgba");
+    if (!pocketJsWriteAtomicFile(raw, pixels)) return;
+
+    QByteArray sidecar("{\"build_id\":\"");
+    sidecar.append(POCKETJS_BUILD_ID);
+    sidecar.append("\",\"width\":");
+    sidecar.append(QByteArray::number(captureWidth));
+    sidecar.append(",\"height\":");
+    sidecar.append(QByteArray::number(captureHeight));
+    sidecar.append(",\"quarter_turns\":");
+    sidecar.append(QByteArray::number(quarterTurns_));
+    sidecar.append(",\"guest_frame\":");
+    sidecar.append(QByteArray::number(guestFrames_));
+    sidecar.append(",\"gl_version\":");
+    appendJsonString(&sidecar, glVersion_);
+    sidecar.append(",\"gl_vendor\":");
+    appendJsonString(&sidecar, glVendor_);
+    sidecar.append(",\"gl_renderer\":");
+    appendJsonString(&sidecar, glRenderer_);
+    sidecar.append("}");
+    const QString metadata = nokiaN9Path(".frame.json");
+    if (pocketJsWriteAtomicFile(metadata, sidecar)) {
+        QFile::remove(request);
+        skipNextFrameInterval_ = true;
+    }
+}
+#endif
+
 void PocketJsRuntime::resizeEvent(QResizeEvent *event)
 {
+#ifndef POCKETJS_HARMATTAN
     queueViewport(event->size());
+#endif
     errorLabel_->setGeometry(rect());
     QGLWidget::resizeEvent(event);
 }
@@ -2510,23 +3128,49 @@ void PocketJsRuntime::timerEvent(QTimerEvent *event)
 {
     if (event->timerId() == timer_.timerId()) {
         if (failed_) return;
+#ifdef POCKETJS_HARMATTAN
+        if (!displayActive_ || orientationAnimating_) return;
+#endif
 
         // QResizeEvent is authoritative; polling size() is a cheap fallback
         // for Belle variants that coalesce a native layout notification.
+#ifndef POCKETJS_HARMATTAN
         queueViewport(size());
+#endif
 
         if (!initialized_) {
-            if (!isVisible() || !isFullScreen() || !validViewport(size())) {
+            if (!isVisible() ||
+#ifndef POCKETJS_HARMATTAN
+                !isFullScreen() ||
+#endif
+                !validViewport(
+#ifdef POCKETJS_HARMATTAN
+                    pendingViewportSize_
+#else
+                    size()
+#endif
+                )) {
                 return;
             }
             if (!isValid()) {
                 fail("PocketJS could not obtain a valid OpenGL ES 2 context.");
                 return;
             }
-            if (!initialize(size())) return;
+            if (!initialize(
+#ifdef POCKETJS_HARMATTAN
+                    pendingViewportSize_
+#else
+                    size()
+#endif
+                )) return;
         } else if (!isValid()) {
+#ifdef POCKETJS_HARMATTAN
+            update();
+            return;
+#else
             fail("PocketJS lost its OpenGL ES 2 context.");
             return;
+#endif
         }
 
         if (!applyPendingViewport()) {
@@ -2540,8 +3184,77 @@ void PocketJsRuntime::timerEvent(QTimerEvent *event)
     QGLWidget::timerEvent(event);
 }
 
+#ifdef POCKETJS_HARMATTAN
+class PocketN9Window : public MWindow
+{
+    Q_OBJECT
+public:
+    explicit PocketN9Window(PocketJsRuntime *runtime)
+        : MWindow(), runtime_(runtime)
+    {
+        setViewport(runtime_);
+        setOrientationLocked(false);
+        setOrientationAngleLocked(false);
+        connect(
+            this,
+            SIGNAL(orientationAngleChanged(M::OrientationAngle)),
+            this,
+            SLOT(beginOrientation(M::OrientationAngle))
+        );
+        connect(
+            this,
+            SIGNAL(orientationChangeFinished(M::Orientation)),
+            this,
+            SLOT(finishOrientation(M::Orientation))
+        );
+        connect(this, SIGNAL(displayEntered()), this, SLOT(enterDisplay()));
+        connect(this, SIGNAL(displayExited()), this, SLOT(exitDisplay()));
+        connect(this, SIGNAL(switcherEntered()), this, SLOT(exitDisplay()));
+        connect(this, SIGNAL(switcherExited()), this, SLOT(enterDisplay()));
+    }
+
+private slots:
+    void beginOrientation(M::OrientationAngle angle)
+    {
+        runtime_->beginHarmattanOrientation(angle);
+    }
+
+    void finishOrientation(M::Orientation)
+    {
+        runtime_->finishHarmattanOrientation(orientationAngle());
+    }
+
+    void enterDisplay()
+    {
+        runtime_->setHarmattanDisplayActive(true);
+        runtime_->finishHarmattanOrientation(orientationAngle());
+    }
+
+    void exitDisplay()
+    {
+        runtime_->setHarmattanDisplayActive(false);
+    }
+
+private:
+    PocketJsRuntime *runtime_;
+};
+#endif
+
 } // namespace
 
+#ifdef POCKETJS_HARMATTAN
+M_EXPORT int main(int argc, char *argv[])
+{
+    MApplication application(argc, argv);
+    PocketJsRuntime *runtime = new PocketJsRuntime();
+    PocketN9Window window(runtime);
+    window.showFullScreen();
+    runtime->finishHarmattanOrientation(window.orientationAngle());
+    runtime->setFocus();
+    return application.exec();
+}
+#include "main.moc"
+#else
 int main(int argc, char *argv[])
 {
     QApplication application(argc, argv);
@@ -2550,3 +3263,4 @@ int main(int argc, char *argv[])
     runtime.setFocus();
     return application.exec();
 }
+#endif

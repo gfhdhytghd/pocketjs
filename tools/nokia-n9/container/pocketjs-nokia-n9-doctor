@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+manifest=/opt/pocketjs/nokia-n9-toolchain.json
+root=/toolchain/QtSDK
+receipt="$root/$(jq -r .receipt "$manifest")"
+test -f "$receipt"
+test "$(jq -r .toolchainVersion "$receipt")" = "$(jq -r .toolchainVersion "$manifest")"
+test "$(jq -r .implementationSha256 "$receipt")" = "${POCKETJS_NOKIA_N9_IMAGE_IMPLEMENTATION_SHA256:?}"
+jq -r '.markers[]' "$manifest" | while IFS= read -r marker; do
+    test -e "$root/$marker"
+done
+"$root/Madde/bin/mad" list >/dev/null
+printf '%s\n' "PocketJS Nokia N9 toolchain: ok"

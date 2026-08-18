@@ -370,6 +370,7 @@ const SCRIPTS = {
   psp: "tools/psp.ts",
   vita: "tools/vita.ts",
   symbian: "tools/symbian.ts",
+  "nokia-n9": "tools/nokia-n9.ts",
   ios: "tools/ios.ts",
   hw: "tools/hw.ts",
   psplink: "tools/psplink.ts",
@@ -420,6 +421,7 @@ const HELP = `${C.bold("pocket")} — the PocketJS toolchain CLI
   pocket psp <app>         build the PSP EBOOT
   pocket vita <app>        build the PS Vita VPK
   pocket symbian <cmd>      Nokia E7 doctor/setup/build-probe/deploy
+  pocket nokia-n9 <cmd>     Nokia N9 doctor/setup/build/deploy/accept
   pocket ios <cmd>         Apple iOS doctor/setup/build/play on the simulator
   pocket hw <app>          build + run on a real PSP over PSPLINK
   pocket psplink           interactive multi-app switcher on a real PSP
@@ -446,6 +448,7 @@ switch (cmd) {
   case "psp":
   case "vita":
   case "symbian":
+  case "nokia-n9":
   case "ios":
   case "hw":
   case "psplink":

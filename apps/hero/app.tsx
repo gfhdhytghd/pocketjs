@@ -39,6 +39,7 @@ function Stat(props: { label: string; value: string; cls: string; largeLayout?: 
 
 export interface HeroProps {
   actionLabel?: string;
+  compactHeadline?: boolean;
   deviceLabel?: string;
   headline?: string;
   largeLayout?: boolean;
@@ -130,7 +131,7 @@ export default function Hero(props: HeroProps = {}) {
           ONE RUST CORE · ONE JSX APP
         </Text>
         <View class="flex-row flex-wrap items-center justify-between">
-          <Text class={props.largeLayout
+          <Text class={props.largeLayout && !props.compactHeadline
             ? "text-5xl text-slate-950 font-bold"
             : "text-4xl text-slate-950 font-bold"}>
             {props.headline ?? `JSX at ${TICKS_PER_SECOND} FPS.`}

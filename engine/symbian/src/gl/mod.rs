@@ -11,7 +11,7 @@
 //! matrix stack and client arrays, for the original iPhone's OpenGL ES 1.1
 //! MBX Lite). Exactly one is compiled in, chosen by the `gles1` feature, and
 //! both satisfy the same small interface: `new`, `destroy`, `begin_frame`,
-//! `set_blend`, `bind_vertices`, `unbind_vertices`.
+//! `set_blend`, `bind_vertices`, `unbind_vertices`, `end_frame`.
 
 #![cfg_attr(test, allow(dead_code))]
 
@@ -49,6 +49,7 @@ const GL_TRIANGLES: GLenum = 0x0004;
 const GL_ARRAY_BUFFER: GLenum = 0x8892;
 const GL_DYNAMIC_DRAW: GLenum = 0x88e8;
 const GL_TEXTURE_2D: GLenum = 0x0de1;
+const GL_TEXTURE0: GLenum = 0x84c0;
 const GL_RGBA: GLenum = 0x1908;
 const GL_LUMINANCE_ALPHA: GLenum = 0x190a;
 const GL_LINEAR: GLint = 0x2601;
@@ -70,6 +71,7 @@ const GL_MAX_TEXTURE_SIZE: GLenum = 0x0d33;
 const GL_NO_ERROR: GLenum = 0;
 
 unsafe extern "C" {
+    fn glActiveTexture(texture: GLenum);
     fn glBindBuffer(target: GLenum, buffer: GLuint);
     fn glBindTexture(target: GLenum, texture: GLuint);
     fn glBufferData(target: GLenum, size: GLsizeiptr, data: *const c_void, usage: GLenum);
@@ -847,6 +849,38 @@ impl Renderer {
         }
     }
 
+    fn rotate_clip(clip: Clip, logical_width: i32, logical_height: i32, quarter_turns: u32) -> Clip {
+        match quarter_turns & 3 {
+            1 => Clip {
+                x: logical_height - clip.y - clip.h,
+                y: clip.x,
+                w: clip.h,
+                h: clip.w,
+            },
+            2 => Clip {
+                x: logical_width - clip.x - clip.w,
+                y: logical_height - clip.y - clip.h,
+                w: clip.w,
+                h: clip.h,
+            },
+            3 => Clip {
+                x: clip.y,
+                y: logical_width - clip.x - clip.w,
+                w: clip.h,
+                h: clip.w,
+            },
+            _ => clip,
+        }
+    }
+
+    fn oriented_dimensions(logical_width: i32, logical_height: i32, quarter_turns: u32) -> (i32, i32) {
+        if quarter_turns & 1 == 0 {
+            (logical_width, logical_height)
+        } else {
+            (logical_height, logical_width)
+        }
+    }
+
     unsafe fn render(
         &mut self,
         ui: &mut Ui,
@@ -857,6 +891,7 @@ impl Renderer {
         window_width: i32,
         window_height: i32,
         clear_color: bool,
+        quarter_turns: u32,
     ) -> bool {
         clear_errors();
         if window_width <= 0 || window_height <= 0 {
@@ -884,7 +919,7 @@ impl Renderer {
         self.build(words, logical_width, logical_height);
 
         self.pipeline
-            .begin_frame(logical_width as f32, logical_height as f32);
+            .begin_frame(logical_width as f32, logical_height as f32, quarter_turns);
         glViewport(
             target_x,
             window_height - target_y - target_height,
@@ -914,10 +949,21 @@ impl Renderer {
                 glBindTexture(GL_TEXTURE_2D, command.texture);
                 bound = command.texture;
             }
-            let physical = Self::physical_clip(
+            let rotated_clip = Self::rotate_clip(
                 command.clip,
                 logical_width as i32,
                 logical_height as i32,
+                quarter_turns,
+            );
+            let (oriented_width, oriented_height) = Self::oriented_dimensions(
+                logical_width as i32,
+                logical_height as i32,
+                quarter_turns,
+            );
+            let physical = Self::physical_clip(
+                rotated_clip,
+                oriented_width,
+                oriented_height,
                 target_x,
                 target_y,
                 target_width,
@@ -930,10 +976,13 @@ impl Renderer {
             glScissor(physical.x, physical.y, physical.w, physical.h);
             glDrawArrays(GL_TRIANGLES, command.first, command.count);
         }
-        glDisable(GL_SCISSOR_TEST);
         self.pipeline.unbind_vertices();
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_BLEND);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
+        glActiveTexture(GL_TEXTURE0);
+        self.pipeline.end_frame();
         glGetError() == GL_NO_ERROR
     }
 }
@@ -989,6 +1038,7 @@ pub unsafe fn render(
             window_width,
             window_height,
             true,
+            0,
         )
     })
 }
@@ -1012,6 +1062,35 @@ pub unsafe fn render_over(
             window_width,
             window_height,
             false,
+            0,
+        )
+    })
+}
+
+pub unsafe fn render_rotated(
+    ui: &mut Ui,
+    target_x: i32,
+    target_y: i32,
+    target_width: i32,
+    target_height: i32,
+    window_width: i32,
+    window_height: i32,
+    quarter_turns: u32,
+) -> bool {
+    if quarter_turns > 3 {
+        return false;
+    }
+    RENDERER.as_mut().is_some_and(|renderer| {
+        renderer.render(
+            ui,
+            target_x,
+            target_y,
+            target_width,
+            target_height,
+            window_width,
+            window_height,
+            true,
+            quarter_turns,
         )
     })
 }
@@ -1283,5 +1362,27 @@ mod tests {
                 h: 40,
             },
         );
+    }
+
+    #[test]
+    fn quarter_turns_rotate_logical_scissors_and_dimensions() {
+        let clip = Clip { x: 10, y: 20, w: 30, h: 40 };
+        assert_eq!(Renderer::rotate_clip(clip, 100, 200, 0), clip);
+        assert_eq!(
+            Renderer::rotate_clip(clip, 100, 200, 1),
+            Clip { x: 140, y: 10, w: 40, h: 30 },
+        );
+        assert_eq!(
+            Renderer::rotate_clip(clip, 100, 200, 2),
+            Clip { x: 60, y: 140, w: 30, h: 40 },
+        );
+        assert_eq!(
+            Renderer::rotate_clip(clip, 100, 200, 3),
+            Clip { x: 20, y: 60, w: 40, h: 30 },
+        );
+        assert_eq!(Renderer::oriented_dimensions(100, 200, 0), (100, 200));
+        assert_eq!(Renderer::oriented_dimensions(100, 200, 1), (200, 100));
+        assert_eq!(Renderer::oriented_dimensions(100, 200, 2), (100, 200));
+        assert_eq!(Renderer::oriented_dimensions(100, 200, 3), (200, 100));
     }
 }

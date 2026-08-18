@@ -1,0 +1,46 @@
+#!/bin/bash
+set -euo pipefail
+
+sdk=/toolchain/QtSDK
+mad="$sdk/Madde/bin/mad"
+test -x "$mad"
+target=$(find "$sdk/Madde/targets" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep '^harmattan_' | sort | tail -n1)
+test -n "$target"
+build=$(mktemp -d /tmp/pocketjs-n9-probe.XXXXXX)
+trap 'rm -rf "$build"' EXIT
+mkdir -p "$build/debian"
+cp /work/hosts/nokia-n9/probe/main.cpp "$build/"
+cp /work/hosts/nokia-n9/probe/pocketjs-n9-probe.pro "$build/"
+cp /work/hosts/nokia-n9/probe/pocketjs-n9-probe_harmattan.desktop "$build/"
+cp /work/apps/meizu-m8-demo/icon80.png "$build/pocketjs-n9-probe.png"
+cd "$build"
+pocketjs_n9_build_home=/tmp/pocketjs-n9-home
+mkdir -p "$pocketjs_n9_build_home"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" qmake pocketjs-n9-probe.pro
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" make -j2
+binary="$build/pocketjs-n9-probe"
+file "$binary" | grep -q 'ELF 32-bit LSB.*ARM'
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf -A "$binary" \
+    | grep -q 'Tag_ABI_VFP_args: VFP registers'
+stage="$build/debian/tmp"
+mkdir -p "$stage/DEBIAN"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" make INSTALL_ROOT="$stage" install
+cat > "$stage/DEBIAN/control" <<'EOF'
+Package: pocketjs-n9-probe
+Version: 0.1.0-1
+Section: user/development
+Priority: optional
+Architecture: armel
+Maintainer: PocketJS <hello@pocketjs.dev>
+Depends: applauncherd, libqt4-core, libqt4-gui, libqt4-opengl, libmeegotouchcore0, libmeegotouchsettings0, libmeegotouchextensions0
+Description: PocketJS Nokia N9 GLES2 and orientation probe
+ Visible native probe for the private Nokia N9 port.
+EOF
+cp "$stage/DEBIAN/control" "$build/debian/control"
+cp /work/hosts/nokia-n9/runtime/manifest.aegis "$build/debian/manifest.aegis"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" dpkg-deb --build "$stage" "$build"
+deb="$build/pocketjs-n9-probe_0.1.0-1_armel.deb"
+test -s "$deb"
+cp "$deb" /out/pocketjs-n9-probe_0.1.0-1_armel.deb
+sha256sum /out/pocketjs-n9-probe_0.1.0-1_armel.deb \
+    > /out/pocketjs-n9-probe_0.1.0-1_armel.sha256

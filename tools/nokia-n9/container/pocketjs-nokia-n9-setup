@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+manifest=/opt/pocketjs/nokia-n9-toolchain.json
+archive=/downloads/$(jq -r .sdk.asset "$manifest")
+archive_sha=$(jq -r .sdk.sha256 "$manifest")
+installer_name=$(jq -r .sdk.installer "$manifest")
+installer_sha=$(jq -r .sdk.installerSha256 "$manifest")
+installer_md5=$(jq -r .sdk.installerMd5 "$manifest")
+
+test -f "$archive"
+echo "$archive_sha  $archive" | sha256sum --check --status
+
+stage=$(mktemp -d /tmp/pocketjs-n9-sdk.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+unzip -q "$archive" -d "$stage" || test -f "$stage/$installer_name"
+installer="$stage/$installer_name"
+echo "$installer_sha  $installer" | sha256sum --check --status
+echo "$installer_md5  $installer" | md5sum --check --status
+chmod 0755 "$installer"
+
+rm -rf /toolchain/QtSDK
+cp /opt/pocketjs/container/controller.qs "$stage/controller.qs"
+xvfb-run -a "$installer" --show-virtual-components --script "$stage/controller.qs" &
+installer_pid=$!
+ready=false
+for _ in $(seq 1 600); do
+    if test -x /toolchain/QtSDK/Madde/bin/mad \
+        && test -d /toolchain/QtSDK/Madde/targets/harmattan_10.2011.34-1_rt1.2 \
+        && test -f /toolchain/QtSDK/Madde/sysroots/harmattan_sysroot_10.2011.34-1_slim/usr/include/meegotouch/MWindow; then
+        sleep 5
+        ready=true
+        kill "$installer_pid" 2>/dev/null || true
+        break
+    fi
+    kill -0 "$installer_pid" 2>/dev/null || break
+    sleep 1
+done
+wait "$installer_pid" 2>/dev/null || true
+test "$ready" = true
+
+test -x /toolchain/QtSDK/Madde/bin/mad
+
+implementation=${POCKETJS_NOKIA_N9_IMAGE_IMPLEMENTATION_SHA256:?}
+jq -n \
+    --arg version "$(jq -r .toolchainVersion "$manifest")" \
+    --arg implementation "$implementation" \
+    --arg archive "$archive_sha" \
+    --arg installer "$installer_sha" \
+    '{schemaVersion:1,toolchainVersion:$version,implementationSha256:$implementation,sdkArchiveSha256:$archive,sdkInstallerSha256:$installer}' \
+    > /toolchain/QtSDK/.pocket-stack-nokia-n9.json

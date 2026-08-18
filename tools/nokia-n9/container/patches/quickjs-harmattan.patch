@@ -1,0 +1,21 @@
+diff --git a/libquickjs-sys/embed/quickjs/quickjs.c b/libquickjs-sys/embed/quickjs/quickjs.c
+--- a/libquickjs-sys/embed/quickjs/quickjs.c
++++ b/libquickjs-sys/embed/quickjs/quickjs.c
+@@ -100,3 +100,3 @@
+-#if defined(__PSP__) || defined(__vita__)
++#if defined(__PSP__) || defined(__vita__) || defined(__HARMATTAN__)
+ #undef CONFIG_ATOMICS
+ #endif
+diff --git a/libquickjs-sys/embed/quickjs/quickjs.h b/libquickjs-sys/embed/quickjs/quickjs.h
+--- a/libquickjs-sys/embed/quickjs/quickjs.h
++++ b/libquickjs-sys/embed/quickjs/quickjs.h
+@@ -1065,7 +1065,8 @@ static inline JSValue JS_NewCFunctionMagic(JSContext *ctx, JSCFunctionMagic *fun
+                                            int length, JSCFunctionEnum cproto, int magic)
+ {
+     /* Used to squelch a -Wcast-function-type warning. */
+-    JSCFunctionType ft = { .generic_magic = func };
++    JSCFunctionType ft;
++    ft.generic_magic = func;
+     return JS_NewCFunction2(ctx, ft.generic, name, length, cproto, magic);
+ }
+ int JS_SetConstructor(JSContext *ctx, JSValueConst func_obj,

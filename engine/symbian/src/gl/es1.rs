@@ -48,7 +48,9 @@ unsafe extern "C" {
     fn glEnableClientState(array: GLenum);
     fn glLoadIdentity();
     fn glMatrixMode(mode: GLenum);
+    fn glRotatef(angle: GLfloat, x: GLfloat, y: GLfloat, z: GLfloat);
     fn glShadeModel(mode: GLenum);
+    fn glTranslatef(x: GLfloat, y: GLfloat, z: GLfloat);
     fn glOrthof(
         left: GLfloat,
         right: GLfloat,
@@ -114,12 +116,35 @@ impl Pipeline {
     pub(super) unsafe fn destroy(&mut self) {}
 
     /// Replace the vertex shader: pixel coordinates in, top-left origin.
-    pub(super) unsafe fn begin_frame(&self, logical_width: f32, logical_height: f32) {
+    pub(super) unsafe fn begin_frame(
+        &self,
+        logical_width: f32,
+        logical_height: f32,
+        quarter_turns: u32,
+    ) {
+        let rotated = quarter_turns & 1 != 0;
+        let oriented_width = if rotated { logical_height } else { logical_width };
+        let oriented_height = if rotated { logical_width } else { logical_height };
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        glOrthof(0.0, logical_width, logical_height, 0.0, -1.0, 1.0);
+        glOrthof(0.0, oriented_width, oriented_height, 0.0, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
+        match quarter_turns & 3 {
+            1 => {
+                glTranslatef(logical_height, 0.0, 0.0);
+                glRotatef(90.0, 0.0, 0.0, 1.0);
+            }
+            2 => {
+                glTranslatef(logical_width, logical_height, 0.0);
+                glRotatef(180.0, 0.0, 0.0, 1.0);
+            }
+            3 => {
+                glTranslatef(0.0, logical_width, 0.0);
+                glRotatef(270.0, 0.0, 0.0, 1.0);
+            }
+            _ => {}
+        }
         // The DrawList's UVs are already normalized, so the texture matrix must
         // contribute nothing.
         glMatrixMode(GL_TEXTURE);
@@ -155,4 +180,6 @@ impl Pipeline {
         glDisableClientState(GL_TEXTURE_COORD_ARRAY);
         glDisableClientState(GL_COLOR_ARRAY);
     }
+
+    pub(super) unsafe fn end_frame(&self) {}
 }

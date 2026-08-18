@@ -592,6 +592,53 @@ pub extern "C" fn ui_gl_render_over(
     }
 }
 
+/// Render the retained UI after rotating its logical top-left coordinate
+/// space clockwise by `quarter_turns`. Harmattan keeps its native GLES/X11
+/// surface in landscape while PocketJS may expose a portrait live viewport.
+#[no_mangle]
+pub extern "C" fn ui_gl_render_rotated(
+    target_x: i32,
+    target_y: i32,
+    target_width: i32,
+    target_height: i32,
+    window_width: i32,
+    window_height: i32,
+    quarter_turns: u32,
+) -> i32 {
+    #[cfg(all(
+        any(target_os = "none", feature = "bare-platform"),
+        not(feature = "software-only")
+    ))]
+    unsafe {
+        return gl::render_rotated(
+            ui(),
+            target_x,
+            target_y,
+            target_width,
+            target_height,
+            window_width,
+            window_height,
+            quarter_turns,
+        ) as i32;
+    }
+    #[cfg(any(
+        feature = "software-only",
+        not(any(target_os = "none", feature = "bare-platform"))
+    ))]
+    {
+        let _ = (
+            target_x,
+            target_y,
+            target_width,
+            target_height,
+            window_width,
+            window_height,
+            quarter_turns,
+        );
+        0
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn ui_draw_hash() -> u64 {
     draw_hash(&ui().draw().words)

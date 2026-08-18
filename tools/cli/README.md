@@ -4,7 +4,8 @@ The [PocketJS](https://pocketjs.dev) toolchain CLI — `doctor`/`setup` for the
 bun + Rust + PSP toolchain (flutter-doctor style), manifest-first app
 scaffolding, build/run passthrough for PSP and PS Vita, an isolated
 Nokia E7 / Symbian development toolchain, and an Apple iOS flow that stages
-guests into a NativeScript shell and launches them on the simulator.
+guests into a NativeScript shell and launches them on the simulator. It also
+ships the private Nokia N9 / Harmattan build and hardware-acceptance flow.
 
 ```sh
 npm install -g @pocketjs/cli
@@ -27,6 +28,12 @@ pocket symbian build probe
 pocket symbian deploy dist/symbian/pocketjs-e7-probe.sis
 pocket symbian coda usb
 pocket symbian coda usb launch <executable.exe>
+pocket nokia-n9 setup --yes
+pocket nokia-n9 doctor --device
+pocket nokia-n9 build app --manifest apps/nokia-n9-demo/pocket.json
+pocket nokia-n9 deploy dist/nokia-n9/pocketjs-nokia-n9-hero_0.1.0-1_armel.deb
+pocket nokia-n9 launch
+pocket nokia-n9 accept
 pocket ios doctor
 pocket ios setup
 pocket ios play nsengine     # NativeScript shell on the arm64 iOS simulator

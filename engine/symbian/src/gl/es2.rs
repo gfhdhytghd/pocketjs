@@ -74,13 +74,22 @@ attribute vec2 a_position;
 attribute vec2 a_uv;
 attribute vec4 a_color;
 uniform vec2 u_viewport;
+uniform int u_quarter_turns;
 varying mediump vec2 v_uv;
 varying lowp vec4 v_color;
 void main() {
-    vec2 ndc = vec2(
+    vec2 normal = vec2(
         a_position.x * 2.0 / u_viewport.x - 1.0,
         1.0 - a_position.y * 2.0 / u_viewport.y
     );
+    vec2 ndc = normal;
+    if (u_quarter_turns == 1) {
+        ndc = vec2(normal.y, -normal.x);
+    } else if (u_quarter_turns == 2) {
+        ndc = vec2(-normal.x, -normal.y);
+    } else if (u_quarter_turns == 3) {
+        ndc = vec2(-normal.y, normal.x);
+    }
     gl_Position = vec4(ndc, 0.0, 1.0);
     v_uv = a_uv;
     v_color = a_color;
@@ -102,6 +111,7 @@ const ATTR_UV: &[u8] = b"a_uv\0";
 const ATTR_COLOR: &[u8] = b"a_color\0";
 const UNIFORM_VIEWPORT: &[u8] = b"u_viewport\0";
 const UNIFORM_TEXTURE: &[u8] = b"u_texture\0";
+const UNIFORM_QUARTER_TURNS: &[u8] = b"u_quarter_turns\0";
 
 unsafe fn compile_shader(kind: GLenum, source: &[u8]) -> Option<GLuint> {
     let shader = glCreateShader(kind);
@@ -124,6 +134,7 @@ unsafe fn compile_shader(kind: GLenum, source: &[u8]) -> Option<GLuint> {
 pub(super) struct Pipeline {
     program: GLuint,
     viewport_uniform: GLint,
+    quarter_turns_uniform: GLint,
 }
 
 impl Pipeline {
@@ -133,6 +144,7 @@ impl Pipeline {
         Self {
             program: 0,
             viewport_uniform: 0,
+            quarter_turns_uniform: 0,
         }
     }
 
@@ -171,7 +183,11 @@ impl Pipeline {
             glGetUniformLocation(program, UNIFORM_VIEWPORT.as_ptr() as *const c_char);
         let texture_uniform =
             glGetUniformLocation(program, UNIFORM_TEXTURE.as_ptr() as *const c_char);
-        if viewport_uniform < 0 || texture_uniform < 0 {
+        let quarter_turns_uniform = glGetUniformLocation(
+            program,
+            UNIFORM_QUARTER_TURNS.as_ptr() as *const c_char,
+        );
+        if viewport_uniform < 0 || texture_uniform < 0 || quarter_turns_uniform < 0 {
             glDeleteProgram(program);
             return None;
         }
@@ -184,6 +200,7 @@ impl Pipeline {
         Some(Self {
             program,
             viewport_uniform,
+            quarter_turns_uniform,
         })
     }
 
@@ -193,9 +210,15 @@ impl Pipeline {
     }
 
     /// Bind the program and tell it the logical viewport for this frame.
-    pub(super) unsafe fn begin_frame(&self, logical_width: f32, logical_height: f32) {
+    pub(super) unsafe fn begin_frame(
+        &self,
+        logical_width: f32,
+        logical_height: f32,
+        quarter_turns: u32,
+    ) {
         glUseProgram(self.program);
         glUniform2f(self.viewport_uniform, logical_width, logical_height);
+        glUniform1i(self.quarter_turns_uniform, (quarter_turns & 3) as GLint);
         glActiveTexture(GL_TEXTURE0);
     }
 
@@ -223,5 +246,9 @@ impl Pipeline {
         glDisableVertexAttribArray(0);
         glDisableVertexAttribArray(1);
         glDisableVertexAttribArray(2);
+    }
+
+    pub(super) unsafe fn end_frame(&self) {
+        glUseProgram(0);
     }
 }

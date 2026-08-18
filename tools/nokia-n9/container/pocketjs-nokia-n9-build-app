@@ -1,0 +1,168 @@
+#!/bin/bash
+set -euo pipefail
+
+payload=${1:?usage: pocketjs-nokia-n9-build-app /out/build/app-output}
+test -d "$payload"
+for file in app.js app.pak plan.json package.json build-id.txt libpocketjs_symbian_core.a; do
+    test -s "$payload/$file"
+done
+
+manifest=/opt/pocketjs/nokia-n9-toolchain.json
+sdk=/toolchain/QtSDK
+mad="$sdk/Madde/bin/mad"
+test -x "$mad"
+target=$(find "$sdk/Madde/targets" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep '^harmattan_' | sort | tail -n1)
+test -n "$target"
+sysroot="$sdk/Madde/sysroots/harmattan_sysroot_10.2011.34-1_slim"
+test -d "$sysroot"
+
+package=$(jq -r .packageName "$payload/package.json")
+executable=$(jq -r .executable "$payload/package.json")
+title=$(jq -r .title "$payload/package.json")
+version=$(jq -r .version "$payload/package.json")
+output=$(jq -r .output "$payload/package.json")
+build_id=$(tr -d '\r\n' < "$payload/build-id.txt")
+test "$build_id" != ""
+
+build=$(mktemp -d /tmp/pocketjs-n9-app.XXXXXX)
+quickjs_root="$build/quickjs-rs"
+quickjs_objects="$build/quickjs-objects"
+cleanup() { rm -rf "$build"; }
+trap cleanup EXIT
+mkdir -p "$quickjs_root" "$quickjs_objects"
+
+quickjs_asset="/downloads/$(jq -r .quickjs.asset "$manifest")"
+echo "$(jq -r .quickjs.sha256 "$manifest")  $quickjs_asset" | sha256sum --check --status
+tar -xzf "$quickjs_asset" --strip-components=1 -C "$quickjs_root"
+patch --batch --forward -d "$quickjs_root" -p1 \
+    < /opt/pocketjs/container/patches/quickjs-harmattan.patch
+quickjs_source="$quickjs_root/libquickjs-sys/embed/quickjs"
+
+common_flags=(
+    --target=armv7-unknown-linux-gnueabihf
+    --sysroot="$sysroot"
+    -march=armv7-a
+    -mfpu=neon
+    -mfloat-abi=hard
+    -O2
+    -funsigned-char
+    -fwrapv
+    -fno-strict-aliasing
+    -D_GNU_SOURCE
+    -D__HARMATTAN__
+    -I"$quickjs_source"
+    "-DCONFIG_VERSION=\"$(jq -r .quickjs.version "$manifest")\""
+)
+for source in cutils.c dtoa.c libregexp.c libunicode.c quickjs.c; do
+    clang "${common_flags[@]}" -std=gnu11 -c "$quickjs_source/$source" \
+        -o "$quickjs_objects/${source%.c}.o"
+done
+clang "${common_flags[@]}" -std=gnu11 \
+    -c "$quickjs_root/libquickjs-sys/embed/static-functions.c" \
+    -o "$quickjs_objects/static-functions.o"
+ar rcs "$build/libquickjs.a" "$quickjs_objects"/*.o
+
+cp /work/hosts/symbian/runtime/main.cpp "$build/main.cpp"
+cp /work/hosts/symbian/runtime/pocketjs_symbian_core.h "$build/"
+cp /work/hosts/symbian/runtime/pocketjs_symbian_extension.h "$build/"
+cp /work/hosts/symbian/runtime/pocketjs_symbian_keys.h "$build/"
+cp /work/hosts/symbian/runtime/pocketjs-runtime.qrc "$build/"
+cp /work/hosts/nokia-n9/runtime/pocketjs-n9-runtime.pro "$build/"
+printf '#ifndef POCKETJS_N9_BUILD_H\n#define POCKETJS_N9_BUILD_H\n#define POCKETJS_BUILD_ID "%s"\n#endif\n' \
+    "$build_id" > "$build/pocketjs_n9_build.h"
+cp "$payload/app.js" "$payload/app.pak" "$build/"
+: > "$build/catalog.tsv"
+: > "$build/catalog.bin"
+cp "$payload/libpocketjs_symbian_core.a" "$build/"
+cp /work/apps/meizu-m8-demo/icon80.png "$build/$package.png"
+desktop_title=$(printf '%s' "$title" | sed 's/[&|\\]/\\&/g')
+sed -e "s|@TITLE@|$desktop_title|g" \
+    -e "s|@PACKAGE@|$package|g" \
+    -e "s|@EXECUTABLE@|$executable|g" \
+    /work/hosts/nokia-n9/runtime/pocketjs-n9.desktop.in \
+    > "$build/${package}_harmattan.desktop"
+
+cd "$build"
+pocketjs_n9_build_home=/tmp/pocketjs-n9-home
+mkdir -p "$pocketjs_n9_build_home"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" qmake \
+    "POCKETJS_N9_TARGET=$executable" \
+    "POCKETJS_N9_PACKAGE=$package" \
+    "POCKETJS_QUICKJS_INCLUDE=$quickjs_source" \
+    "POCKETJS_QUICKJS_LIBRARY=$build/libquickjs.a" \
+    "POCKETJS_CORE_LIBRARY=$build/libpocketjs_symbian_core.a" \
+    pocketjs-n9-runtime.pro
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" make -j2
+
+binary="$build/$executable"
+test -x "$binary"
+file "$binary" | grep -q 'ELF 32-bit LSB.*ARM'
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf -A "$binary" > "$build/attributes.txt"
+if ! grep -q 'Tag_ABI_VFP_args: VFP registers' "$build/attributes.txt"; then
+    echo "N9 binary does not match Harmattan's VFP-argument ABI" >&2
+    exit 1
+fi
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf -l "$binary" > "$build/program-headers.txt"
+grep -q 'Requesting program interpreter: /lib/ld-linux.so.3' "$build/program-headers.txt"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf -d "$binary" > "$build/dynamic.txt"
+sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p' "$build/dynamic.txt" \
+    > "$build/needed.txt"
+if grep -Ev \
+    '^lib(QtCore|QtGui|QtOpenGL|QtDBus|meegotouchcore|meegotouchsettings|meegotouchextensions|GLESv2|EGL|stdc\+\+|m|gcc_s|c|pthread|dl|rt)\.so(\.[0-9]+)*$' \
+    "$build/needed.txt"; then
+    echo "N9 binary has an unexpected dynamic dependency" >&2
+    exit 1
+fi
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf --version-info "$binary" \
+    | sed -n 's/.*Name: \(GLIBC_[0-9.]*\).*/\1/p' | sort -u \
+    > "$build/required-glibc.txt"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" readelf --version-info "$sysroot/lib/libc.so.6" \
+    | sed -n 's/.*Name: \(GLIBC_[0-9.]*\).*/\1/p' | sort -u \
+    > "$build/available-glibc.txt"
+if test -s "$build/required-glibc.txt" \
+    && test -n "$(comm -23 "$build/required-glibc.txt" "$build/available-glibc.txt")"; then
+    echo "N9 binary requires GLIBC versions absent from the Harmattan sysroot" >&2
+    comm -23 "$build/required-glibc.txt" "$build/available-glibc.txt" >&2
+    exit 1
+fi
+
+stage="$build/debian/tmp"
+mkdir -p "$stage/DEBIAN"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" make INSTALL_ROOT="$stage" install
+cat > "$stage/DEBIAN/control" <<EOF
+Package: $package
+Version: $version-1
+Section: user/development
+Priority: optional
+Architecture: armel
+Maintainer: PocketJS <hello@pocketjs.dev>
+Depends: applauncherd, libqt4-core, libqt4-gui, libqt4-opengl, libmeegotouchcore0, libmeegotouchsettings0, libmeegotouchextensions0
+Description: $title
+ PocketJS Hero for the Nokia N9 running MeeGo 1.2 Harmattan.
+EOF
+cp "$stage/DEBIAN/control" "$build/debian/control"
+cp /work/hosts/nokia-n9/runtime/manifest.aegis "$build/debian/manifest.aegis"
+env HOME="$pocketjs_n9_build_home" "$mad" -t "$target" dpkg-deb --build "$stage" "$build"
+deb="$build/${package}_${version}-1_armel.deb"
+test -s "$deb"
+destination="/out/${package}_${version}-1_armel.deb"
+cp "$deb" "$destination"
+deb_sha=$(sha256sum "$destination" | cut -d' ' -f1)
+core_sha=$(sha256sum "$payload/libpocketjs_symbian_core.a" | cut -d' ' -f1)
+js_sha=$(sha256sum "$payload/app.js" | cut -d' ' -f1)
+pak_sha=$(sha256sum "$payload/app.pak" | cut -d' ' -f1)
+jq -n \
+    --arg buildId "$build_id" \
+    --arg packageName "$package" \
+    --arg executable "$executable" \
+    --arg output "$output" \
+    --arg version "$version" \
+    --arg debSha256 "$deb_sha" \
+    --arg coreSha256 "$core_sha" \
+    --arg jsSha256 "$js_sha" \
+    --arg pakSha256 "$pak_sha" \
+    --arg quickjsRevision "$(jq -r .quickjs.rev "$manifest")" \
+    '{schema:1,buildId:$buildId,target:"nokia-n9-dev",hostAbi:9,tickHz:60,packageName:$packageName,executable:$executable,output:$output,version:$version,debSha256:$debSha256,coreSha256:$coreSha256,jsSha256:$jsSha256,pakSha256:$pakSha256,quickjsRevision:$quickjsRevision}' \
+    > "/out/${package}_${version}-1_armel.receipt.json"
+cp "/out/${package}_${version}-1_armel.receipt.json" /out/latest.receipt.json
+printf '%s\n' "$destination"

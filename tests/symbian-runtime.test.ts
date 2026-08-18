@@ -413,7 +413,8 @@ describe("experimental Nokia E7 runtime profile", () => {
       "utf8",
     );
 
-    expect(runtime).toContain('JS_NewString(context, "symbian-e7-dev")');
+    expect(runtime).toContain('#define POCKETJS_TARGET_ID "symbian-e7-dev"');
+    expect(runtime).toContain("JS_NewString(context, POCKETJS_TARGET_ID)");
     expect(runtime).toContain('"__hostAbi"');
     expect(runtime).toContain("JS_NewInt32(context, POCKETJS_HOST_ABI)");
     expect(runtime).toContain("JS_ExecutePendingJob");
@@ -444,8 +445,8 @@ describe("experimental Nokia E7 runtime profile", () => {
     expect(runtime).toContain("PocketJS lost its OpenGL ES 2 context.");
     expect(runtime).toContain("glInitialized_ && isValid()");
     expect(runtime).toContain("void PocketJsRuntime::paintGL()");
-    expect(runtime).toContain("? ui_gl_render_over(");
-    expect(runtime).toContain(": ui_gl_render(");
+    expect(runtime).toContain("uiRendered = ui_gl_render_over(");
+    expect(runtime).toContain("uiRendered = ui_gl_render(");
     expect(runtime).toContain("const QRect target = presentationRect();");
     expect(runtime).toContain("glReadPixels(");
     expect(runtime).toContain(
@@ -693,7 +694,7 @@ describe("experimental Nokia E7 runtime profile", () => {
     );
 
     expect(runtime).toContain("kPocketPackageMagic = 0x544b4350U");
-    expect(runtime).toContain('target != "symbian-e7-dev"');
+    expect(runtime).toContain("target != POCKETJS_TARGET_ID");
     expect(runtime).toContain(
       "hostAbi != static_cast<uint32_t>(POCKETJS_HOST_ABI)",
     );

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Encoding=UTF-8
+Version=1.0
+Type=Application
+Terminal=false
+Name=PocketJS N9 Probe
+Icon=pocketjs-n9-probe
+Exec=/usr/bin/invoker --single-instance --type=e /opt/pocketjs-n9-probe/bin/pocketjs-n9-probe

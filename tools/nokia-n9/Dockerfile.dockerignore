@@ -1,0 +1,6 @@
+.git
+.pocket-build
+dist
+node_modules
+target
+**/target

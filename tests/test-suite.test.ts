@@ -74,4 +74,15 @@ describe("declared test suite", () => {
     expect(ipodtouchTests).not.toHaveLength(0);
     expect(ipodtouchTests.filter((file) => !declared.has(file))).toEqual([]);
   });
+
+  test("runs every Nokia N9 test in the CI unit stage", () => {
+    const declared = unitTestFiles();
+    const nokiaN9Tests = readdirSync(join(repository, "tests"))
+      .filter((file) => /^nokia-n9-.*\.test\.ts$/.test(file))
+      .map((file) => `tests/${file}`)
+      .sort();
+
+    expect(nokiaN9Tests).not.toHaveLength(0);
+    expect(nokiaN9Tests.filter((file) => !declared.has(file))).toEqual([]);
+  });
 });
