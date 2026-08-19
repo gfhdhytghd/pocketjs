@@ -14,23 +14,46 @@
 // redirect "manual" — a redirect the browser hides ends the request with
 // `unsupported`; TLS is the browser's, so "tls" is advertised.
 
-const SPEC_MAJOR = 2;
-const SPEC_MINOR = 0;
-const MAX_INFLIGHT = 8;
-const MAX_REQUEST_BYTES = 256 * 1024;
-const DEFAULT_QUEUE_BYTES = 32 * 1024;
-const MAX_QUEUE_BYTES = 256 * 1024;
-const DEFAULT_AGGREGATE_BYTES = 1024 * 1024;
-const MAX_AGGREGATE_BYTES = 8 * 1024 * 1024;
-const MAX_EVENTS_PER_TICK = 128;
-const MAX_TICK_BYTES = 256 * 1024;
-const MAX_HEADERS = 64;
-const MAX_HEADER_BYTES = 16 * 1024;
-const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_TIMEOUT_MS = 120_000;
-const MAX_REDIRECTS = 5;
-const FORBIDDEN_METHODS = new Set(["CONNECT", "TRACE", "TRACK"]);
-const NULL_BODY_STATUS = new Set([101, 103, 204, 205, 304]);
+import {
+  HTTP_NULL_BODY_STATUS,
+  NET_DEFAULT_AGGREGATE_BYTES,
+  NET_DEFAULT_QUEUE_BYTES,
+  NET_DEFAULT_TIMEOUT_MS,
+  NET_MAX_AGGREGATE_BYTES,
+  NET_MAX_EVENTS_PER_TICK,
+  NET_MAX_HEADER_BYTES,
+  NET_MAX_HEADERS,
+  NET_MAX_INFLIGHT,
+  NET_MAX_QUEUE_BYTES,
+  NET_MAX_REDIRECTS,
+  NET_MAX_REQUEST_BYTES,
+  NET_MAX_TICK_BYTES,
+  NET_MAX_TIMEOUT_MS,
+  NET_METHODS_FORBIDDEN,
+  NET_SPEC_MAJOR,
+  NET_SPEC_MINOR,
+  NET_TLS_MIN_VERSION,
+} from "./net-spec.js";
+
+// The spec ceilings, as this host's effective limits (it tightens none of
+// them; the generated net-spec.js is the single source, never literals here).
+const SPEC_MAJOR = NET_SPEC_MAJOR;
+const SPEC_MINOR = NET_SPEC_MINOR;
+const MAX_INFLIGHT = NET_MAX_INFLIGHT;
+const MAX_REQUEST_BYTES = NET_MAX_REQUEST_BYTES;
+const DEFAULT_QUEUE_BYTES = NET_DEFAULT_QUEUE_BYTES;
+const MAX_QUEUE_BYTES = NET_MAX_QUEUE_BYTES;
+const DEFAULT_AGGREGATE_BYTES = NET_DEFAULT_AGGREGATE_BYTES;
+const MAX_AGGREGATE_BYTES = NET_MAX_AGGREGATE_BYTES;
+const MAX_EVENTS_PER_TICK = NET_MAX_EVENTS_PER_TICK;
+const MAX_TICK_BYTES = NET_MAX_TICK_BYTES;
+const MAX_HEADERS = NET_MAX_HEADERS;
+const MAX_HEADER_BYTES = NET_MAX_HEADER_BYTES;
+const DEFAULT_TIMEOUT_MS = NET_DEFAULT_TIMEOUT_MS;
+const MAX_TIMEOUT_MS = NET_MAX_TIMEOUT_MS;
+const MAX_REDIRECTS = NET_MAX_REDIRECTS;
+const FORBIDDEN_METHODS = new Set(NET_METHODS_FORBIDDEN);
+const NULL_BODY_STATUS = new Set(HTTP_NULL_BODY_STATUS);
 
 const LIMITS = Object.freeze({
   specMajor: SPEC_MAJOR,
@@ -49,7 +72,7 @@ const LIMITS = Object.freeze({
   defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
   maxTimeoutMs: MAX_TIMEOUT_MS,
   maxRedirects: MAX_REDIRECTS,
-  tlsMinVersion: "1.2",
+  tlsMinVersion: NET_TLS_MIN_VERSION,
   features: ["tls"],
 });
 
@@ -181,7 +204,20 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
       end(state);
       return;
     }
-    const reader = response.body.getReader();
+    // A BYOB reader bounds every read to the queue's free space, so the
+    // receive queue is a hard cap (queueBytes) the way a native core's is.
+    // Bodies that are not byte streams (some runtimes' synthetic responses)
+    // fall back to the default reader, whose chunks are sized by the
+    // browser: the host then stops pulling at the cap but the chunk that
+    // crossed it is held whole (at most one chunk past queueBytes).
+    let reader;
+    let byob = false;
+    try {
+      reader = response.body.getReader({ mode: "byob" });
+      byob = true;
+    } catch {
+      reader = response.body.getReader();
+    }
     state.reader = reader;
     try {
       for (;;) {
@@ -193,7 +229,9 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
         }
         if (state.terminal) break;
         state.armIdle();
-        const { done, value } = await reader.read();
+        const { done, value } = byob
+          ? await reader.read(new Uint8Array(Math.min(state.queueBytes - state.queued, 64 * 1024)))
+          : await reader.read();
         if (state.terminal) break;
         if (done) {
           end(state);
@@ -204,6 +242,7 @@ export function createNetHost(nativeFetch = globalThis.fetch.bind(globalThis)) {
           fail(state, "response_too_large", `body exceeds ${state.maxBodyBytes} bytes`);
           break;
         }
+        if (value.byteLength === 0) continue; // a BYOB read may fill nothing yet
         state.chunks.push(value);
         state.queued += value.byteLength;
         state.dirty = true; // new bytes: announce `readable` at the next tick
