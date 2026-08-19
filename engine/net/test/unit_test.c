@@ -270,6 +270,161 @@ static void test_policy(pnet_runtime *rt) {
   CHECK(make_runtime("not json") == NULL);
 }
 
+/* --- shared policy vectors -------------------------------------------------- */
+
+/* contracts/spec/vectors/network-policy.json: the same documents and
+ * decisions the TypeScript reference and the Rust core run. The path comes
+ * from CMake (PNET_VECTORS_DIR). */
+#ifndef PNET_VECTORS_DIR
+#define PNET_VECTORS_DIR "../../contracts/spec/vectors"
+#endif
+
+static char *read_file(const char *path, size_t *len) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char *buf = malloc((size_t)n + 1);
+  if (!buf) { fclose(f); return NULL; }
+  if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+  fclose(f);
+  buf[n] = 0;
+  *len = (size_t)n;
+  return buf;
+}
+
+static pnet_runtime *vector_runtime(const pnet_jdoc *doc, int policies, const char *name) {
+  int node = pnet_json_get(doc, policies, name);
+  if (node < 0) return NULL;
+  size_t len = doc->nodes[node].raw_len;
+  char *text = malloc(len + 1);
+  memcpy(text, doc->nodes[node].raw, len);
+  text[len] = 0;
+  pnet_runtime *rt = make_runtime(text);
+  free(text);
+  return rt;
+}
+
+static void test_policy_vectors(void) {
+  size_t len = 0;
+  char *text = read_file(PNET_VECTORS_DIR "/network-policy.json", &len);
+  CHECK(text != NULL);
+  if (!text) return;
+  enum { CAP = 4096 };
+  pnet_jnode *nodes = malloc(sizeof(pnet_jnode) * CAP);
+  pnet_jdoc doc;
+  int root = pnet_json_parse(&doc, nodes, CAP, text, len);
+  CHECK(root >= 0);
+  if (root < 0) { free(nodes); free(text); return; }
+  int policies = pnet_json_get(&doc, root, "policies");
+  CHECK(policies >= 0);
+
+  /* Every named policy parses. */
+  for (int k = doc.nodes[policies].first_child; k >= 0; k = doc.nodes[k].next) {
+    char name[64];
+    size_t nl;
+    pnet_json_string(&doc, k, name, sizeof name, &nl);
+    pnet_runtime *rt = vector_runtime(&doc, policies, name);
+    if (!rt) fprintf(stderr, "vector policy %s did not parse\n", name);
+    CHECK(rt != NULL);
+    if (rt) pnet_runtime_destroy(rt);
+  }
+
+  /* Invalid documents are refused. */
+  int invalid = pnet_json_get(&doc, root, "invalid");
+  for (int e = pnet_json_first(&doc, invalid); e >= 0; e = pnet_json_next(&doc, e)) {
+    char name[96];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "name"), name, sizeof name, NULL);
+    int pol = pnet_json_get(&doc, e, "policy");
+    size_t plen = doc.nodes[pol].raw_len;
+    char *ptext = malloc(plen + 1);
+    memcpy(ptext, doc.nodes[pol].raw, plen);
+    ptext[plen] = 0;
+    pnet_runtime *rt = make_runtime(ptext);
+    if (rt) fprintf(stderr, "invalid vector accepted: %s\n", name);
+    CHECK(rt == NULL);
+    if (rt) pnet_runtime_destroy(rt);
+    free(ptext);
+  }
+
+  /* Connect decisions. */
+  int connect = pnet_json_get(&doc, root, "connect");
+  for (int e = pnet_json_first(&doc, connect); e >= 0; e = pnet_json_next(&doc, e)) {
+    char pname[64], proto[8], host[256];
+    int64_t port;
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "policy"), pname, sizeof pname, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "protocol"), proto, sizeof proto, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "host"), host, sizeof host, NULL);
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "port"), &port);
+    int allowed_node = pnet_json_get(&doc, e, "allowed");
+    bool allowed = doc.nodes[allowed_node].truthy;
+    pnet_runtime *rt = vector_runtime(&doc, policies, pname);
+    CHECK(rt != NULL);
+    if (!rt) continue;
+    /* The core sees URL hosts the way pnet_url hands them over: lowercase,
+     * brackets stripped, trailing dot removed. */
+    char norm[256];
+    size_t hl = strlen(host);
+    const char *h = host;
+    if (hl >= 2 && host[0] == '[' && host[hl - 1] == ']') { h = host + 1; hl -= 2; }
+    memcpy(norm, h, hl);
+    norm[hl] = 0;
+    pnet_lower(norm, hl);
+    if (hl > 1 && norm[hl - 1] == '.') norm[--hl] = 0;
+    bool got = pnet_policy_allows_connect(&rt->policy, pnet_proto_from_scheme(proto), norm, (uint16_t)port);
+    if (got != allowed) fprintf(stderr, "connect vector mismatch: %s %s %s %lld -> %d\n", pname, proto, host, (long long)port, got);
+    CHECK(got == allowed);
+    pnet_runtime_destroy(rt);
+  }
+
+  /* Address classification + the localNetwork gate. */
+  pnet_runtime *open = vector_runtime(&doc, policies, "standard");
+  pnet_runtime *closed = vector_runtime(&doc, policies, "secure-only");
+  CHECK(open && closed);
+  int address = pnet_json_get(&doc, root, "address");
+  for (int e = pnet_json_first(&doc, address); e >= 0 && open && closed; e = pnet_json_next(&doc, e)) {
+    char lit[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "address"), lit, sizeof lit, NULL);
+    bool is_public = doc.nodes[pnet_json_get(&doc, e, "public")].truthy;
+    bool is_multicast = doc.nodes[pnet_json_get(&doc, e, "multicast")].truthy;
+    pnet_addr a;
+    bool parsed = pnet_parse_ip_literal(lit, strlen(lit), &a);
+    CHECK(parsed);
+    if (!parsed) continue;
+    if (pnet_addr_is_public(&a) != is_public) fprintf(stderr, "address vector public mismatch: %s\n", lit);
+    CHECK(pnet_addr_is_public(&a) == is_public);
+    CHECK(pnet_addr_is_multicast(&a) == is_multicast);
+    CHECK(pnet_policy_allows_address(&closed->policy, &a) == is_public);
+    CHECK(pnet_policy_allows_address(&open->policy, &a) == !is_multicast);
+  }
+  if (open) pnet_runtime_destroy(open);
+  if (closed) pnet_runtime_destroy(closed);
+
+  /* Listen decisions. */
+  int listen = pnet_json_get(&doc, root, "listen");
+  for (int e = pnet_json_first(&doc, listen); e >= 0; e = pnet_json_next(&doc, e)) {
+    char pname[64], proto[8], lit[64];
+    int64_t port;
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "policy"), pname, sizeof pname, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "protocol"), proto, sizeof proto, NULL);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "address"), lit, sizeof lit, NULL);
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "port"), &port);
+    bool allowed = doc.nodes[pnet_json_get(&doc, e, "allowed")].truthy;
+    pnet_runtime *rt = vector_runtime(&doc, policies, pname);
+    CHECK(rt != NULL);
+    if (!rt) continue;
+    pnet_addr a;
+    CHECK(pnet_parse_ip_literal(lit, strlen(lit), &a));
+    bool got = pnet_policy_allows_listen(&rt->policy, pnet_proto_from_scheme(proto), &a, (uint16_t)port);
+    if (got != allowed) fprintf(stderr, "listen vector mismatch: %s %s %s %lld -> %d\n", pname, proto, lit, (long long)port, got);
+    CHECK(got == allowed);
+    pnet_runtime_destroy(rt);
+  }
+  free(nodes);
+  free(text);
+}
+
 /* --- JSON --------------------------------------------------------------- */
 
 static void test_json(pnet_runtime *rt) {
@@ -396,6 +551,52 @@ static void test_queue(pnet_runtime *rt) {
   pnet_queue_drop_handle(rt, &q, 3);
   CHECK(q.pending_count == 0);
   pnet_queue_free(rt, &q);
+
+  /* Transactional poll: with the heap capped at its current usage the batch
+   * cannot be allocated — nothing is consumed, the terminal event survives,
+   * and the next poll (memory back) delivers the whole batch. */
+  pnet_queue tq;
+  pnet_queue_init(&tq, 64, 65536);
+  char *e1 = pnet_event_json(rt, "headers", "h", 7, ",\"status\":200", 13, &len);
+  CHECK(pnet_queue_push(rt, &tq, 7, false, 10, e1, len));
+  CHECK(pnet_queue_push_readable(rt, &tq, 7, "h", 5));
+  char *e2 = pnet_event_json(rt, "end", "h", 7, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 7, true, 0, e2, len));
+  pnet_queue_freeze(rt, &tq);
+  CHECK(tq.visible_count == 3);
+  size_t saved_cap = rt->cfg.max_heap_bytes;
+  rt->cfg.max_heap_bytes = pnet_runtime_heap_bytes(rt);
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+  CHECK(tq.visible_count == 3); /* nothing consumed */
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+  CHECK(tq.visible_count == 3);
+  rt->cfg.max_heap_bytes = saved_cap;
+  batch = pnet_queue_poll(rt, &tq, &len);
+  CHECK(batch != NULL);
+  CHECK(batch && strstr(batch, "\"t\":\"end\",\"h\":7") != NULL);
+  CHECK(batch && strstr(batch, "\"t\":\"readable\",\"h\":7") != NULL);
+  CHECK(tq.visible_count == 0);
+  CHECK(pnet_queue_poll(rt, &tq, &len) == NULL);
+
+  /* Two-phase poll: render is idempotent until consume; a freeze in between
+   * keeps its new events visible for the next render. */
+  char *e3 = pnet_event_json(rt, "headers", "h", 8, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 8, false, 1, e3, len));
+  pnet_queue_freeze(rt, &tq);
+  const char *r1 = pnet_queue_render(rt, &tq, &len);
+  CHECK(r1 && strstr(r1, "\"h\":8") != NULL);
+  const char *r2 = pnet_queue_render(rt, &tq, &len);
+  CHECK(r2 == r1 && tq.visible_count == 1);
+  char *e4 = pnet_event_json(rt, "end", "h", 8, NULL, 0, &len);
+  CHECK(pnet_queue_push(rt, &tq, 8, true, 0, e4, len));
+  pnet_queue_freeze(rt, &tq); /* appended behind the rendered batch */
+  CHECK(tq.visible_count == 2);
+  pnet_queue_consume(rt, &tq);
+  CHECK(tq.visible_count == 1);
+  batch = pnet_queue_poll(rt, &tq, &len);
+  CHECK(batch && strstr(batch, "\"t\":\"end\",\"h\":8") != NULL && strstr(batch, "headers") == NULL);
+  pnet_queue_consume(rt, &tq); /* no-op without a rendered batch */
+  pnet_queue_free(rt, &tq);
 }
 
 /* --- HTTP client refusals (no I/O) -------------------------------------- */
@@ -441,6 +642,96 @@ static void test_http_refusals(pnet_runtime *rt) {
   CHECK(strstr(pnet_http_limits(rt), "\"specMajor\":2") != NULL);
 }
 
+/* --- shared HTTP semantics vectors ------------------------------------------ */
+
+static void test_http_semantics_vectors(void) {
+  size_t len = 0;
+  char *text = read_file(PNET_VECTORS_DIR "/http-semantics.json", &len);
+  CHECK(text != NULL);
+  if (!text) return;
+  enum { CAP = 2048 };
+  pnet_jnode *nodes = malloc(sizeof(pnet_jnode) * CAP);
+  pnet_jdoc doc;
+  int root = pnet_json_parse(&doc, nodes, CAP, text, len);
+  CHECK(root >= 0);
+  if (root < 0) { free(nodes); free(text); return; }
+  pnet_runtime *rt = make_runtime("{\"connect\":[{\"protocol\":\"http\",\"host\":\"192.168.1.20\",\"port\":8080}],\"insecureTransport\":true,\"localNetwork\":true}");
+  CHECK(rt != NULL);
+  if (!rt) { free(nodes); free(text); return; }
+
+  /* Methods: start() accepts or refuses the token. */
+  int methods = pnet_json_get(&doc, root, "methods");
+  for (int e = pnet_json_first(&doc, methods); e >= 0; e = pnet_json_next(&doc, e)) {
+    char method[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "method"), method, sizeof method, NULL);
+    bool accepted = doc.nodes[pnet_json_get(&doc, e, "accepted")].truthy;
+    char meta[256];
+    /* Escape is unnecessary: the vectors' method tokens contain no quotes. */
+    snprintf(meta, sizeof meta, "{\"url\":\"http://192.168.1.20:8080/\",\"method\":\"%s\",\"headers\":{}}", method);
+    int h = pnet_http_start(rt, meta, NULL, 0);
+    if ((h > 0) != accepted) fprintf(stderr, "method vector mismatch: %s -> %d\n", method, h);
+    CHECK((h > 0) == accepted);
+    if (h > 0) pnet_http_cancel(rt, h);
+    pnet_runtime_service(rt);
+    pnet_runtime_begin_tick(rt);
+    pnet_http_poll(rt, &len);
+  }
+
+  /* Status classification. */
+  int status = pnet_json_get(&doc, root, "status");
+  for (int e = pnet_json_first(&doc, status); e >= 0; e = pnet_json_next(&doc, e)) {
+    int64_t st;
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "status"), &st);
+    bool framing = doc.nodes[pnet_json_get(&doc, e, "bodylessFraming")].truthy;
+    bool null_body = doc.nodes[pnet_json_get(&doc, e, "nullBody")].truthy;
+    CHECK(pnet_status_is_bodyless((int)st) == framing);
+    CHECK(pnet_status_is_null_body((int)st) == null_body);
+  }
+
+  /* Redirect plan. */
+  int redirect = pnet_json_get(&doc, root, "redirect");
+  for (int e = pnet_json_first(&doc, redirect); e >= 0; e = pnet_json_next(&doc, e)) {
+    int64_t st;
+    char method[16], next[16] = {0};
+    pnet_json_i64(&doc, pnet_json_get(&doc, e, "status"), &st);
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "method"), method, sizeof method, NULL);
+    bool followed = doc.nodes[pnet_json_get(&doc, e, "followed")].truthy;
+    bool to_get = false;
+    bool got = pnet_http_redirect_plan((int)st, method, strlen(method), &to_get);
+    CHECK(got == followed);
+    if (followed) {
+      pnet_json_string(&doc, pnet_json_get(&doc, e, "nextMethod"), next, sizeof next, NULL);
+      bool keep_body = doc.nodes[pnet_json_get(&doc, e, "keepBody")].truthy;
+      const char *expect_method = to_get ? "GET" : method;
+      if (strcmp(expect_method, next) != 0 || keep_body == to_get)
+        fprintf(stderr, "redirect vector mismatch: %lld %s -> %s keepBody=%d\n", (long long)st, method, next, keep_body);
+      CHECK(strcmp(expect_method, next) == 0);
+      CHECK(keep_body == !to_get);
+    }
+  }
+
+  /* Core-owned request headers are stripped, others pass. The request is
+   * serialized into the connection tx queue on start; the stub driver never
+   * connects, so the head sits in the queue where we can read it back. */
+  int headers = pnet_json_get(&doc, root, "requestHeaders");
+  for (int e = pnet_json_first(&doc, headers); e >= 0; e = pnet_json_next(&doc, e)) {
+    char name[64];
+    pnet_json_string(&doc, pnet_json_get(&doc, e, "name"), name, sizeof name, NULL);
+    bool owned = doc.nodes[pnet_json_get(&doc, e, "coreOwned")].truthy;
+    char lower[64];
+    strcpy(lower, name);
+    pnet_lower(lower, strlen(lower));
+    static const char *const list[] = PNET_HTTP_CORE_OWNED_REQUEST_HEADERS;
+    bool in_list = false;
+    for (size_t i = 0; i < PNET_HTTP_CORE_OWNED_REQUEST_HEADERS_COUNT; i++)
+      if (strcmp(lower, list[i]) == 0) in_list = true;
+    CHECK(in_list == owned);
+  }
+  pnet_runtime_destroy(rt);
+  free(nodes);
+  free(text);
+}
+
 int main(void) {
   pnet_runtime *rt = make_runtime(POLICY);
   CHECK(rt != NULL);
@@ -449,6 +740,8 @@ int main(void) {
   test_h1_body();
   test_url(rt);
   test_policy(rt);
+  test_policy_vectors();
+  test_http_semantics_vectors();
   test_json(rt);
   test_codecs();
   test_queue(rt);

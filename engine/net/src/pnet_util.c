@@ -463,6 +463,9 @@ bool pnet_parse_ipv4(const char *s, size_t len, uint8_t out[4]) {
       digits++;
     }
     if (digits == 0 || digits > 3) return false;
+    /* No leading zeros: "010" is octal to some resolvers and decimal to
+     * others, so it is not a literal here (nor a valid hostname). */
+    if (digits > 1 && s[i - digits] == '0') return false;
     out[part] = (uint8_t)v;
     if (part < 3) {
       if (i >= len || s[i] != '.') return false;
@@ -591,6 +594,68 @@ void pnet_format_addr(const pnet_addr *addr, char *out, size_t cap) {
   }
   if (o < cap) out[o] = 0;
   else out[cap - 1] = 0;
+}
+
+bool pnet_status_in(int status, const int *list, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    if (list[i] == status) return true;
+  return false;
+}
+
+bool pnet_status_is_bodyless(int status) {
+  /* RFC 9112 §6.3 rule 1: 1xx, 204 and 304 carry no body whatever the
+   * framing headers say (PNET_HTTP_BODYLESS_STATUS + the 1xx range). */
+  if (status >= 100 && status < 200) return true;
+  return pnet_status_in(status, (const int[])PNET_HTTP_BODYLESS_STATUS, PNET_HTTP_BODYLESS_STATUS_COUNT);
+}
+
+bool pnet_http_redirect_plan(int status, const char *method, size_t method_len, bool *to_get) {
+  /* The shared redirect table (spec.h): which statuses a client follows and
+   * how the method is rewritten — 303 turns every method but HEAD into a
+   * GET without a body, 301/302 turn POST into GET, 307/308 keep both. */
+  *to_get = false;
+  if (!pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_STATUS, PNET_HTTP_REDIRECT_STATUS_COUNT)) return false;
+  if (pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS, PNET_HTTP_REDIRECT_ANY_TO_GET_STATUS_COUNT) &&
+      !pnet_ieq_n(method, method_len, "HEAD"))
+    *to_get = true;
+  if (pnet_status_in(status, (const int[])PNET_HTTP_REDIRECT_POST_TO_GET_STATUS, PNET_HTTP_REDIRECT_POST_TO_GET_STATUS_COUNT) &&
+      pnet_ieq_n(method, method_len, "POST"))
+    *to_get = true;
+  return true;
+}
+
+bool pnet_status_is_null_body(int status) {
+  /* Fetch null-body statuses: a response that may not carry content. */
+  return pnet_status_in(status, (const int[])PNET_HTTP_NULL_BODY_STATUS, PNET_HTTP_NULL_BODY_STATUS_COUNT);
+}
+
+bool pnet_hostname_valid(const char *s, size_t len) {
+  /* Lowercase ASCII DNS name: labels of [a-z0-9-], 1..63 bytes, not starting
+   * or ending with '-', whole name <= 253 bytes. Mirrors
+   * normalizeNetworkHostname() in contracts/spec/network-policy.ts. */
+  if (len == 0 || len > 253) return false;
+  /* A name whose last label is all digits is a (malformed) IPv4 literal,
+   * never a DNS name (WHATWG URL "ends in a number"). */
+  size_t last = len;
+  while (last > 0 && s[last - 1] != '.') last--;
+  bool numeric = last < len;
+  for (size_t i = last; i < len; i++)
+    if (s[i] < '0' || s[i] > '9') numeric = false;
+  if (numeric) return false;
+  size_t label = 0;
+  for (size_t i = 0; i <= len; i++) {
+    if (i == len || s[i] == '.') {
+      if (label == 0 || label > 63) return false;
+      if (s[i - 1] == '-' || s[i - label] == '-') return false;
+      label = 0;
+      continue;
+    }
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+    if (!ok) return false;
+    label++;
+  }
+  return true;
 }
 
 bool pnet_addr_is_multicast(const pnet_addr *addr) {

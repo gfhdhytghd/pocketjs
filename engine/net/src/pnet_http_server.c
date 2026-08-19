@@ -1058,7 +1058,9 @@ int pnet_httpd_respond(pnet_runtime *rt, int req, const char *meta_json, const u
     if (pnet_json_type(&doc, endnode) != PNET_J_BOOL) goto out;
     end = doc.nodes[endnode].truthy;
   }
-  bool no_body_status = status == 204 || status == 304 || (status >= 100 && status < 200);
+  /* A null-body status (Fetch: 101/103/204/205/304) never carries content;
+   * 1xx cannot be sent through respond at all (status >= 200 above). */
+  bool no_body_status = pnet_status_is_null_body((int)status);
   if (no_body_status && (body_len > 0 || !end)) goto out;
   int64_t content_length = -1;
   int cl = pnet_json_get(&doc, root, "contentLength");
@@ -1207,6 +1209,14 @@ void pnet_httpd_abort(pnet_runtime *rt, int req) {
 
 const char *pnet_httpd_poll(pnet_runtime *rt, size_t *len) {
   return pnet_queue_poll(rt, &rt->httpd_queue, len);
+}
+
+const char *pnet_httpd_poll_render(pnet_runtime *rt, size_t *len) {
+  return pnet_queue_render(rt, &rt->httpd_queue, len);
+}
+
+void pnet_httpd_poll_consume(pnet_runtime *rt) {
+  pnet_queue_consume(rt, &rt->httpd_queue);
 }
 
 const char *pnet_httpd_last_error(pnet_runtime *rt) {
