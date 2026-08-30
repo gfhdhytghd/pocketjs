@@ -13,7 +13,15 @@ import {
   WIRE_MSG,
   WIRE_VERSION,
 } from "../contracts/spec/spec.ts";
-import { LINE_BUDGET, THEME_BG, THEME_FG, type RowUpdate } from "../apps/term/protocol.ts";
+import { readFileSync } from "node:fs";
+import opentype from "opentype.js";
+import {
+  LINE_BUDGET,
+  TERM_GLYPHS,
+  THEME_BG,
+  THEME_FG,
+  type RowUpdate,
+} from "../apps/term/protocol.ts";
 import {
   FrameParser,
   encodeBeacon,
@@ -139,6 +147,17 @@ describe("cell resolution (authority-side SGR)", () => {
   test("inverse swaps resolved theme colors", () => {
     const cell = fakeCell({ isInverse: () => 1 });
     expect(resolveCell(cell)).toEqual({ ch: "x", fg: THEME_BG, bg: THEME_FG, width: 1 });
+  });
+
+  test("the other Unicode spaces resolve to a plain blank", () => {
+    // A terminal UI pads with U+00A0 (Claude Code's input box is full of
+    // them). A space glyph has no outline, so routing one through the font
+    // chain rejects every face and lands on a placeholder — which is how a
+    // row of padding turned into a row of "?".
+    expect(resolveCell(fakeCell({ getChars: () => " " })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ getChars: () => " " })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ getChars: () => "　", getWidth: () => 2 })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ getChars: () => "你" })).ch).toBe("你");
   });
 
   test("carries the terminal's column width", () => {
@@ -328,6 +347,20 @@ describe("runtime glyph atlas", () => {
       const length = outView.getUint32(entry + 12);
       expect([...out.subarray(offset, offset + length)]).toEqual([...tables[i].data]);
     }
+  });
+
+  test("every glyph the app declares baked is one the mono face really has", () => {
+    // TERM_GLYPHS is two things at once: the literal the compiler collects
+    // into the app's atlases, and the companion's idea of what the device
+    // can already draw. A codepoint the mono face does not map is dropped at
+    // bake time and then never routed to the fallback chain either — it just
+    // becomes tofu. Whatever goes in that literal has to exist in the face.
+    const mono = opentype.parse(
+      readFileSync(new URL("../assets/fonts/JetBrainsMono-Regular.ttf", import.meta.url))
+        .buffer as ArrayBuffer,
+    );
+    const missing = [...TERM_GLYPHS].filter((ch) => mono.charToGlyphIndex(ch) === 0);
+    expect(missing).toEqual([]);
   });
 
   test("the fallback chain spreads a terminal's glyphs across faces", () => {

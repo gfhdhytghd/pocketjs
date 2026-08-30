@@ -25,11 +25,29 @@ export const THEME_FG = 0xd8dee9;
 export const THEME_BG = 0x10151c;
 export const THEME_CURSOR = 0x9fb6d8;
 
-/** Box-drawing + block glyphs TUI apps (htop, vim, tmux) paint. This literal
- *  doubles as the font-atlas charset: the pass-1 AST scan collects every
- *  string literal's codepoints into the baked atlases. */
-export const TERM_GLYPHS =
-  "│┃─━┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╡╞▀▄█▌▐░▒▓■□▪▫▲►▼◄◆●○∙·•‾⌐¬½¼«»≈≠≤≥±÷×→←↑↓↔⏻…—–‘’“”➜❯❮✔✗λ";
+/** The glyphs a terminal draws its own furniture with. These literals double
+ *  as the font-atlas charset: the pass-1 AST scan collects every string
+ *  literal's codepoints into the app's baked atlases, so they come from the
+ *  device's own monospace face at the size the grid was measured for.
+ *
+ *  The complete box-drawing and block-element ranges are here on purpose
+ *  rather than the handful a demo happens to print. A block element has to
+ *  FILL its cell to tile with its neighbours, and the runtime atlases cannot
+ *  promise that: they hold a proportional face scaled down until its widest
+ *  glyph fits one column, which turns a solid block into a smaller rectangle
+ *  and a drawn logo into rubble. Baked at build time in the mono face, they
+ *  land on the cell exactly. */
+const BOX_DRAWING =
+  "─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰╱╲╳╴╵╶╷╸╹╺╻╼╽╾╿";
+const BLOCK_ELEMENTS = "▀▁▂▃▄▅▆▇█▉▊▋▌▍▎▏▐░▒▓▔▕▖▗▘▙▚▛▜▝▞▟";
+/** Symbols outside the box/block ranges. Everything here must exist in the
+ *  mono face (tests/term-host.test.ts pins that): a codepoint listed as baked
+ *  is also a codepoint the companion will not route to a fallback face, so
+ *  one the face lacks renders as tofu with no second chance. ⌐ and ✔ were
+ *  here and are not in JetBrains Mono — they belong to the chain. */
+const TERM_SYMBOLS = "■□▪▫▲►▼◄◆●○∙·•‾¬½¼«»≈≠≤≥±÷×→←↑↓↔⏻…—–‘’“”➜❯❮✗λ";
+
+export const TERM_GLYPHS = `${BOX_DRAWING}${BLOCK_ELEMENTS}${TERM_SYMBOLS}`;
 
 /** One run of same-styled cells: start column, text, fg, bg (0xRRGGBB ints,
  *  -1 = the theme default), an optional font slot — present when the run's

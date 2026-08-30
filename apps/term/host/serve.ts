@@ -370,6 +370,8 @@ const atlas = new DynamicAtlasSet();
  *  same column width — an unrenderable glyph must not also shift the rest of
  *  the row, which is what dropping it or leaving it to a missing atlas would
  *  do. */
+const uncovered = new Set<number>();
+
 function classify(cell: Cell): void {
   if (cell.width === 0 || cell.ch === "" || cell.ch === " ") return;
   const cp = cell.ch.codePointAt(0);
@@ -380,6 +382,15 @@ function classify(cell: Cell): void {
     atlas.want(cp, columns, slot);
     cell.slot = slot;
     return;
+  }
+  // A placeholder is the last resort, and the operator should be able to
+  // find out which character it stood for rather than guess from a "?".
+  if (!uncovered.has(cp)) {
+    uncovered.add(cp);
+    console.log(
+      `[term] no face draws U+${cp.toString(16).toUpperCase().padStart(4, "0")} ` +
+        `(${cell.ch}) — showing a placeholder`,
+    );
   }
   cell.ch = "?".repeat(columns);
 }

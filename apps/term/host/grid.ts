@@ -64,6 +64,25 @@ export const PALETTE_256: readonly number[] = (() => {
   return table;
 })();
 
+/** Unicode's other spaces. A terminal UI pads with them — Claude Code's
+ *  input box is full of U+00A0 — and they must be treated as blanks, not as
+ *  characters to find a font for: a space glyph has no outline, so the
+ *  fallback chain would reject every face and fall through to a placeholder.
+ *  A row of "?" where the padding belongs is exactly what that looked like. */
+const SPACE_LIKE = new Set<number>([
+  0x00a0, // no-break space
+  0x1680, // ogham space mark
+  0x202f, // narrow no-break space
+  0x205f, // medium mathematical space
+  0x3000, // ideographic space (two columns)
+  0xfeff, // zero-width no-break space
+]);
+for (let cp = 0x2000; cp <= 0x200a; cp += 1) SPACE_LIKE.add(cp); // en/em quad..hair
+
+export function isSpaceLike(cp: number): boolean {
+  return cp === 0x20 || SPACE_LIKE.has(cp);
+}
+
 function halve(rgb: number): number {
   return (((rgb >> 16) & 0xff) >> 1 << 16) | ((((rgb >> 8) & 0xff) >> 1) << 8) | ((rgb & 0xff) >> 1);
 }
@@ -74,7 +93,11 @@ function halve(rgb: number): number {
  *  renders exactly what it is told. */
 export function resolveCell(cell: XtermCellLike): Cell {
   const width = cell.getWidth() as 0 | 1 | 2;
-  const ch = width === 0 ? "" : cell.getChars();
+  const raw = width === 0 ? "" : cell.getChars();
+  // Normalize the other spaces to the ordinary one here, so everything
+  // downstream — run merging, glyph routing — sees a blank.
+  const first = raw.codePointAt(0);
+  const ch = raw.length > 0 && first !== undefined && isSpaceLike(first) ? " " : raw;
   let fg = -1;
   let bg = -1;
   if (!cell.isFgDefault()) {
@@ -124,13 +147,15 @@ export function rowRuns(cells: readonly Cell[]): Run[] {
     const cell = cells[col];
     // The trailing half of a wide character: already covered, never a gap.
     if (cell.width === 0) continue;
+    const columns = cell.width === 2 ? 2 : 1;
     const blank = (cell.ch === " " || cell.ch === "") && cell.bg < 0;
     if (blank) {
-      if (run !== null) pendingBlanks += 1;
+      // A blank is worth its columns: the ideographic space is two wide, and
+      // counting it as one would pull the rest of the row a column left.
+      if (run !== null) pendingBlanks += columns;
       continue;
     }
     const ch = cell.ch === "" ? " " : cell.ch;
-    const columns = cell.width === 2 ? 2 : 1;
     // Blanks are only ever folded into a baked run: a runtime atlas holds
     // exactly the codepoints the companion was asked to bake, and a space is
     // not one of them — folding one in would leave a hole mid-run.
