@@ -45,9 +45,21 @@ const CELL_H = 13;
 
 const TAB_H = 26;
 const TAB_W = 72;
-/** The close target on the active tab, measured from its right edge. */
-const TAB_CLOSE_W = 18;
+/** The trailing "open a session" cell. Narrow, so it reads as sitting beside
+ *  the last tab rather than as an empty tab of its own. */
+const TAB_NEW_W = 30;
 const KB_TOP = 240 - KB_H;
+
+/* Closing a session is a hold, then a slide, then a release — not a tap on a
+ * small ×. The panel is resistive and single-contact: an 18 px target inside
+ * a 72 px tab was a coin flip, and getting it wrong killed a shell. Holding a
+ * tab slides a full-width bar out from under the strip; releasing on the bar
+ * closes, releasing anywhere else does not. Nothing about it needs precision
+ * in x, and the arming is deliberate. */
+const CLOSE_BAR_H = 44;
+const CLOSE_HOLD_SECONDS = 0.35;
+/** Frames the bar takes to slide in or out. */
+const CLOSE_ANIM_FRAMES = 6;
 
 const DPAD_KEYS: readonly [number, "Up" | "Down" | "Left" | "Right"][] = [
   [BTN.UP, "Up"],
@@ -131,28 +143,67 @@ export default function TermApp() {
     }
   });
 
-  // Session tab strip on the touch screen: tap a tab to attach, its × to
-  // close that session, the trailing + to open one.
+  // Session tab strip on the touch screen: tap a tab to attach, hold one to
+  // arm closing it, the trailing + to open one.
   let tabsNode: NodeMirror | undefined;
+  /** The session the close bar is armed for, and how far the bar has slid. */
+  const [closingSid, setClosingSid] = createSignal(-1);
+  const [closeAnim, setCloseAnim] = createSignal(0);
+  const [overClose, setOverClose] = createSignal(false);
+  const inCloseBar = (y: number) => y >= TAB_H && y < TAB_H + CLOSE_BAR_H;
+  const sessionAt = (x: number) => {
+    const list = store.sessions();
+    const index = Math.floor(x / TAB_W);
+    return index >= 0 && index < list.length ? list[index] : undefined;
+  };
+
+  onFrame(() => {
+    // The bar slides both ways, so a cancelled hold retracts rather than
+    // vanishing.
+    const target = closingSid() >= 0 ? 1 : 0;
+    const current = closeAnim();
+    if (current === target) return;
+    const step = 1 / CLOSE_ANIM_FRAMES;
+    setCloseAnim(target > current ? Math.min(1, current + step) : Math.max(0, current - step));
+  });
+
   createGesture({
     surface: "auxiliary",
     region: { node: () => tabsNode },
-    onDown: (contact) => {
+    longPressSeconds: CLOSE_HOLD_SECONDS,
+    onLongPress: (contact) => {
+      const session = sessionAt(contact.x);
+      if (session) setClosingSid(session.sid);
+    },
+    onPanMove: (contact) => {
+      if (closingSid() >= 0) setOverClose(inCloseBar(contact.y));
+    },
+    onUp: (contact) => {
+      const armed = closingSid();
+      if (armed >= 0) {
+        if (inCloseBar(contact.y)) store.kill(armed);
+        setClosingSid(-1);
+        setOverClose(false);
+        return;
+      }
+      // A plain tap: the tabs, then the trailing cell that opens one.
       const list = store.sessions();
-      const index = Math.floor(contact.x / TAB_W);
-      if (index >= list.length) {
-        if (index === list.length) store.newSession();
+      const session = sessionAt(contact.x);
+      if (session) {
+        store.attach(session.sid);
         return;
       }
-      const session = list[index];
-      const withinTab = contact.x - index * TAB_W;
-      if (session.sid === store.activeSid() && withinTab >= TAB_W - TAB_CLOSE_W) {
-        store.kill(session.sid);
-        return;
-      }
-      store.attach(session.sid);
+      const trailing = list.length * TAB_W;
+      if (contact.x >= trailing && contact.x < trailing + TAB_NEW_W) store.newSession();
+    },
+    onCancel: () => {
+      setClosingSid(-1);
+      setOverClose(false);
     },
   });
+
+  const closingTitle = () =>
+    store.sessions().find((s) => s.sid === closingSid())?.title ?? "";
 
   return (
     <>
@@ -195,21 +246,42 @@ export default function TermApp() {
                   </Text>
                   <Show when={session.sid === store.activeSid()}>
                     <View class="absolute left-0 right-0 bottom-0 h-[2] bg-[#4c9bf5]" />
-                    <View
-                      class="absolute top-0 bottom-0 items-center justify-center bg-[#3b4560]"
-                      style={{ insetR: 0, width: TAB_CLOSE_W }}
-                      debugName="TabClose"
-                    >
-                      <Text class="text-xs text-[#9fb6d8]">×</Text>
-                    </View>
+                  </Show>
+                  {/* The tab being held reads as the source of the bar. */}
+                  <Show when={session.sid === closingSid()}>
+                    <View class="absolute left-0 right-0 top-0 bottom-0 bg-[#7a2c2c66]" />
                   </Show>
                 </View>
               )}
             </For>
-            <View class="h-full items-center justify-center" style={{ width: TAB_W }}>
+            <View class="h-full items-center justify-center" style={{ width: TAB_NEW_W }}>
               <Text class="text-sm text-[#5d708c]">+</Text>
             </View>
           </View>
+
+          {/* Slides out from under the strip while a tab is held. */}
+          <Show when={closeAnim() > 0}>
+            <View
+              debugName="TabCloseBar"
+              class={
+                overClose()
+                  ? "absolute left-0 right-0 flex-row items-center justify-center gap-[6] bg-[#a33a3a]"
+                  : "absolute left-0 right-0 flex-row items-center justify-center gap-[6] bg-[#5c2626]"
+              }
+              style={{
+                insetT: TAB_H,
+                height: CLOSE_BAR_H,
+                translateY: -(1 - closeAnim()) * CLOSE_BAR_H,
+                opacity: closeAnim(),
+              }}
+            >
+              <Text class="text-sm text-[#ffdede] font-bold">×</Text>
+              <Text class="text-xs text-[#ffdede]">
+                {overClose() ? "release to close" : "slide here to close"}
+              </Text>
+              <Text class="text-xs text-[#e0a0a0]">{closingTitle()}</Text>
+            </View>
+          </Show>
 
           <View
             class="absolute left-0 right-0 flex-row items-center px-[8] gap-[10]"

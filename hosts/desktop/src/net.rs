@@ -17,11 +17,12 @@
 //! window opened by the companion already knows where it came from, and UDP
 //! discovery is for consoles that do not.
 
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use pocketjs_core::spec::wire;
@@ -34,10 +35,58 @@ const BACKOFF: Duration = Duration::from_secs(1);
 /// own bulk (font atlases arrive as chunks), so this only has to absorb a
 /// burst, not a stream.
 const LINE_QUEUE_CAP: usize = 512;
+/** How long a writer waits to be woken before re-checking the connection. */
+const WRITER_IDLE: Duration = Duration::from_millis(200);
+
+/// Frames waiting to go out, and the signal that wakes the writer.
+///
+/// A keystroke has to reach the socket the moment it is produced. Parking
+/// outgoing frames behind the read loop — which sits in a 250 ms blocking
+/// read whenever the terminal is quiet — put an entire read timeout between
+/// pressing a key and the character appearing: measured p50 133 ms against
+/// a companion whose own round trip is 4.6 ms. The console never had this
+/// because its transport pumps send and receive independently every frame
+/// (hosts/3ds/src/svcwire.c); here that separation is a condvar.
+#[derive(Default)]
+struct Outbox {
+    queue: Mutex<VecDeque<Vec<u8>>>,
+    woken: Condvar,
+}
+
+impl Outbox {
+    fn push(&self, frame: Vec<u8>) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.push_back(frame);
+            self.woken.notify_one();
+        }
+    }
+
+    /// Take everything queued, waiting briefly when there is nothing.
+    fn take(&self) -> Vec<Vec<u8>> {
+        let Ok(queue) = self.queue.lock() else {
+            return Vec::new();
+        };
+        let mut queue = if queue.is_empty() {
+            match self.woken.wait_timeout(queue, WRITER_IDLE) {
+                Ok((queue, _)) => queue,
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            queue
+        };
+        queue.drain(..).collect()
+    }
+
+    fn clear(&self) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.clear();
+        }
+    }
+}
 
 pub struct SvcWire {
     lines: Receiver<String>,
-    outbox: Sender<String>,
+    outbox: Arc<Outbox>,
     shutdown: Arc<AtomicBool>,
     pending: Vec<String>,
 }
@@ -48,18 +97,19 @@ impl SvcWire {
     /// app's own connect screen covers the time before the first line lands.
     pub fn spawn(addr: String, app: String) -> Self {
         let (line_tx, line_rx) = channel::<String>();
-        let (out_tx, out_rx) = channel::<String>();
+        let outbox = Arc::new(Outbox::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         {
+            let outbox = outbox.clone();
             let shutdown = shutdown.clone();
             std::thread::Builder::new()
                 .name("pjs-svc-wire".into())
-                .spawn(move || supervisor(&addr, &app, &line_tx, &out_rx, &shutdown))
+                .spawn(move || supervisor(&addr, &app, &line_tx, &outbox, &shutdown))
                 .expect("spawn svc wire thread");
         }
         Self {
             lines: line_rx,
-            outbox: out_tx,
+            outbox,
             shutdown,
             pending: Vec::new(),
         }
@@ -77,7 +127,9 @@ impl SvcWire {
     }
 
     pub fn send(&self, line: String) {
-        let _ = self.outbox.send(line);
+        if let Some(frame) = ctrl_frame(wire::MSG_CTRL, line.as_bytes()) {
+            self.outbox.push(frame);
+        }
     }
 }
 
@@ -91,13 +143,16 @@ fn supervisor(
     addr: &str,
     app: &str,
     lines: &Sender<String>,
-    outbox: &Receiver<String>,
+    outbox: &Arc<Outbox>,
     shutdown: &Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match connect(addr, app) {
             Ok(stream) => {
                 log::info!("pocket-desktop-host: svc wire connected to {addr}");
+                // Whatever piled up while disconnected is stale input, and a
+                // shell should not receive a keystroke from a minute ago.
+                outbox.clear();
                 let why = serve(stream, lines, outbox, shutdown);
                 log::info!("pocket-desktop-host: svc wire disconnected: {why}");
             }
@@ -159,30 +214,43 @@ fn read_full(mut stream: &TcpStream, buf: &mut [u8], shutdown: &AtomicBool) -> s
 fn serve(
     stream: TcpStream,
     lines: &Sender<String>,
-    outbox: &Receiver<String>,
+    outbox: &Arc<Outbox>,
     shutdown: &Arc<AtomicBool>,
 ) -> String {
-    let (frame_tx, frame_rx) = channel::<Vec<u8>>();
     let writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(e) => return format!("clone: {e}"),
     };
-    let tx_thread = std::thread::Builder::new()
-        .name("pjs-svc-wire-tx".into())
-        .spawn(move || {
-            let mut writer = writer;
-            while let Ok(frame) = frame_rx.recv() {
-                if writer.write_all(&frame).is_err() {
-                    break;
+    // The writer owns the outbox: a frame queued by the tick thread or by the
+    // reader goes out as soon as it is queued, never at the mercy of a
+    // blocking read on the other half of the socket.
+    let live = Arc::new(AtomicBool::new(true));
+    let tx_thread = {
+        let outbox = outbox.clone();
+        let live = live.clone();
+        let shutdown = shutdown.clone();
+        std::thread::Builder::new()
+            .name("pjs-svc-wire-tx".into())
+            .spawn(move || {
+                let mut writer = writer;
+                while live.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
+                    for frame in outbox.take() {
+                        if writer.write_all(&frame).is_err() {
+                            return;
+                        }
+                    }
                 }
-            }
-        });
+            })
+    };
 
-    let why = rx_loop(&stream, lines, outbox, &frame_tx, shutdown);
-    drop(frame_tx);
+    let why = rx_loop(&stream, lines, outbox, shutdown);
+    live.store(false, Ordering::Release);
+    // Wake the writer out of its wait so the thread can retire.
+    outbox.push(Vec::new());
     if let Ok(handle) = tx_thread {
         let _ = handle.join();
     }
+    outbox.clear();
     why
 }
 
@@ -198,21 +266,13 @@ fn ctrl_frame(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
 fn rx_loop(
     stream: &TcpStream,
     lines: &Sender<String>,
-    outbox: &Receiver<String>,
-    frames: &Sender<Vec<u8>>,
+    outbox: &Arc<Outbox>,
     shutdown: &Arc<AtomicBool>,
 ) -> String {
     let mut header = [0u8; wire::HEADER_SIZE];
     let mut payload: Vec<u8> = Vec::new();
     let mut queued = 0usize;
     loop {
-        // Anything the guest produced since the last pass goes out first, so
-        // a keystroke never waits on the read timeout.
-        while let Ok(line) = outbox.try_recv() {
-            if let Some(frame) = ctrl_frame(wire::MSG_CTRL, line.as_bytes()) {
-                let _ = frames.send(frame);
-            }
-        }
         match read_header(stream, &mut header, shutdown) {
             Ok(false) => continue, // timed out with nothing pending; poll again
             Ok(true) => {}
@@ -228,7 +288,7 @@ fn rx_loop(
         match frame.kind {
             wire::MSG_PING => {
                 if let Some(pong) = ctrl_frame(wire::MSG_PONG, &payload) {
-                    let _ = frames.send(pong);
+                    outbox.push(pong);
                 }
             }
             wire::MSG_CTRL => {
