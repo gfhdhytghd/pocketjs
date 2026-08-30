@@ -543,6 +543,7 @@ describe("semantic resolution", () => {
       notifications: [true, true, false, true],
       settings: [true, true, false, true],
       stats: [true, true, false, true],
+      term: [false, false, false, false], // requires the private 3ds-dev profile's auxiliary display and touch contracts
       "vue-sfc-lab": [true, true, false, true],
       zoomlab: [true, true, false, true],
     };

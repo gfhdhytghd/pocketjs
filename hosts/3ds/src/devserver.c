@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "dev_protocol.h"
+#include "soc.h"
 
 #ifndef POCKETJS_HOST_ABI
 #error "POCKETJS_HOST_ABI must come from the verified ResolvedBuildPlan"
@@ -30,13 +31,11 @@
 #error "POCKETJS_TARGET_ID must come from the verified ResolvedBuildPlan"
 #endif
 
-#define SOC_BUFFER_BYTES (1024u * 1024u)
 #define RX_BYTES (POCKET_RUNTIME_MAX_FRAME_BYTES + POCKET_RUNTIME_FRAME_HEADER_BYTES)
 #define CTRL_IN_BYTES (4u * (POCKET_RUNTIME_MAX_CTRL_BYTES + 1u))
 #define CTRL_OUT_BYTES (POCKET_RUNTIME_MAX_FRAME_BYTES + POCKET_RUNTIME_FRAME_HEADER_BYTES)
 #define SCREENSHOT_CHUNK_BYTES (48u * 1024u)
 
-static uint32_t *soc_buffer;
 static int server_fd = -1;
 static int discovery_fd = -1;
 static int client_fd = -1;
@@ -216,18 +215,7 @@ DevserverInitResult devserver_init(
   DevserverInitResult key = load_key(error, error_length);
   if (key != DEVSERVER_READY) return key;
 
-  soc_buffer = memalign(0x1000, SOC_BUFFER_BYTES);
-  if (soc_buffer == NULL) {
-    set_error(error, error_length, "development network needs a 1 MiB aligned SOC buffer");
-    return DEVSERVER_ERROR;
-  }
-  Result result = socInit(soc_buffer, SOC_BUFFER_BYTES);
-  if (R_FAILED(result)) {
-    set_error(error, error_length, "socInit failed (0x%08lx)", (unsigned long)result);
-    free(soc_buffer);
-    soc_buffer = NULL;
-    return DEVSERVER_ERROR;
-  }
+  if (!soc_ensure(error, error_length)) return DEVSERVER_ERROR;
 
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0) {
@@ -269,11 +257,7 @@ void devserver_shutdown(void) {
   server_fd = -1;
   if (discovery_fd >= 0) close(discovery_fd);
   discovery_fd = -1;
-  if (soc_buffer != NULL) {
-    socExit();
-    free(soc_buffer);
-    soc_buffer = NULL;
-  }
+  /* SOC itself is shared with the svc transport; main owns soc_shutdown. */
   initialized = false;
 }
 

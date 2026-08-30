@@ -35,6 +35,8 @@
 #include "devserver.h"
 #include "devmenu.h"
 #include "runtime.h"
+#include "soc.h"
+#include "svcwire.h"
 
 /* The guest viewport comes from the resolved build plan, never a literal. */
 #ifndef POCKETJS_VIEW_W
@@ -415,6 +417,8 @@ static void teardown_guest(void) {
   qjs_shutdown();
   gfx_reset_resources();
   ui_shutdown();
+  /* The svc reset contract: the next guest never sees this guest's lines. */
+  svcwire_reset();
 }
 
 static void release_choice(GuestChoice *choice, PocketRuntimePackage *embedded) {
@@ -762,6 +766,7 @@ int main(void) {
     size_t touch_count = scripted_touch(frame, &touch);
 #else
     devserver_poll();
+    svcwire_pump();
     if (input_devmenu_toggle_requested()) devmenu_toggle();
     if (devmenu_visible() && input_devmenu_close_requested()) devmenu_hide();
     if (devmenu_visible() && input_devmenu_screenshot_requested()) {
@@ -1000,7 +1005,9 @@ int main(void) {
   release_choice(&guest, embedded);
   runtime_package_free(embedded);
 #ifndef POCKETJS_CAPTURE
+  svcwire_shutdown();
   devserver_shutdown();
+  soc_shutdown();
   devmenu_shutdown();
 #endif
   gfx_shutdown();

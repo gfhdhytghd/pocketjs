@@ -26,6 +26,7 @@
 #include "devserver.h"
 #include "pocket_core.h"
 #include "quickjs.h"
+#include "svcwire.h"
 
 #ifndef POCKETJS_TARGET_ID
 #error "POCKETJS_TARGET_ID must come from the verified ResolvedBuildPlan"
@@ -79,6 +80,9 @@ typedef enum {
   HostDbgPoll,
   HostDbgSend,
   HostDbgShot,
+  HostSvcOpen,
+  HostSvcPoll,
+  HostSvcSend,
 } HostOperation;
 
 static JSRuntime *runtime;
@@ -89,6 +93,8 @@ static const uint8_t *installed_pack;
 static size_t installed_pack_length;
 static char last_error[512];
 static char debug_poll_buffer[32 * 1024];
+/* contracts/spec/spec.ts SVC_POLL_BUF + the terminating NUL. */
+static char svc_poll_buffer[8192 + 1];
 
 static void set_error(const char *message) {
   size_t length = message == NULL ? 0 : strlen(message);
@@ -421,6 +427,26 @@ static JSValue host_operation(
       return JS_UNDEFINED;
     case HostDbgShot:
       return JS_NewBool(ctx, devserver_request_screenshot());
+    case HostSvcOpen: {
+      if (argc < 1) return JS_NewBool(ctx, 0);
+      text = JS_ToCStringLen2(ctx, &text_length, argv[0], 0);
+      if (text == NULL) return JS_NewBool(ctx, 0);
+      bool open = svcwire_open(text);
+      JS_FreeCString(ctx, text);
+      return JS_NewBool(ctx, open);
+    }
+    case HostSvcPoll: {
+      size_t length = svcwire_recv_lines(svc_poll_buffer, sizeof svc_poll_buffer);
+      return length == 0 ? JS_UNDEFINED : JS_NewStringLen(ctx, svc_poll_buffer, length);
+    }
+    case HostSvcSend:
+      if (argc < 1) return JS_UNDEFINED;
+      text = JS_ToCStringLen2(ctx, &text_length, argv[0], 0);
+      if (text != NULL) {
+        svcwire_send_line(text, text_length);
+        JS_FreeCString(ctx, text);
+      }
+      return JS_UNDEFINED;
   }
   return JS_UNDEFINED;
 }
@@ -504,6 +530,10 @@ static void install_host(void) {
   add_operation(ui, "__dbgPoll", 0, HostDbgPoll);
   add_operation(ui, "__dbgSend", 1, HostDbgSend);
   add_operation(ui, "__dbgShot", 0, HostDbgShot);
+  /* Host service channel (spec ops 30..32) over the SVC WIRE transport. */
+  add_operation(ui, "svcOpen", 1, HostSvcOpen);
+  add_operation(ui, "svcPoll", 0, HostSvcPoll);
+  add_operation(ui, "svcSend", 1, HostSvcSend);
 
   /* Framework-owned host identity, from the build's -D defines rather than
    * literals that can drift. Bundles refuse to mount when they disagree. */
