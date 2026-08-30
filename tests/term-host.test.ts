@@ -31,12 +31,12 @@ import {
   parseHello,
 } from "../apps/term/host/wire.ts";
 import {
-  PALETTE_256,
+  CELL_FLAG,
   chunkRows,
   resolveCell,
   rowRuns,
   type Cell,
-  type XtermCellLike,
+  type TerminalCell,
 } from "../apps/term/host/grid.ts";
 import { encodeKey } from "../apps/term/host/keys.ts";
 import {
@@ -111,42 +111,38 @@ describe("PKNT wire (host side)", () => {
 // grid
 // ---------------------------------------------------------------------------
 
-function fakeCell(over: Partial<Record<keyof XtermCellLike, unknown>> = {}): XtermCellLike {
-  const base = {
-    getChars: () => "x",
-    getWidth: () => 1,
-    getFgColor: () => -1,
-    getBgColor: () => -1,
-    isFgDefault: () => 1,
-    isBgDefault: () => 1,
-    isFgPalette: () => 0,
-    isBgPalette: () => 0,
-    isBold: () => 0,
-    isDim: () => 0,
-    isInverse: () => 0,
-    isInvisible: () => 0,
-  };
-  return { ...base, ...over } as XtermCellLike;
+function fakeCell(over: Partial<TerminalCell> = {}): TerminalCell {
+  return { char: "x".codePointAt(0)!, flags: 0, width: 1, ...over };
 }
 
-describe("cell resolution (authority-side SGR)", () => {
-  test("defaults stay -1", () => {
+describe("cell resolution (renderer-side attributes)", () => {
+  test("a cell on the theme default reports -1, not a colour", () => {
+    // The core resolves palette and bright-bold itself and only reports a
+    // colour when the cell has one; absence means the device's theme.
     expect(resolveCell(fakeCell())).toEqual({ ch: "x", fg: -1, bg: -1, width: 1 });
   });
 
-  test("bold brightens the low palette", () => {
-    const cell = fakeCell({
-      isFgDefault: () => 0,
-      isFgPalette: () => 1,
-      getFgColor: () => 1,
-      isBold: () => 1,
+  test("resolved colours pass through untouched", () => {
+    expect(resolveCell(fakeCell({ fgRgb: 0x81a2be, bgRgb: 0x123456 }))).toEqual({
+      ch: "x",
+      fg: 0x81a2be,
+      bg: 0x123456,
+      width: 1,
     });
-    expect(resolveCell(cell).fg).toBe(PALETTE_256[9]);
   });
 
-  test("inverse swaps resolved theme colors", () => {
-    const cell = fakeCell({ isInverse: () => 1 });
+  test("reverse swaps, falling back through the theme", () => {
+    const cell = fakeCell({ flags: CELL_FLAG.reverse });
     expect(resolveCell(cell)).toEqual({ ch: "x", fg: THEME_BG, bg: THEME_FG, width: 1 });
+  });
+
+  test("concealed text paints in its own background", () => {
+    const cell = fakeCell({ flags: CELL_FLAG.invisible, bgRgb: 0x445566 });
+    expect(resolveCell(cell).fg).toBe(0x445566);
+  });
+
+  test("a grapheme cluster survives as one cell", () => {
+    expect(resolveCell(fakeCell({ char: 0x1f1e8, chars: "🇨🇳", width: 2 })).ch).toBe("🇨🇳");
   });
 
   test("the other Unicode spaces resolve to a plain blank", () => {
@@ -154,21 +150,19 @@ describe("cell resolution (authority-side SGR)", () => {
     // them). A space glyph has no outline, so routing one through the font
     // chain rejects every face and lands on a placeholder — which is how a
     // row of padding turned into a row of "?".
-    expect(resolveCell(fakeCell({ getChars: () => " " })).ch).toBe(" ");
-    expect(resolveCell(fakeCell({ getChars: () => " " })).ch).toBe(" ");
-    expect(resolveCell(fakeCell({ getChars: () => "　", getWidth: () => 2 })).ch).toBe(" ");
-    expect(resolveCell(fakeCell({ getChars: () => "你" })).ch).toBe("你");
+    expect(resolveCell(fakeCell({ char: 0x20 })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ char: 0x00a0 })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ char: 0x3000, width: 2 })).ch).toBe(" ");
+    expect(resolveCell(fakeCell({ char: "你".codePointAt(0)! })).ch).toBe("你");
   });
 
   test("carries the terminal's column width", () => {
-    expect(resolveCell(fakeCell({ getWidth: () => 2, getChars: () => "你" })).width).toBe(2);
-    expect(resolveCell(fakeCell({ getWidth: () => 0 })).width).toBe(0);
+    expect(resolveCell(fakeCell({ width: 2, char: "你".codePointAt(0)! })).width).toBe(2);
+    expect(resolveCell(fakeCell({ width: 0 })).width).toBe(0);
   });
 
-  test("truecolor passes through; wide-char continuations blank out", () => {
-    const rgb = fakeCell({ isFgDefault: () => 0, getFgColor: () => 0x123456 });
-    expect(resolveCell(rgb).fg).toBe(0x123456);
-    expect(resolveCell(fakeCell({ getWidth: () => 0 })).ch).toBe("");
+  test("a wide character's continuation cell carries no ink", () => {
+    expect(resolveCell(fakeCell({ width: 0 })).ch).toBe("");
   });
 });
 

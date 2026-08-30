@@ -6,22 +6,31 @@
 
 import { LINE_BUDGET, THEME_BG, THEME_FG, type Run, type RowUpdate } from "../protocol.ts";
 
-/** The slice of @xterm/headless's IBufferCell this module reads. The is*
- *  predicates return numbers there (0 = false). */
-export interface XtermCellLike {
-  getChars(): string;
-  getWidth(): number;
-  getFgColor(): number;
-  getBgColor(): number;
-  isFgDefault(): number | boolean;
-  isBgDefault(): number | boolean;
-  isFgPalette(): number | boolean;
-  isBgPalette(): number | boolean;
-  isBold(): number | boolean;
-  isDim(): number | boolean;
-  isInverse(): number | boolean;
-  isInvisible(): number | boolean;
+/** The slice of libghostty's CellData this module reads (@wterm/core). The
+ *  core resolves colour itself — palette lookup, bright-bold, the configured
+ *  theme — and reports the result as 24-bit `fgRgb`/`bgRgb`, present only
+ *  when the cell is not on the default. Everything left here is the part a
+ *  renderer owns. */
+export interface TerminalCell {
+  char: number;
+  chars?: string;
+  flags: number;
+  width?: number;
+  fgRgb?: number;
+  bgRgb?: number;
 }
+
+/** SGR attribute bits, as libghostty reports them through wterm. */
+export const CELL_FLAG = {
+  bold: 0x01,
+  dim: 0x02,
+  italic: 0x04,
+  underline: 0x08,
+  blink: 0x10,
+  reverse: 0x20,
+  invisible: 0x40,
+  strikethrough: 0x80,
+} as const;
 
 /** One resolved cell: concrete 0xRRGGBB colors (or -1 = theme default).
  *
@@ -41,28 +50,6 @@ export interface Cell {
   width?: 0 | 1 | 2;
   slot?: number;
 }
-
-/** The 256-color table: 16 themed ANSI colors, the 6x6x6 cube, 24 grays. */
-export const PALETTE_256: readonly number[] = (() => {
-  const base = [
-    0x1c2230, 0xe06c75, 0x61c16d, 0xe0b060, 0x5296e0, 0xc678dd, 0x56b6c2, 0xb8c2cf,
-    0x55617a, 0xef7d86, 0x7ed88a, 0xedc07a, 0x6faaf0, 0xd78fe8, 0x6cc9d5, 0xe6ecf5,
-  ];
-  const steps = [0, 95, 135, 175, 215, 255];
-  const table = [...base];
-  for (let r = 0; r < 6; r += 1) {
-    for (let g = 0; g < 6; g += 1) {
-      for (let b = 0; b < 6; b += 1) {
-        table.push((steps[r] << 16) | (steps[g] << 8) | steps[b]);
-      }
-    }
-  }
-  for (let i = 0; i < 24; i += 1) {
-    const v = 8 + i * 10;
-    table.push((v << 16) | (v << 8) | v);
-  }
-  return table;
-})();
 
 /** Unicode's other spaces. A terminal UI pads with them — Claude Code's
  *  input box is full of U+00A0 — and they must be treated as blanks, not as
@@ -87,39 +74,34 @@ function halve(rgb: number): number {
   return (((rgb >> 16) & 0xff) >> 1 << 16) | ((((rgb >> 8) & 0xff) >> 1) << 8) | ((rgb & 0xff) >> 1);
 }
 
-/** SGR attributes resolve HERE, on the authority side: bold brightens the
- *  low palette, dim halves, inverse swaps concrete colors (defaults resolve
- *  through the shared theme first), invisible paints fg as bg. The device
- *  renders exactly what it is told. */
-export function resolveCell(cell: XtermCellLike): Cell {
-  const width = cell.getWidth() as 0 | 1 | 2;
-  const raw = width === 0 ? "" : cell.getChars();
+/**
+ * One core cell to one wire cell.
+ *
+ * Colour is the core's answer, not this file's: `fgRgb`/`bgRgb` arrive
+ * already resolved through libghostty's palette and its bright-bold rule,
+ * and their absence means "the theme's default", which the device draws.
+ * What is left here are the three attributes that are a renderer's decision
+ * rather than a colour lookup — faint, reverse and concealed — resolved on
+ * the authority side so every replica paints the same thing.
+ */
+export function resolveCell(cell: TerminalCell): Cell {
+  const width = (cell.width ?? 1) as 0 | 1 | 2;
+  const raw = width === 0 ? "" : (cell.chars ?? String.fromCodePoint(cell.char || 32));
   // Normalize the other spaces to the ordinary one here, so everything
   // downstream — run merging, glyph routing — sees a blank.
   const first = raw.codePointAt(0);
   const ch = raw.length > 0 && first !== undefined && isSpaceLike(first) ? " " : raw;
-  let fg = -1;
-  let bg = -1;
-  if (!cell.isFgDefault()) {
-    const raw = cell.getFgColor();
-    fg = cell.isFgPalette()
-      ? PALETTE_256[cell.isBold() && raw < 8 ? raw + 8 : raw] ?? -1
-      : raw;
-  } else if (cell.isBold()) {
-    fg = PALETTE_256[15];
+
+  let fg = cell.fgRgb ?? -1;
+  let bg = cell.bgRgb ?? -1;
+  if (cell.flags & CELL_FLAG.dim) fg = halve(fg < 0 ? THEME_FG : fg);
+  if (cell.flags & CELL_FLAG.reverse) {
+    const front = fg < 0 ? THEME_FG : fg;
+    const back = bg < 0 ? THEME_BG : bg;
+    fg = back;
+    bg = front;
   }
-  if (!cell.isBgDefault()) {
-    const raw = cell.getBgColor();
-    bg = cell.isBgPalette() ? PALETTE_256[raw] ?? -1 : raw;
-  }
-  if (cell.isDim()) fg = halve(fg < 0 ? THEME_FG : fg);
-  if (cell.isInverse()) {
-    const rf = fg < 0 ? THEME_FG : fg;
-    const rb = bg < 0 ? THEME_BG : bg;
-    fg = rb;
-    bg = rf;
-  }
-  if (cell.isInvisible()) fg = bg < 0 ? THEME_BG : bg;
+  if (cell.flags & CELL_FLAG.invisible) fg = bg < 0 ? THEME_BG : bg;
   return { ch, fg, bg, width };
 }
 

@@ -1,6 +1,6 @@
 // apps/term/host/serve.ts — the Mac companion daemon for apps/term.
 //
-//   bun install    (once, in this directory — node-pty + @xterm/headless)
+//   bun install    (once, in this directory — node-pty + @wterm/ghostty)
 //   node serve.ts  [--port 8622] [--beacon-port 8621] [--name <picker name>]
 //                  [--shell /bin/zsh] [--unicast <device-ip>] [--no-beacon]
 //
@@ -11,7 +11,7 @@
 // is runtime-neutral.
 //
 // Architecture (the zhongduan shape, collapsed to one process): this daemon
-// holds the real PTYs and one authoritative @xterm/headless core per session
+// holds the real PTYs and one authoritative libghostty core per session
 // — the role Ghostty WASM plays there — and 3DS clients attach as passive
 // replicas over the SVC WIRE (PKNT) TCP transport. A UDP beacon on the LAN
 // makes discovery zero-config; grid state flows as a full snapshot on attach
@@ -21,16 +21,13 @@
 import { createServer, type Socket } from "node:net";
 import { createSocket } from "node:dgram";
 import { hostname } from "node:os";
-import { chmodSync, existsSync, statSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import pty from "node-pty";
-// @xterm/headless is CJS; Node's ESM loader only offers its default export.
-import xterm from "@xterm/headless";
-import type { Terminal as TerminalType } from "@xterm/headless";
-
-const { Terminal } = xterm;
+import { GhosttyCore } from "@wterm/ghostty";
 import {
   LINE_BUDGET,
   TERM_APP,
@@ -118,20 +115,32 @@ for (const helper of [
 
 const SCROLLBACK = 2000;
 
+/** The core loads its WASM by fetching a URL, and Node's fetch has no `file:`
+ *  scheme — so the module is read once at startup and handed over as a data
+ *  URL. Reading it here also fails loudly at boot rather than on the first
+ *  session. */
+const ghosttyWasmUrl = (() => {
+  const path = createRequire(import.meta.url).resolve("@wterm/ghostty/ghostty-vt.wasm");
+  return `data:application/wasm;base64,${readFileSync(path).toString("base64")}`;
+})();
+
 class Session {
   readonly sid: number;
   title: string;
-  readonly term: TerminalType;
   readonly pty: pty.IPty;
-  /** Bumped on any parsed output; flush cycles reset it. */
-  dirty = true;
-  bellPending = false;
+  /** The authority. Null only for the moment between spawning the shell and
+   *  the core's WASM finishing instantiation; bytes wait in `backlog`. */
+  core: GhosttyCore | null = null;
+  #backlog: string[] = [];
+  cols: number;
+  rows: number;
   disposed = false;
 
   constructor(sid: number, cols: number, rows: number) {
     this.sid = sid;
+    this.cols = cols;
+    this.rows = rows;
     this.title = `${options.shell.split("/").pop()} #${sid}`;
-    this.term = new Terminal({ cols, rows, scrollback: SCROLLBACK, allowProposedApi: true });
     this.pty = pty.spawn(options.shell, ["-il"], {
       name: "xterm-256color",
       cols,
@@ -139,53 +148,94 @@ class Session {
       cwd: options.cwd,
       env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
     });
-    this.pty.onData((data) => {
-      // xterm parses asynchronously; the callback is when the buffer this
-      // serializes actually reflects the bytes, so that is when a pass is
-      // worth scheduling.
-      this.term.write(data, () => {
-        this.dirty = true;
-        scheduleFlush();
-      });
-    });
+    this.pty.onData((data) => this.#parse(data));
     this.pty.onExit(() => hub.sessionExited(this.sid));
-    this.term.onBell(() => {
-      this.bellPending = true;
-    });
-    this.term.onTitleChange((title) => {
-      if (title.trim() !== "") {
-        this.title = `${title.slice(0, 24)} #${sid}`;
-        hub.sessionsChanged();
-      }
-    });
+
+    void GhosttyCore.load({ wasmPath: ghosttyWasmUrl, scrollbackLimit: SCROLLBACK })
+      .then((core) => {
+        if (this.disposed) return;
+        core.init(this.cols, this.rows);
+        this.core = core;
+        const waiting = this.#backlog;
+        this.#backlog = [];
+        for (const chunk of waiting) this.#parse(chunk);
+        scheduleFlush();
+      })
+      .catch((error: unknown) => {
+        console.error(`[term] session #${sid}: terminal core failed to load: ${String(error)}`);
+      });
+  }
+
+  /** Feed the core, then let it answer. libghostty parses synchronously, so
+   *  the buffer this serializes reflects the bytes the moment write returns. */
+  #parse(data: string): void {
+    const core = this.core;
+    if (core === null) {
+      this.#backlog.push(data);
+      return;
+    }
+    core.writeString(data);
+    // Programs ask the terminal questions — what are you, where is the
+    // cursor, what colours do you use — and wait for the answer. The core
+    // composes the replies; nobody but us can put them back on the PTY.
+    for (let guard = 0; guard < 16; guard += 1) {
+      const response = core.getResponse();
+      if (response === null || response === "") break;
+      this.pty.write(response);
+    }
+    this.refreshTitle();
+    scheduleFlush();
+  }
+
+  /**
+   * What the tab says. A program that sets a window title means it, so that
+   * wins; otherwise the tab shows what is actually running in the session —
+   * the thing a multiplexer's tabs are for, and the answer the PTY's
+   * foreground process group gives directly.
+   *
+   * The core deliberately ignores OSC 1, the icon name, which is all many
+   * prompts set. Reading the process is both more accurate and independent
+   * of whether the shell announces anything at all.
+   */
+  refreshTitle(): void {
+    const explicit = this.core?.getTitle();
+    const label =
+      explicit !== null && explicit !== undefined && explicit.trim() !== ""
+        ? explicit.trim()
+        : (this.pty.process || options.shell.split("/").pop() || "shell");
+    const next = `${label.slice(0, 24)} #${this.sid}`;
+    if (next === this.title) return;
+    this.title = next;
+    hub.sessionsChanged();
   }
 
   resize(cols: number, rows: number) {
-    if (this.term.cols === cols && this.term.rows === rows) return;
-    this.term.resize(cols, rows);
+    if (this.cols === cols && this.rows === rows) return;
+    this.cols = cols;
+    this.rows = rows;
+    this.core?.resize(cols, rows);
     this.pty.resize(cols, rows);
-    this.dirty = true;
+    scheduleFlush();
   }
 
   write(data: string) {
     if (data.length > 0) this.pty.write(data);
   }
 
+  /** Paste as one bracketed block when the program asked for it, so an editor
+   *  inserts text instead of interpreting every character as a command. */
+  paste(text: string) {
+    if (text.length === 0) return;
+    if (this.core?.bracketedPaste()) this.pty.write(`\x1b[200~${text}\x1b[201~`);
+    else this.pty.write(text);
+  }
+
   appCursor(): boolean {
-    try {
-      return this.term.modes.applicationCursorKeysMode === true;
-    } catch {
-      return false;
-    }
+    return this.core?.cursorKeysApp() ?? false;
   }
 
   cursorHidden(): boolean {
-    const core = (
-      this.term as unknown as {
-        _core?: { coreService?: { isCursorHidden?: boolean; decPrivateModes?: { cursorHidden?: boolean } } };
-      }
-    )._core;
-    return core?.coreService?.isCursorHidden ?? core?.coreService?.decPrivateModes?.cursorHidden ?? false;
+    return this.core ? !this.core.getCursor().visible : false;
   }
 
   dispose() {
@@ -196,7 +246,6 @@ class Session {
     } catch {
       /* already gone */
     }
-    this.term.dispose();
   }
 }
 
@@ -434,20 +483,26 @@ function classify(cell: Cell): void {
 
 /** Resolve the connection's visible window of the session buffer to runs. */
 function viewRows(session: Session, conn: Conn): Run[][] {
-  const buffer = session.term.buffer.active;
-  const top = Math.max(0, buffer.baseY - conn.scrollback);
-  const workCell = buffer.getNullCell();
+  const core = session.core;
   const rows: Run[][] = [];
+  if (core === null) {
+    for (let y = 0; y < conn.rows; y += 1) rows.push([]);
+    return rows;
+  }
+  // Scrolled back, the top of the view comes out of history: the core
+  // indexes that directly, oldest line first, so the offset is arithmetic on
+  // its own count rather than on a viewport's base row.
+  const history = core.getScrollbackCount();
+  const back = Math.max(0, Math.min(history, conn.scrollback));
   for (let y = 0; y < conn.rows; y += 1) {
-    const line = buffer.getLine(top + y);
+    const fromHistory = y < back;
+    const offset = history - back + y;
     const cells: Cell[] = [];
-    if (line) {
-      for (let x = 0; x < conn.cols; x += 1) {
-        const cell = line.getCell(x, workCell);
-        const resolved = cell ? resolveCell(cell) : { ch: "", fg: -1, bg: -1, width: 1 as const };
-        classify(resolved);
-        cells.push(resolved);
-      }
+    for (let x = 0; x < conn.cols; x += 1) {
+      const cell = fromHistory ? core.getScrollbackCell(offset, x) : core.getCell(y - back, x);
+      const resolved = resolveCell(cell);
+      classify(resolved);
+      cells.push(resolved);
     }
     rows.push(rowRuns(cells));
   }
@@ -507,9 +562,10 @@ function pumpAtlasSend(conn: Conn): void {
 }
 
 function cursorFor(session: Session, conn: Conn): Cursor {
-  const buffer = session.term.buffer.active;
-  const visible = conn.scrollback === 0 && !session.cursorHidden();
-  return [buffer.cursorX, buffer.cursorY, visible ? 1 : 0];
+  const cursor = session.core?.getCursor();
+  if (cursor === undefined) return [0, 0, 0];
+  const visible = conn.scrollback === 0 && cursor.visible;
+  return [cursor.col, cursor.row, visible ? 1 : 0];
 }
 
 /** Full snapshot: a new gen, every row sent (blank rows included). */
@@ -530,15 +586,6 @@ function flush(conn: Conn) {
   pumpAtlasSend(conn);
   const session = hub.sessions.get(conn.attachedSid);
   if (!session || !conn.sawClientHello) return;
-  if (session.bellPending) {
-    // Bells are per-session; deliver once to every attached replica.
-    for (const other of hub.conns) {
-      if (other.attachedSid === session.sid && other.sawClientHello) {
-        other.sendLine({ t: "bell", sid: session.sid });
-      }
-    }
-    session.bellPending = false;
-  }
   const rows = viewRows(session, conn);
   const updates: RowUpdate[] = [];
   for (let y = 0; y < rows.length; y += 1) {
@@ -603,8 +650,8 @@ function handleLine(conn: Conn, line: ClientLine) {
           hub.conns.delete(conn);
           return;
         }
-        conn.cols = session.term.cols;
-        conn.rows = session.term.rows;
+        conn.cols = session.cols;
+        conn.rows = session.rows;
         conn.sendLine({ t: "hello", proto: TERM_PROTO, name: options.name, sid: session.sid });
         attach(conn, session.sid);
         break;
@@ -645,7 +692,10 @@ function handleLine(conn: Conn, line: ClientLine) {
       const session = hub.sessions.get(conn.attachedSid);
       if (session && line.s.length <= 1024) {
         if (conn.scrollback !== 0) conn.scrollback = 0; // typing snaps to live
-        session.write(line.s);
+        // More than one character at a time is a paste, not typing, and a
+        // program that asked for bracketed paste wants to be told which.
+        if (line.s.length > 1) session.paste(line.s);
+        else session.write(line.s);
       }
       break;
     }
@@ -659,7 +709,7 @@ function handleLine(conn: Conn, line: ClientLine) {
     case "scroll": {
       const session = hub.sessions.get(conn.attachedSid);
       if (!session) break;
-      const max = session.term.buffer.active.baseY;
+      const max = session.core?.getScrollbackCount() ?? 0;
       conn.scrollback = Math.max(0, Math.min(max, conn.scrollback + line.d));
       // Scrolling changes this replica's view without any PTY byte to
       // announce it.
@@ -747,6 +797,9 @@ function flushAll(): void {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
+  // What a session is running changes without any output to announce it —
+  // launching an editor, or leaving one.
+  for (const session of hub.sessions.values()) session.refreshTitle();
   for (const conn of hub.conns) flush(conn);
   pumpAtlasBake();
 }
