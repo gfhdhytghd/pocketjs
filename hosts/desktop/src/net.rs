@@ -19,9 +19,9 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use pocketjs_core::spec::wire;
@@ -49,17 +49,20 @@ impl SvcWire {
     pub fn spawn(addr: String, app: String) -> Self {
         let (line_tx, line_rx) = channel::<String>();
         let (out_tx, out_rx) = channel::<String>();
-        let connected = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
         {
-            let connected = connected.clone();
             let shutdown = shutdown.clone();
             std::thread::Builder::new()
                 .name("pjs-svc-wire".into())
-                .spawn(move || supervisor(&addr, &app, &line_tx, &out_rx, &connected, &shutdown))
+                .spawn(move || supervisor(&addr, &app, &line_tx, &out_rx, &shutdown))
                 .expect("spawn svc wire thread");
         }
-        Self { lines: line_rx, outbox: out_tx, shutdown, pending: Vec::new() }
+        Self {
+            lines: line_rx,
+            outbox: out_tx,
+            shutdown,
+            pending: Vec::new(),
+        }
     }
 
     /// Take everything the companion has said since the last tick. The app
@@ -67,11 +70,8 @@ impl SvcWire {
     /// once a grid has arrived, not when a socket happens to be open.
     pub fn drain(&mut self) -> Vec<String> {
         let mut out = std::mem::take(&mut self.pending);
-        loop {
-            match self.lines.try_recv() {
-                Ok(line) => out.push(line),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(line) = self.lines.try_recv() {
+            out.push(line);
         }
         out
     }
@@ -92,16 +92,13 @@ fn supervisor(
     app: &str,
     lines: &Sender<String>,
     outbox: &Receiver<String>,
-    connected: &Arc<AtomicBool>,
     shutdown: &Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
         match connect(addr, app) {
             Ok(stream) => {
                 log::info!("pocket-desktop-host: svc wire connected to {addr}");
-                connected.store(true, Ordering::Release);
                 let why = serve(stream, lines, outbox, shutdown);
-                connected.store(false, Ordering::Release);
                 log::info!("pocket-desktop-host: svc wire disconnected: {why}");
             }
             Err(error) => log::debug!("pocket-desktop-host: svc wire connect {addr}: {error}"),
@@ -124,7 +121,10 @@ fn connect(addr: &str, app: &str) -> std::io::Result<TcpStream> {
     let mut ack = [0u8; 8];
     read_full(&stream, &mut ack, &AtomicBool::new(false))?;
     if codec::parse_hello_ack(&ack) != Some(wire::VERSION) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "handshake"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "handshake",
+        ));
     }
     Ok(stream)
 }
@@ -134,10 +134,18 @@ fn read_full(mut stream: &TcpStream, buf: &mut [u8], shutdown: &AtomicBool) -> s
     let mut got = 0usize;
     while got < buf.len() {
         if shutdown.load(Ordering::Acquire) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "shutdown"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "shutdown",
+            ));
         }
         match stream.read(&mut buf[got..]) {
-            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof")),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "eof",
+                ));
+            }
             Ok(n) => got += n,
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -224,12 +232,12 @@ fn rx_loop(
                 }
             }
             wire::MSG_CTRL => {
-                if let Ok(line) = core::str::from_utf8(&payload) {
-                    if queued < LINE_QUEUE_CAP {
-                        queued += 1;
-                        if lines.send(line.to_owned()).is_err() {
-                            return "guest gone".into();
-                        }
+                if let Ok(line) = core::str::from_utf8(&payload)
+                    && queued < LINE_QUEUE_CAP
+                {
+                    queued += 1;
+                    if lines.send(line.to_owned()).is_err() {
+                        return "guest gone".into();
                     }
                 }
                 // The tick drains everything each frame; the cap only guards
@@ -251,10 +259,18 @@ fn read_header(
     let mut got = 0usize;
     while got < header.len() {
         if shutdown.load(Ordering::Acquire) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "shutdown"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "shutdown",
+            ));
         }
         match stream.read(&mut header[got..]) {
-            Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof")),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "eof",
+                ));
+            }
             Ok(n) => got += n,
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock

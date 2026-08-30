@@ -1035,7 +1035,11 @@ impl PocketRoot {
         // A companion reachable over TCP takes the svc channel: the app's
         // dialect is its own business, so the host only moves whole lines.
         let wire = args.svc_connect.clone().map(|addr| {
-            let app = args.companions.first().cloned().unwrap_or_else(|| args.app.clone());
+            let app = args
+                .companions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| args.app.clone());
             net::SvcWire::spawn(addr, app)
         });
         let root = PocketRoot {
