@@ -251,6 +251,16 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
           setActiveSid(line.active);
           if (line.active >= 0) lastWanted = line.active;
         }
+        if (line.list.length === 0) {
+          // Nothing is attached any more: drop the last session's screen
+          // rather than leave a dead one on display, and forget the
+          // generation so the next session's snapshot is adopted cleanly.
+          clearGrid();
+          gen = -1;
+          seq = -1;
+          sawGrid = false;
+          lastWanted = -1;
+        }
         break;
       case "grid":
         applyGrid(line);

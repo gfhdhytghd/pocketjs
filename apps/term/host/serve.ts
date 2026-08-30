@@ -140,8 +140,12 @@ class Session {
       env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
     });
     this.pty.onData((data) => {
+      // xterm parses asynchronously; the callback is when the buffer this
+      // serializes actually reflects the bytes, so that is when a pass is
+      // worth scheduling.
       this.term.write(data, () => {
         this.dirty = true;
+        scheduleFlush();
       });
     });
     this.pty.onExit(() => hub.sessionExited(this.sid));
@@ -202,7 +206,15 @@ class Session {
 
 const PING_INTERVAL_MS = 2000;
 const SILENCE_TIMEOUT_MS = 10_000;
-const FLUSH_INTERVAL_MS = 33;
+/** Coalescing delay after a session produces output. A terminal's echo is a
+ *  round trip through here, so this sits directly in the gap between a
+ *  keystroke and the character appearing: it is a batching window, not a
+ *  polling rate. A byte-at-a-time echo pays 2 ms; a screenful of output
+ *  still collapses into one pass. */
+const FLUSH_COALESCE_MS = 2;
+/** Backstop for the changes no PTY byte announces — a scrollback scrub, a
+ *  cursor that moved because a replica attached. */
+const FLUSH_IDLE_MS = 100;
 
 /** Base64 per atlas chunk. The device's svc transport discards any ctrl
  *  frame over SVC_POLL_BUF (8192) bytes outright, so a chunk plus its JSON
@@ -281,6 +293,16 @@ class Hub {
     const session = new Session(this.nextSid++, cols, rows);
     this.sessions.set(session.sid, session);
     this.sessionsChanged();
+    // A replica left with nothing attached — the empty state after the last
+    // session closed — shows the first session that appears, whoever opened
+    // it. Without this it would sit at the empty state while sessions exist,
+    // which is the empty state lying. Mirrors are bound through the pending
+    // queue instead and are left alone here.
+    for (const conn of this.conns) {
+      if (conn.role === "device" && conn.sawClientHello && conn.attachedSid < 0) {
+        attach(conn, session.sid);
+      }
+    }
     if (this.onSessionCreated) {
       this.pendingMirrors.push(session.sid);
       this.onSessionCreated(session.sid);
@@ -342,7 +364,16 @@ class Hub {
         this.conns.delete(conn);
         continue;
       }
-      const fallback = [...this.sessions.values()].at(-1) ?? this.create(conn.cols, conn.rows);
+      const fallback = [...this.sessions.values()].at(-1);
+      if (fallback === undefined) {
+        // Closing the last session leaves the replica with nothing attached,
+        // not with a shell it did not ask for. Opening one is a decision,
+        // and the operator just made the opposite one.
+        conn.attachedSid = -1;
+        conn.rowCache = [];
+        conn.lastCursor = "";
+        continue;
+      }
       attach(conn, fallback.sid);
     }
   }
@@ -630,6 +661,9 @@ function handleLine(conn: Conn, line: ClientLine) {
       if (!session) break;
       const max = session.term.buffer.active.baseY;
       conn.scrollback = Math.max(0, Math.min(max, conn.scrollback + line.d));
+      // Scrolling changes this replica's view without any PTY byte to
+      // announce it.
+      scheduleFlush();
       break;
     }
     case "resync":
@@ -706,10 +740,26 @@ setInterval(() => {
   }
 }, PING_INTERVAL_MS);
 
-setInterval(() => {
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushAll(): void {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
   for (const conn of hub.conns) flush(conn);
   pumpAtlasBake();
-}, FLUSH_INTERVAL_MS);
+}
+
+/** Ask for a pass shortly. Output is what makes a session worth serializing,
+ *  so a session that just parsed some announces itself rather than waiting
+ *  for a poll to come round. */
+function scheduleFlush(): void {
+  if (flushTimer !== null) return;
+  flushTimer = setTimeout(flushAll, FLUSH_COALESCE_MS);
+}
+
+setInterval(flushAll, FLUSH_IDLE_MS);
 
 // ---------------------------------------------------------------------------
 // mirror windows

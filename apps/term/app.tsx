@@ -16,9 +16,13 @@
 // modifier, with the on-screen keyboard lighting its Ctrl cap so the state is
 // visible where the operator is already looking. ZL is New-3DS-only and
 // reaches the guest through ir:rst rather than the ordinary HID pad
-// (hosts/3ds/src/input.c), so L held is the same modifier on a console — or a
-// host — that has no ZL. L and R tapped step to the previous/next session; an
-// L that modified a key does not also switch on release.
+// (hosts/3ds/src/input.c); a console without it uses the keyboard's own Ctrl
+// cap, which arms for one key.
+//
+// L and R step between sessions, and that is all they do. They briefly
+// doubled as the modifier, which meant discriminating a tap from a hold —
+// and a shoulder that only switches when released is a shoulder that feels
+// broken. One button, one job.
 
 import { createSignal, For, Show } from "solid-js";
 import { AuxiliarySurface, Text, View, type NodeMirror } from "@pocketjs/framework/components";
@@ -53,8 +57,6 @@ const DPAD_KEYS: readonly [number, "Up" | "Down" | "Left" | "Right"][] = [
 ];
 const DPAD_DELAY = 18;
 const DPAD_REPEAT = 4;
-/** Frames a shoulder may be down and still count as a tap on release. */
-const TAP_FRAMES = 14;
 
 export default function TermApp() {
   const ops = getOps();
@@ -74,12 +76,6 @@ export default function TermApp() {
 
   const dpadHeld = new Map<number, number>();
   let scrollCarry = 0;
-  // Shoulder tap-vs-hold: a shoulder that goes down and comes back up
-  // quickly, having modified nothing, switches sessions; one that is held is
-  // a modifier and must not also switch on release.
-  let leftFrames = 0;
-  let rightFrames = 0;
-  let leftUsedAsModifier = false;
 
   let prevButtons = 0;
 
@@ -88,9 +84,7 @@ export default function TermApp() {
 
     const pressed = buttons & ~prevButtons;
     prevButtons = buttons;
-    const leftDown = (buttons & BTN.LTRIGGER) !== 0;
-    const rightDown = (buttons & BTN.RTRIGGER) !== 0;
-    setCtrlHeld(leftDown || (buttons & BTN.ZL) !== 0);
+    setCtrlHeld((buttons & BTN.ZL) !== 0);
 
     let sentThisFrame = false;
     const send = (key: string, ctrl: boolean) => {
@@ -118,29 +112,10 @@ export default function TermApp() {
     if (pressed & BTN.START) send("c", true);
     if (pressed & BTN.SELECT) store.newSession();
 
-    if (sentThisFrame) {
-      if (ctrlArmed()) setCtrlArmed(false);
-      if (leftDown) leftUsedAsModifier = true;
-    }
+    if (sentThisFrame && ctrlArmed()) setCtrlArmed(false);
 
-    // Shoulders: count frames down, decide on release. A shoulder that was
-    // held while a key went out was a modifier, and must not also switch
-    // sessions when it comes back up.
-    if (leftDown) {
-      leftFrames += 1;
-    } else {
-      if (leftFrames > 0 && leftFrames <= TAP_FRAMES && !leftUsedAsModifier) {
-        store.attachSibling(-1);
-      }
-      leftFrames = 0;
-      leftUsedAsModifier = false;
-    }
-    if (rightDown) {
-      rightFrames += 1;
-    } else {
-      if (rightFrames > 0 && rightFrames <= TAP_FRAMES) store.attachSibling(1);
-      rightFrames = 0;
-    }
+    if (pressed & BTN.LTRIGGER) store.attachSibling(-1);
+    if (pressed & BTN.RTRIGGER) store.attachSibling(1);
 
     // Circle pad Y scrubs scrollback: up = into history (positive delta).
     const pad = analogY();
@@ -186,6 +161,7 @@ export default function TermApp() {
         metrics={{ cols: COLS, rows: ROWS, cellW: CELL_W, cellH: CELL_H, track: TRACK, statusH: STATUS_H }}
         badge={`${COLS}×${ROWS}`}
         hint="on the Mac: node apps/term/host/serve.ts"
+        emptyHint="SELECT opens one · or tap + on the touch screen"
         title="POCKET TERM"
       />
 

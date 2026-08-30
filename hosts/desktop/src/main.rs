@@ -1227,6 +1227,15 @@ impl PocketRoot {
                 self.send_hello();
             }
         }
+        // Inbound companion lines BEFORE the guest frame that reads them.
+        // Draining after it costs every arriving line a whole tick of
+        // latency, which on a terminal is a whole tick between a keystroke
+        // and its echo. This is the order hosts/3ds/src/main.c pumps in.
+        if let Some(wire) = self.wire.as_mut() {
+            for line in wire.drain() {
+                self.surface.svc_push(line);
+            }
+        }
         // Window resizes land here (render records them), so the relayout is
         // part of the tick transaction, never of a paint.
         if let Some(vp) = self.pending_viewport.take()
@@ -1304,14 +1313,10 @@ impl PocketRoot {
             log::error!("pocket-desktop-host: starting AppInstance {package}: {message}");
         }
 
-        // A TCP companion owns both directions: its lines reach the guest and
-        // the guest's replies reach it, with the host reading neither. It
+        // The guest's replies go out in the same tick it wrote them. It
         // drains first, so the editor matcher below finds an empty queue and
         // the two dialects never see each other's lines.
         if let Some(wire) = self.wire.as_mut() {
-            for line in wire.drain() {
-                self.surface.svc_push(line);
-            }
             for line in self.surface.svc_drain() {
                 wire.send(line);
             }

@@ -48,6 +48,7 @@ export default function TermMirror() {
       metrics={{ cols: COLS, rows: ROWS, cellW: CELL_W, cellH: CELL_H, track: TRACK, statusH: STATUS_H }}
       badge={`${COLS}×${ROWS}`}
       hint="this window is opened by the term companion"
+      emptyHint="its session has ended"
       title="MIRROR"
     />
   );

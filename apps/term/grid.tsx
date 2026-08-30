@@ -33,10 +33,20 @@ export interface GridProps {
   badge: string;
   /** What the connect overlay tells the operator to do. */
   hint: string;
+  /** What to say once the companion is there and no session is. */
+  emptyHint: string;
   title: string;
 }
 
+/** Nothing attached, and the companion is present to say so — the state
+ *  after closing the last session, as opposed to still looking for a
+ *  companion. */
+function isEmpty(store: TermStore): boolean {
+  return store.conn() === "link" && store.sessions().length === 0;
+}
+
 function connectionLabel(store: TermStore): string {
+  if (isEmpty(store)) return "no sessions open";
   switch (store.conn()) {
     case "no-svc":
       return "this host has no companion channel";
@@ -168,7 +178,7 @@ export function TermGrid(props: GridProps) {
         <View class="absolute left-0 right-0 top-0 bottom-0 flex-col items-center justify-center gap-[6] bg-[#10151cf0]">
           <Text class="text-lg text-[#9fb6d8] font-bold">pocket term</Text>
           <Text class="text-xs text-[#5d708c]">{connectionLabel(store)}</Text>
-          <Text class="text-xs text-[#3d4c63]">{props.hint}</Text>
+          <Text class="text-xs text-[#3d4c63]">{isEmpty(store) ? props.emptyHint : props.hint}</Text>
         </View>
       </Show>
     </View>
