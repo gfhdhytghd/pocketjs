@@ -179,24 +179,59 @@ export function Keyboard(props: KeyboardProps) {
   return (
     <View
       ref={(node) => (rootNode = node)}
-      class="absolute left-0 right-0 bg-[#141a24]"
-      style={{ insetT: props.top, height: KB_H }}
+      // The plate the keys are set into, lit from the same direction they
+      // are: a hairline along the top edge and a shallow fall to the bottom.
+      class="absolute left-0 right-0 bg-gradient-to-b from-[#2a323e] via-[#161c26] to-[#10151d]"
+      style={{ insetT: props.top, height: KB_H, gradViaPos: 0.06 }}
       debugName="TermKeyboard"
     >
+      {/* The rows have no container of their own: every key is placed
+          absolutely in the plate, so a row is an offset rather than a node.
+          Mount depth is what the JS stack is spent on (hosts/3ds/src/qjs.c
+          POCKETJS_JS_STACK_SIZE), and a wrapper that only holds a y offset is
+          the kind of level worth not spending it on. */}
       <For each={[0, 1, 2, 3, 4]}>
         {(row) => (
-          <View class="absolute left-0 right-0" style={{ insetT: row * KEY_H, height: KEY_H }}>
-            <KeyboardRow
-              row={row}
-              layer={layerName()}
-              pressed={pressed()}
-              ctrlArmed={props.ctrlArmed()}
-            />
-          </View>
+          <KeyboardRow
+            row={row}
+            layer={layerName()}
+            pressed={pressed()}
+            ctrlArmed={props.ctrlArmed()}
+          />
         )}
       </For>
     </View>
   );
+}
+
+/** How far the cap travels into its socket, and the lip it leaves showing. */
+const KEY_LIP = 2;
+
+/**
+ * The cap's face: a vertical three-stop gradient standing in for a lit,
+ * slightly domed surface. Resting, the top stop is the specular edge, the
+ * middle is the body and the bottom is where the cap turns away from the
+ * light. Pressed, the whole face darkens — a cap sunk into its socket is in
+ * shadow — and the stops run the other way, leaving the only light along the
+ * bottom edge. Darkening alone reads as "disabled" and flipping alone reads as
+ * "highlighted"; together they read as pushed in.
+ */
+function capClass(down: boolean, dark: boolean, armed: boolean): string {
+  // Every branch is a whole literal. The compiler collects class strings from
+  // the source at build time and the device looks them up in a baked table, so
+  // a string assembled at runtime — a template, a join — is one the table has
+  // never seen, and the node ends up with no style at all.
+  if (armed) {
+    return "absolute left-0 right-0 rounded-[4] items-center justify-center bg-gradient-to-b from-[#8cc2ff] via-[#4c9bf5] to-[#2f6fbe]";
+  }
+  if (down) {
+    return dark
+      ? "absolute left-0 right-0 rounded-[4] items-center justify-center bg-gradient-to-b from-[#0d1118] via-[#141922] to-[#28303b]"
+      : "absolute left-0 right-0 rounded-[4] items-center justify-center bg-gradient-to-b from-[#151a22] via-[#1d242e] to-[#343d4a]";
+  }
+  return dark
+    ? "absolute left-0 right-0 rounded-[4] items-center justify-center bg-gradient-to-b from-[#4b5768] via-[#2a323d] to-[#1c222b]"
+    : "absolute left-0 right-0 rounded-[4] items-center justify-center bg-gradient-to-b from-[#5f6c7f] via-[#3a4351] to-[#2a323e]";
 }
 
 function KeyboardRow(props: {
@@ -215,21 +250,35 @@ function KeyboardRow(props: {
             .reduce((x, d) => x + d.w * UNIT, 0);
         const isPressed = () => props.pressed === `${props.row}:${index()}`;
         const isArmedCtrl = () => "mod" in def.act && def.act.mod === "ctrl" && props.ctrlArmed;
+        const down = () => isPressed() || isArmedCtrl();
         return (
+          // The socket: a dark recess the cap sits in. Unpressed, the cap
+          // covers all but the bottom lip, and that sliver of shadow is what
+          // makes the key look like it stands above the plate.
           <View
-            class="absolute"
-            style={{ insetL: left() + 2, width: def.w * UNIT - 4, height: KEY_H - 4, insetT: 2 }}
+            class="absolute rounded-[4] bg-[#080b11]"
+            style={{
+              insetL: left() + 2,
+              width: def.w * UNIT - 4,
+              height: KEY_H - 4,
+              insetT: props.row * KEY_H + 2,
+            }}
           >
             <View
-              class={
-                isPressed() || isArmedCtrl()
-                  ? "w-full h-full rounded-[4] bg-[#4c9bf5] items-center justify-center"
-                  : def.dark
-                    ? "w-full h-full rounded-[4] bg-[#232d3d] items-center justify-center"
-                    : "w-full h-full rounded-[4] bg-[#31394a] items-center justify-center"
-              }
+              class={capClass(down(), def.dark === true, isArmedCtrl())}
+              // Pressing moves the cap down into the socket, so the lip of
+              // shadow appears above it instead of below. The middle stop sits
+              // near whichever edge the light is on, which keeps the specular
+              // band thin instead of letting it wash over half the face.
+              style={{
+                insetT: down() ? KEY_LIP : 0,
+                height: KEY_H - 4 - KEY_LIP,
+                gradViaPos: down() ? 0.82 : 0.18,
+              }}
             >
-              <Text class="text-xs text-[#dfe6f2]">{def.label}</Text>
+              <Text class={down() ? "text-xs text-[#c3d0e2]" : "text-xs text-[#dfe6f2]"}>
+                {def.label}
+              </Text>
             </View>
           </View>
         );

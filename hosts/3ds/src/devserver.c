@@ -341,8 +341,33 @@ static size_t json_escape(char *out, size_t capacity, const char *text) {
   return written;
 }
 
+/*
+ * On the way out a control record may be as large as a frame. tx_buffer is
+ * sized for a whole frame and the screenshot path already pushes 48 KiB
+ * through it, whereas MAX_CTRL_BYTES bounds what the TOOL sends — ctrl_input,
+ * the inbound ring, is sized from it. Holding outgoing records to the inbound
+ * bound cost the devtools tree dump: past a few hundred nodes it went over
+ * 16 KiB and was discarded here without a word, which on the tool side is
+ * indistinguishable from a hung device until the 15 s timeout expires.
+ */
 void devserver_send_ctrl(const char *line, size_t length) {
-  if (line == NULL || length == 0 || length > POCKET_RUNTIME_MAX_CTRL_BYTES) return;
+  if (line == NULL || length == 0) return;
+  if (length > POCKET_RUNTIME_MAX_FRAME_BYTES) {
+    /* Too large for any frame. Say so, so the caller waiting on this record
+     * learns why it is never coming. */
+    char notice[128];
+    int written = snprintf(
+      notice,
+      sizeof notice,
+      "{\"t\":\"ctrlDropped\",\"bytes\":%u,\"cap\":%u}",
+      (unsigned)length,
+      (unsigned)POCKET_RUNTIME_MAX_FRAME_BYTES
+    );
+    if (written > 0) {
+      queue_frame(POCKET_RUNTIME_MSG_CTRL, 0, (const uint8_t *)notice, (size_t)written);
+    }
+    return;
+  }
   static const char hello_marker[] = "\"t\":\"hello\"";
   bool is_hello = false;
   if (length >= sizeof hello_marker - 1) {

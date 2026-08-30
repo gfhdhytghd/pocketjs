@@ -38,8 +38,18 @@
 /* contracts/spec/spec.ts FIXED_DT: the core steps at exactly 1/60 s, and this
  * host presents at the same rate, so the advertised simulation rate is 60. */
 #define POCKETJS_SIMULATION_HZ 60
-/* QuickJS recurses; the 3DS main thread's stack is set in main.c. */
-#define POCKETJS_JS_STACK_SIZE (192 * 1024)
+/* QuickJS recurses; the 3DS main thread's stack is set in main.c (1 MiB).
+ *
+ * A mount descends the JSX tree, and a QuickJS call frame is expensive, so the
+ * depth this has to cover is set by how deeply an app nests components, not by
+ * how many nodes it has. Pocket Term mounts within a hair of 192 KiB — the
+ * value this held before — and one extra nesting level in its keyboard was
+ * enough to exceed it, which surfaced as `InternalError: stack overflow` at
+ * boot with no indication of where. 384 KiB is twice what that app needs and
+ * still leaves the C and Rust frames 640 KiB of the thread's stack. The limit
+ * itself costs nothing until it is used; only main.c's __stacksize__ reserves
+ * memory. */
+#define POCKETJS_JS_STACK_SIZE (384 * 1024)
 
 typedef enum {
   HostCreateNode,
@@ -91,7 +101,8 @@ static JSValue global;
 static JSValue frame_function;
 static const uint8_t *installed_pack;
 static size_t installed_pack_length;
-static char last_error[512];
+/* Wide enough for a message plus the frames QuickJS keeps for it. */
+static char last_error[1024];
 static char debug_poll_buffer[32 * 1024];
 /* contracts/spec/spec.ts SVC_POLL_BUF + the terminating NUL. */
 static char svc_poll_buffer[8192 + 1];
@@ -105,18 +116,44 @@ static void set_error(const char *message) {
 
 /* Take the pending exception as the reported error. The message is what the
  * capture path writes to error.txt, so a JS throw surfaces as itself instead
- * of as a timeout. */
+ * of as a timeout.
+ *
+ * The frames follow the message when the exception carries a `stack`, filling
+ * whatever room is left. A bare message names the failure but not the code —
+ * "InternalError: stack overflow" is the same string wherever it is thrown —
+ * and the frames are the only part that says which function to look at. */
 static void take_exception(void) {
   JSValue exception = JS_GetException(context);
   size_t length = 0;
   const char *message = JS_ToCStringLen2(context, &length, exception, 0);
+  size_t used = 0;
   if (message != NULL) {
-    size_t copy = length < sizeof last_error - 1 ? length : sizeof last_error - 1;
-    memcpy(last_error, message, copy);
-    last_error[copy] = '\0';
+    used = length < sizeof last_error - 1 ? length : sizeof last_error - 1;
+    memcpy(last_error, message, used);
     JS_FreeCString(context, message);
   } else {
-    set_error("QuickJS exception");
+    const char *fallback = "QuickJS exception";
+    used = strlen(fallback);
+    memcpy(last_error, fallback, used);
+  }
+  last_error[used] = '\0';
+  if (JS_IsObject(exception) && used + 2 < sizeof last_error - 1) {
+    JSValue stack = JS_GetPropertyStr(context, exception, "stack");
+    size_t stack_length = 0;
+    const char *frames = JS_IsException(stack) ? NULL : JS_ToCStringLen2(context, &stack_length, stack, 0);
+    if (frames != NULL) {
+      size_t room = sizeof last_error - 1 - used - 1;
+      size_t copy = stack_length < room ? stack_length : room;
+      last_error[used] = ' ';
+      /* Flattened: the error travels as one line, over the dev wire and into
+       * error.txt alike. */
+      for (size_t i = 0; i < copy; i += 1) {
+        last_error[used + 1 + i] = frames[i] == '\n' ? ' ' : frames[i];
+      }
+      last_error[used + 1 + copy] = '\0';
+      JS_FreeCString(context, frames);
+    }
+    JS_FreeValue(context, stack);
   }
   JS_FreeValue(context, exception);
 }
