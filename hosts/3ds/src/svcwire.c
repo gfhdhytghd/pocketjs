@@ -84,7 +84,6 @@ typedef enum {
 } SvcState;
 
 static bool enabled;
-static bool soc_failed;
 static char app_id[65];
 static SvcState state = SVC_STATE_IDLE;
 static int beacon_fd = -1;
@@ -466,11 +465,11 @@ static void pump_tx(void) {
 // ---------------------------------------------------------------------------
 
 bool svcwire_open(const char *app) {
-  if (app == NULL || app[0] == '\0' || strlen(app) > 64 || soc_failed) return false;
+  if (app == NULL || app[0] == '\0' || strlen(app) > 64) return false;
   if (!soc_active() && !soc_ensure(NULL, 0)) {
-    /* Remembered and final — emulators without a network stack keep the app
-     * on its connect screen instead of re-probing a doomed init. */
-    soc_failed = true;
+    /* soc.c retries behind a cooldown: a boot-time WiFi hiccup recovers on a
+     * later frame instead of latching the process offline, while a stackless
+     * environment costs one cheap check per cooldown window. */
     return false;
   }
   if (enabled && strcmp(app_id, app) != 0) {
