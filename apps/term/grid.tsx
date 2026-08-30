@@ -12,6 +12,7 @@
 
 import { For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
+import { getOps } from "@pocketjs/framework";
 import { THEME_CURSOR, THEME_FG, isDynamicSlot, runColumns, type Run } from "./protocol.ts";
 import { rgbToAbgr, type TermStore } from "./store.ts";
 
@@ -48,9 +49,23 @@ function connectionLabel(store: TermStore): string {
   }
 }
 
+/** 12 px bold — slot 7, per the pinned table in framework/compiler/tailwind.ts
+ *  (FONT_PX index 0 is 12 px; bold slots start at 7). It is what the status
+ *  bar's title is drawn in, so it is what the title has to be measured in. */
+const STATUS_BOLD_SLOT = 7;
+const STATUS_PAD = 6;
+const STATUS_GAP = 8;
+/** Room the right-hand side keeps for the scrollback marker, the grid size
+ *  and the connection dot. */
+const STATUS_RIGHT = 74;
+
 export function TermGrid(props: GridProps) {
   const m = props.metrics;
   const store = props.store;
+  // The title is a prop — "POCKET TERM" on the console, "MIRROR" in a desktop
+  // window — so where the host name starts is measured, not assumed. A
+  // guessed column was how the title came to sit on top of the host name.
+  const hostLeft = STATUS_PAD + Math.ceil(getOps().measureText(props.title, STATUS_BOLD_SLOT)) + STATUS_GAP;
   const cursorLeft = () => (store.cursor()?.[0] ?? 0) * m.cellW;
   const cursorTop = () => m.statusH + (store.cursor()?.[1] ?? 0) * m.cellH;
   const cursorOn = () => store.cursor()?.[2] === 1 && store.conn() === "live";
@@ -61,13 +76,18 @@ export function TermGrid(props: GridProps) {
         debugName="TermStatus"
         class={
           store.bell()
-            ? "absolute left-0 right-0 top-0 bg-[#7a4a1d]"
-            : "absolute left-0 right-0 top-0 bg-[#1a2230]"
+            ? "absolute left-0 right-0 top-0 overflow-hidden bg-[#7a4a1d]"
+            : "absolute left-0 right-0 top-0 overflow-hidden bg-[#1a2230]"
         }
         style={{ height: m.statusH }}
       >
         <Text class="absolute left-[6] top-0 text-xs text-[#9fb6d8] font-bold">{props.title}</Text>
-        <Text class="absolute left-[92] top-0 text-xs text-[#5d708c]">{store.hostName()}</Text>
+        <Text
+          class="absolute top-0 text-xs text-[#5d708c]"
+          style={{ insetL: hostLeft, insetR: STATUS_RIGHT }}
+        >
+          {store.hostName()}
+        </Text>
         <Show when={store.scrollback() > 0}>
           <Text class="absolute right-[62] top-0 text-xs text-[#e0b060]">{`↟${store.scrollback()}`}</Text>
         </Show>
