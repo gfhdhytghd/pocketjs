@@ -3,14 +3,16 @@
 // and the app stays on its connect screen.
 
 import { getOps } from "@pocketjs/framework";
-import { TERM_APP, type ClientLine, type HostLine } from "./protocol.ts";
+import { TERM_APP, type ClientLine, type HostInputLine, type HostLine } from "./protocol.ts";
 
 export interface Svc {
   /** Non-blocking transport probe — call once per frame; false while the
    *  companion is still being discovered (the app supplies the cadence). */
   open(): boolean;
-  /** Drain and parse this frame's host lines (call once per frame). */
-  poll(): HostLine[];
+  /** Drain and parse this frame's lines (call once per frame). The queue
+   *  carries the companion's terminal state and, on a desktop host, the
+   *  window's own input — see HostInputLine. */
+  poll(): (HostLine | HostInputLine)[];
   send(line: ClientLine): void;
 }
 
@@ -26,11 +28,11 @@ export function connectSvc(): Svc | null {
     poll() {
       const batch = poll();
       if (!batch) return [];
-      const lines: HostLine[] = [];
+      const lines: (HostLine | HostInputLine)[] = [];
       for (const line of batch.split("\n")) {
         if (line === "") continue;
         try {
-          lines.push(JSON.parse(line) as HostLine);
+          lines.push(JSON.parse(line) as HostLine | HostInputLine);
         } catch {
           // A malformed line is a companion bug; skip it rather than wedge.
         }

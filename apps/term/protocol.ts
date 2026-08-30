@@ -99,10 +99,10 @@ export interface SessionInfo {
 }
 
 /** A replica's role. A `device` drives the sessions: its grid sets their
- *  size and its input reaches the PTYs. A `mirror` is the read-only window
- *  the companion opens on the desktop beside each session — it never writes
- *  to a PTY and never resizes one, so plugging one in cannot disturb what
- *  the console sees. */
+ *  size, and it may open, close and switch between them. A `mirror` is a
+ *  window the companion opens beside one session: it types into that session
+ *  like any other replica, but it never resizes a PTY and never re-points
+ *  itself, so opening one cannot disturb what the console is looking at. */
 export type Role = "device" | "mirror";
 
 /** device -> host */
@@ -169,6 +169,30 @@ export type HostLine =
     }
   | { t: "exit"; sid: number }
   | { t: "bell"; sid: number };
+
+/**
+ * Lines the LOCAL host puts into the same svc queue as the companion's.
+ *
+ * A desktop window gets its keystrokes this way: `hosts/desktop` forwards
+ * the window's input as JSON lines in its own dialect, and the replica
+ * relays them to the companion, which owns the PTY. So one queue carries two
+ * directions of traffic — terminal state arriving from the companion, and
+ * input arriving from the machine the window is on — and they are told apart
+ * by shape, not by channel.
+ *
+ * The host's `hello` is not the companion's: it carries the viewport, no
+ * `proto`. Discriminating on `proto` is what keeps the two apart.
+ */
+export type HostInputLine =
+  | { t: "hello"; w: number; h: number; epoch?: number }
+  | { t: "ch"; s: string }
+  | { t: "key"; k: string; sh?: boolean; alt?: boolean; ctl?: boolean; cmd?: boolean }
+  | { t: "paste"; text: string }
+  | { t: "scroll"; dy: number }
+  | { t: "resize"; w: number; h: number }
+  | { t: "load"; text: string }
+  | { t: "mouse"; x: number; y: number; d?: boolean; sh?: boolean }
+  | { t: "ime"; s: string; c: number | null };
 
 /** Named keys the host encodes into PTY bytes (host/keys.ts). */
 export type KeyName =

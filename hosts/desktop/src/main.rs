@@ -1121,7 +1121,11 @@ impl PocketRoot {
 
     /// Input lines flow when either JSON-line dialect is wired.
     fn forward_input(&self) -> bool {
-        self.args.editor || self.system_ui_input
+        // A window whose companion is reached over the wire forwards input
+        // too: the app on the other end is the only thing that knows what a
+        // keystroke means, and a window that can only watch is not much of a
+        // window.
+        self.args.editor || self.system_ui_input || self.wire.is_some()
     }
 
     /// The svc hello: viewport first, then the document (order matters — the
@@ -1484,6 +1488,15 @@ impl PocketRoot {
             if let Some(k) = named {
                 self.svc(serde_json::json!({
                     "t": "key", "k": k, "sh": shift,
+                    "alt": ks.modifiers.alt, "ctl": ks.modifiers.control,
+                }));
+            } else if (ks.modifiers.control || ks.modifiers.alt) && ks.key.chars().count() == 1 {
+                // A control or option chord produces no text, so it never
+                // reaches the input handler below and would simply be lost.
+                // It is also the whole vocabulary of a terminal: ctrl-C,
+                // ctrl-D, alt-B. Apps that do not use chords ignore the line.
+                self.svc(serde_json::json!({
+                    "t": "key", "k": ks.key, "sh": shift,
                     "alt": ks.modifiers.alt, "ctl": ks.modifiers.control,
                 }));
             }

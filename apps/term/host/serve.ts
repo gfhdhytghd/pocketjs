@@ -288,7 +288,13 @@ class Hub {
     return session;
   }
 
-  /** Claim the session a connecting mirror belongs to. */
+  /** Claim the session a connecting mirror belongs to: the one it names if
+   *  it still exists, else the oldest window still waiting for its session,
+   *  else the newest session.
+   *
+   *  The last fallback matters for a window that outlived the companion —
+   *  its own reconnect loop brings it back, and refusing it would leave it
+   *  reconnecting forever against a window showing nothing. */
   takePendingMirror(want?: number): number | undefined {
     if (want !== undefined && this.sessions.has(want)) {
       const at = this.pendingMirrors.indexOf(want);
@@ -299,7 +305,7 @@ class Hub {
       const sid = this.pendingMirrors.shift();
       if (sid !== undefined && this.sessions.has(sid)) return sid;
     }
-    return undefined;
+    return [...this.sessions.keys()].at(-1);
   }
 
   kill(sid: number) {
@@ -531,10 +537,13 @@ function attach(conn: Conn, sid: number) {
 // ---------------------------------------------------------------------------
 
 function handleLine(conn: Conn, line: ClientLine) {
-  // Read-only by construction, not by the mirror's good manners: a window
-  // that only watches cannot type into someone's shell even if its guest is
-  // replaced.
-  if (conn.role === "mirror" && line.t !== "hello" && line.t !== "resync") return;
+  // A mirror types into its own session, and nothing else: the window exists
+  // for one session, so it may not re-point itself at another, open one, or
+  // close one. That binding is enforced here rather than trusted to the
+  // window's guest.
+  if (conn.role === "mirror" && (line.t === "attach" || line.t === "new" || line.t === "kill")) {
+    return;
+  }
   switch (line.t) {
     case "hello": {
       if (line.proto !== TERM_PROTO) return;

@@ -9,9 +9,12 @@
 // follows the console to Linux (`hosts/desktop` is the stock host of both
 // `macos-app` and `linux-app`).
 //
-// The window never types: `role: "mirror"` makes the companion refuse input
-// from this connection and keeps it from resizing anyone's PTY, so opening
-// one cannot disturb what the console is doing.
+// It types, like any replica. The keyboard arrives as svc lines from the
+// host this window runs on (see HostInputLine) and the store relays them to
+// the companion, which owns the PTY — so the console and the window are
+// typing into the same shell and see the same echo. What `role: "mirror"`
+// still forbids is changing what this window is: it cannot resize the PTY,
+// nor re-point itself at another session.
 
 import { onFrame } from "@pocketjs/framework/lifecycle";
 import { getOps } from "@pocketjs/framework";
@@ -34,7 +37,7 @@ export default function TermMirror() {
   const ROWS = Math.floor((240 - STATUS_H) / CELL_H);
 
   const store = createTermStore(
-    { cols: COLS, rows: ROWS, cell: [CELL_W, CELL_H], role: "mirror", readOnly: true },
+    { cols: COLS, rows: ROWS, cell: [CELL_W, CELL_H], role: "mirror" },
     connectSvc(),
   );
   onFrame(() => store.frame());
@@ -43,7 +46,7 @@ export default function TermMirror() {
     <TermGrid
       store={store}
       metrics={{ cols: COLS, rows: ROWS, cellW: CELL_W, cellH: CELL_H, track: TRACK, statusH: STATUS_H }}
-      badge="read-only"
+      badge={`${COLS}×${ROWS}`}
       hint="this window is opened by the term companion"
       title="MIRROR"
     />

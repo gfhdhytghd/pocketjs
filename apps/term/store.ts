@@ -9,6 +9,7 @@ import { getOps } from "@pocketjs/framework";
 import {
   TERM_PROTO,
   type Cursor,
+  type HostInputLine,
   type HostLine,
   type KeyName,
   type Role,
@@ -87,14 +88,11 @@ export interface TermStoreOptions {
    *  advances and cell heights against it. */
   cell: [number, number];
   role?: Role;
-  /** Read-only replicas never write to a PTY and never resize one. */
-  readOnly?: boolean;
 }
 
 export function createTermStore(options: TermStoreOptions, svc: Svc | null): TermStore {
   const { cols, rows, cell } = options;
   const role: Role = options.role ?? "device";
-  const readOnly = options.readOnly ?? false;
   const [conn, setConn] = createSignal<ConnState>(svc === null ? "no-svc" : "search");
   const [hostName, setHostName] = createSignal("");
   const [sessions, setSessions] = createSignal<SessionInfo[]>([]);
@@ -196,14 +194,56 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
     setConn("live");
   };
 
-  const apply = (line: HostLine) => {
+  const sendText = (s: string) => {
+    if (s.length > 0) svc?.send({ t: "ch", s });
+  };
+  const sendKey = (k: KeyName | string, ctrl?: boolean, alt?: boolean) => {
+    svc?.send({
+      t: "key",
+      k,
+      ...(ctrl ? { ctrl: 1 as const } : {}),
+      ...(alt ? { alt: 1 as const } : {}),
+    });
+  };
+  const scroll = (lines: number) => {
+    if (lines !== 0) svc?.send({ t: "scroll", d: lines });
+  };
+
+  const apply = (line: HostLine | HostInputLine) => {
     switch (line.t) {
       case "hello":
+        // The local host says hello too, with a viewport and no proto. Only
+        // the companion's introduces the session.
+        if (!("proto" in line)) break;
         setHostName(line.name);
         if (line.sid !== undefined) {
           setActiveSid(line.sid);
           lastWanted = line.sid;
         }
+        break;
+
+      // Input from the machine this replica runs on (hosts/desktop forwards
+      // the window's keystrokes). The companion owns the PTY, so a window
+      // types by relaying, not by echoing anything locally.
+      case "ch":
+        sendText(line.s);
+        break;
+      case "key":
+        sendKey(line.k, line.ctl === true, line.alt === true);
+        break;
+      case "paste":
+        sendText(line.text);
+        break;
+      case "scroll":
+        // A wheel notch is worth a line of history.
+        scroll(-Math.sign(line.dy) * Math.max(1, Math.round(Math.abs(line.dy) / 20)));
+        break;
+      case "resize":
+      case "load":
+      case "mouse":
+      case "ime":
+        // Not part of a terminal replica's contract: the grid is sized by
+        // the console, and a commit arrives as its own "ch" line.
         break;
       case "sessions":
         setSessions(line.list);
@@ -229,7 +269,7 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
   };
 
   const attach = (sid: number) => {
-    if (readOnly || sid === activeSid()) return;
+    if (sid === activeSid()) return;
     lastWanted = sid;
     svc?.send({ t: "attach", sid });
   };
@@ -275,26 +315,14 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
       if (conn() !== "live" || !sawGrid) setConn(sawGrid ? "live" : "link");
       for (const line of svc.poll()) apply(line);
     },
-    sendText(s) {
-      if (!readOnly && s.length > 0) svc?.send({ t: "ch", s });
-    },
-    sendKey(k, ctrl, alt) {
-      if (readOnly) return;
-      svc?.send({
-        t: "key",
-        k,
-        ...(ctrl ? { ctrl: 1 as const } : {}),
-        ...(alt ? { alt: 1 as const } : {}),
-      });
-    },
-    scroll(lines) {
-      if (lines !== 0) svc?.send({ t: "scroll", d: lines });
-    },
+    sendText,
+    sendKey,
+    scroll,
     newSession() {
-      if (!readOnly) svc?.send({ t: "new" });
+      svc?.send({ t: "new" });
     },
     kill(sid) {
-      if (!readOnly && sid >= 0) svc?.send({ t: "kill", sid });
+      if (sid >= 0) svc?.send({ t: "kill", sid });
     },
     attach,
     attachSibling(step) {
