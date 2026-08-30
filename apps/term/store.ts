@@ -7,7 +7,6 @@
 import { createSignal, type Accessor } from "solid-js";
 import { getOps } from "@pocketjs/framework";
 import {
-  DYNAMIC_FONT_SLOT,
   TERM_PROTO,
   type Cursor,
   type HostLine,
@@ -116,11 +115,16 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
    *  looking at rather than to whichever one the host lists last. */
   let lastWanted = -1;
 
-  // Atlas reassembly. A bake arrives as ordered chunks; a device that joins
-  // mid-bake has no use for the tail and waits for the next complete one.
-  let atlasGen = -1;
-  let atlasSeq = -1;
-  let atlasParts: string[] = [];
+  // Atlas reassembly, per slot: the companion bakes one atlas per face in
+  // its fallback chain. A bake arrives as ordered chunks; a device that
+  // joins mid-bake has no use for the tail and waits for the next one.
+  interface AtlasRx {
+    gen: number;
+    seq: number;
+    parts: string[];
+  }
+  const atlasRx = new Map<number, AtlasRx>();
+  const glyphCounts = new Map<number, number>();
 
   const clearGrid = () => {
     for (const [, set] of rowSignals) set([]);
@@ -135,27 +139,30 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
   };
 
   const applyAtlas = (line: Extract<HostLine, { t: "atlas" }>) => {
-    if (line.gen !== atlasGen) {
+    let rx = atlasRx.get(line.slot);
+    if (rx === undefined || line.gen !== rx.gen) {
       if (line.seq !== 0) return; // joined mid-bake; the next one starts clean
-      atlasGen = line.gen;
-      atlasSeq = -1;
-      atlasParts = [];
+      rx = { gen: line.gen, seq: -1, parts: [] };
+      atlasRx.set(line.slot, rx);
     }
-    if (line.seq !== atlasSeq + 1) {
-      atlasGen = -1; // a gap; drop the bake and wait for the next
-      atlasParts = [];
+    if (line.seq !== rx.seq + 1) {
+      atlasRx.delete(line.slot); // a gap; drop the bake and wait for the next
       return;
     }
-    atlasSeq = line.seq;
-    atlasParts.push(line.b64);
+    rx.seq = line.seq;
+    rx.parts.push(line.b64);
     if (line.more === 1) return;
-    const blob = base64ToBytes(atlasParts.join(""));
-    atlasParts = [];
+    const blob = base64ToBytes(rx.parts.join(""));
+    rx.parts = [];
     const load = getOps().loadFontAtlas;
     if (!load || blob.length < 16) return;
     load(blob);
-    // The blob's header carries its glyph count (spec FONT ATLAS v3).
-    setDynamicGlyphs(blob[6] | (blob[7] << 8));
+    // Each blob's header carries its own glyph count (spec FONT ATLAS v3);
+    // the status line reports the whole chain's.
+    glyphCounts.set(line.slot, blob[6] | (blob[7] << 8));
+    let total = 0;
+    for (const count of glyphCounts.values()) total += count;
+    setDynamicGlyphs(total);
   };
 
   const applyGrid = (line: Extract<HostLine, { t: "grid" }>) => {
@@ -248,8 +255,8 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
         gen = -1;
         seq = -1;
         sawGrid = false;
-        atlasGen = -1;
-        atlasParts = [];
+        atlasRx.clear();
+        glyphCounts.clear();
         svc.send({
           t: "hello",
           proto: TERM_PROTO,
@@ -299,7 +306,3 @@ export function createTermStore(options: TermStoreOptions, svc: Svc | null): Ter
     },
   };
 }
-
-/** The style a run of dynamically-atlased text needs: the runtime slot, and
- *  no tracking correction — the companion baked the advances to the grid. */
-export const DYNAMIC_TEXT_STYLE = { fontSlot: DYNAMIC_FONT_SLOT } as const;

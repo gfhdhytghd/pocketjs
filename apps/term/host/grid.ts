@@ -31,15 +31,15 @@ export interface XtermCellLike {
  *  either: the wide glyph before it already covers that column, and inserting
  *  a space there would push the rest of the row off the grid.
  *
- *  `dyn` marks a character the device cannot draw from its baked atlas and
- *  the companion can supply at runtime (see host/glyphs.ts). Runs never mix
- *  the two — they select different font slots. */
+ *  `slot` names the runtime atlas that can draw a character the device has
+ *  no baked glyph for (see host/glyphs.ts); undefined means the baked mono
+ *  face. Runs never mix slots — a run is one <Text> with one font. */
 export interface Cell {
   ch: string;
   fg: number;
   bg: number;
   width?: 0 | 1 | 2;
-  dyn?: boolean;
+  slot?: number;
 }
 
 /** The 256-color table: 16 themed ANSI colors, the 6x6x6 cube, 24 grays. */
@@ -105,11 +105,17 @@ export function resolveCell(cell: XtermCellLike): Cell {
  *  same-styled stretch are kept so `foo bar` stays one run. */
 export function rowRuns(cells: readonly Cell[]): Run[] {
   const runs: Run[] = [];
-  let run: { col: number; text: string; fg: number; bg: number; dyn: boolean } | null = null;
+  let run:
+    | { col: number; text: string; fg: number; bg: number; slot?: number; span: number }
+    | null = null;
   let pendingBlanks = 0;
   const close = () => {
     if (run !== null) {
-      runs.push(run.dyn ? [run.col, run.text, run.fg, run.bg, 1] : [run.col, run.text, run.fg, run.bg]);
+      const base: Run = [run.col, run.text, run.fg, run.bg];
+      if (run.slot !== undefined) base[4] = run.slot;
+      // The span is only worth sending when a glyph is wider than a column.
+      if (run.span !== run.text.length) base[5] = run.span;
+      runs.push(base);
     }
     run = null;
     pendingBlanks = 0;
@@ -124,23 +130,24 @@ export function rowRuns(cells: readonly Cell[]): Run[] {
       continue;
     }
     const ch = cell.ch === "" ? " " : cell.ch;
-    const dyn = cell.dyn === true;
-    // Blanks are only ever folded into a baked run: the dynamic atlas holds
+    const columns = cell.width === 2 ? 2 : 1;
+    // Blanks are only ever folded into a baked run: a runtime atlas holds
     // exactly the codepoints the companion was asked to bake, and a space is
     // not one of them — folding one in would leave a hole mid-run.
     if (
       run !== null &&
       run.fg === cell.fg &&
       run.bg === cell.bg &&
-      run.dyn === dyn &&
-      (pendingBlanks === 0 || (!dyn && pendingBlanks <= 4))
+      run.slot === cell.slot &&
+      (pendingBlanks === 0 || (cell.slot === undefined && pendingBlanks <= 4))
     ) {
       run.text += " ".repeat(pendingBlanks) + ch;
+      run.span += pendingBlanks + columns;
       pendingBlanks = 0;
       continue;
     }
     close();
-    run = { col, text: ch, fg: cell.fg, bg: cell.bg, dyn };
+    run = { col, text: ch, fg: cell.fg, bg: cell.bg, slot: cell.slot, span: columns };
   }
   close();
   return runs;

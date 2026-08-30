@@ -44,7 +44,7 @@ import {
   type SessionInfo,
 } from "../protocol.ts";
 import { chunkRows, resolveCell, rowKey, rowRuns, type Cell } from "./grid.ts";
-import { DynamicAtlas, isBakedCodepoint } from "./glyphs.ts";
+import { DynamicAtlasSet, isBakedCodepoint } from "./glyphs.ts";
 import { encodeKey } from "./keys.ts";
 import {
   FrameParser,
@@ -218,10 +218,12 @@ class Conn {
   rows = 24;
   cell: [number, number] = [7, 13];
   attachedSid = -1;
-  /** Atlas generation this replica has been sent, and the chunks still owed
-   *  to it. One chunk goes out per flush tick: the device's line queue is
-   *  32 KiB and drops its oldest entries when full, so a whole atlas dumped
-   *  at once would take the grid updates down with it. */
+  /** Atlas generation this replica holds per slot, and the chunks still owed
+   *  to it for the slot in flight. One chunk goes out per flush tick: the
+   *  device's line queue is 32 KiB and drops its oldest entries when full,
+   *  so a whole atlas dumped at once would take the grid updates with it. */
+  atlasSent = new Map<number, number>();
+  atlasSlot = 0;
   atlasGen = -1;
   atlasQueue: string[] = [];
   atlasSeq = 0;
@@ -360,21 +362,23 @@ const hub = new Hub();
 
 /** Codepoints the device cannot draw from its baked atlas, noted as the grid
  *  is serialized so the next bake covers exactly what is on screen. */
-const atlas = new DynamicAtlas();
+const atlas = new DynamicAtlasSet();
 
 /** Classify a resolved cell against the device's glyph coverage: baked text
- *  passes through, a character the companion can bake is marked for the
- *  dynamic slot, and one nobody can draw becomes a placeholder of the same
- *  column width — an unrenderable glyph must not also shift the rest of the
- *  row, which is what dropping it or leaving it to a missing atlas would do. */
+ *  passes through, a character some face in the chain can draw is routed to
+ *  that face's slot, and one nobody can draw becomes a placeholder of the
+ *  same column width — an unrenderable glyph must not also shift the rest of
+ *  the row, which is what dropping it or leaving it to a missing atlas would
+ *  do. */
 function classify(cell: Cell): void {
   if (cell.width === 0 || cell.ch === "" || cell.ch === " ") return;
   const cp = cell.ch.codePointAt(0);
   if (cp === undefined || isBakedCodepoint(cp)) return;
   const columns = cell.width === 2 ? 2 : 1;
-  if (atlas.covers(cp)) {
-    atlas.want(cp, columns);
-    cell.dyn = true;
+  const slot = atlas.slotFor(cp);
+  if (slot >= 0) {
+    atlas.want(cp, columns, slot);
+    cell.slot = slot;
     return;
   }
   cell.ch = "?".repeat(columns);
@@ -416,31 +420,37 @@ function pumpAtlasBake(): void {
   atlasDebounce = 0;
   const conn = [...hub.conns].find((c) => c.sawClientHello);
   const [cellW, cellH] = conn?.cell ?? [7, 13];
-  const baked = atlas.bake(cellW, cellH);
-  if (baked) {
+  for (const baked of atlas.bake(cellW, cellH)) {
     console.log(
-      `[term] baked ${baked.glyphCount} runtime glyphs at ${baked.px}px ` +
-        `(${(baked.bytes.length / 1024).toFixed(1)} KiB) from ${atlas.fontPath}`,
+      `[term] baked ${baked.glyphCount} glyphs at ${baked.px}px into slot ${baked.slot} ` +
+        `(${(baked.bytes.length / 1024).toFixed(1)} KiB)`,
     );
   }
 }
 
-/** Hand one atlas chunk to a replica per tick. */
+/** Hand one atlas chunk to a replica per tick. Every face in the chain is
+ *  delivered, one slot at a time. */
 function pumpAtlasSend(conn: Conn): void {
-  const baked = atlas.current;
-  if (!baked || !conn.sawClientHello) return;
-  if (conn.atlasGen !== baked.gen && conn.atlasQueue.length === 0) {
-    conn.atlasGen = baked.gen;
-    conn.atlasSeq = 0;
-    const b64 = Buffer.from(baked.bytes).toString("base64");
-    for (let at = 0; at < b64.length; at += ATLAS_CHUNK) {
-      conn.atlasQueue.push(b64.slice(at, at + ATLAS_CHUNK));
+  if (!conn.sawClientHello) return;
+  if (conn.atlasQueue.length === 0) {
+    for (const baked of atlas.current()) {
+      if (conn.atlasSent.get(baked.slot) === baked.gen) continue;
+      conn.atlasSent.set(baked.slot, baked.gen);
+      conn.atlasSlot = baked.slot;
+      conn.atlasGen = baked.gen;
+      conn.atlasSeq = 0;
+      const b64 = Buffer.from(baked.bytes).toString("base64");
+      for (let at = 0; at < b64.length; at += ATLAS_CHUNK) {
+        conn.atlasQueue.push(b64.slice(at, at + ATLAS_CHUNK));
+      }
+      break; // one atlas at a time; the next tick starts the next
     }
   }
   const chunk = conn.atlasQueue.shift();
   if (chunk === undefined) return;
   conn.sendLine({
     t: "atlas",
+    slot: conn.atlasSlot,
     gen: conn.atlasGen,
     seq: conn.atlasSeq++,
     ...(conn.atlasQueue.length > 0 ? { more: 1 as const } : {}),
@@ -526,6 +536,7 @@ function handleLine(conn: Conn, line: ClientLine) {
       // same as a new socket: the console's transport is native and survives
       // a guest reload, so the fresh guest arrives on the connection that
       // already had an atlas. Re-send it or its CJK renders as blanks.
+      conn.atlasSent.clear();
       conn.atlasGen = -1;
       conn.atlasQueue = [];
       conn.atlasSeq = 0;

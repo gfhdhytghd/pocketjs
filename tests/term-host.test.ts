@@ -32,10 +32,12 @@ import {
 } from "../apps/term/host/grid.ts";
 import { encodeKey } from "../apps/term/host/keys.ts";
 import {
+  DynamicAtlasSet,
   extractFromCollection,
   forceAdvances,
   isBakedCodepoint,
 } from "../apps/term/host/glyphs.ts";
+import { DYNAMIC_SLOTS } from "../apps/term/protocol.ts";
 
 // ---------------------------------------------------------------------------
 // wire
@@ -185,21 +187,21 @@ describe("run building", () => {
     // terminal's zero-width continuation. Treating a continuation as a blank
     // would splice a space between the two characters and push the rest of
     // the row one column right.
-    const wide = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const wide = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, slot: 20 });
     const cont = (): Cell => ({ ch: "", fg: -1, bg: -1, width: 0 });
     const runs = rowRuns([wide("你"), cont(), wide("好"), cont(), cell("!")]);
     expect(runs).toEqual([
-      [0, "你好", -1, -1, 1],
+      [0, "你好", -1, -1, 20, 4],
       [4, "!", -1, -1],
     ]);
   });
 
   test("dynamic and baked text never share a run", () => {
-    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, slot: 20 });
     const runs = rowRuns([cell("a"), dyn("文"), { ch: "", fg: -1, bg: -1, width: 0 }, cell("b")]);
     expect(runs).toEqual([
       [0, "a", -1, -1],
-      [1, "文", -1, -1, 1],
+      [1, "文", -1, -1, 20, 2],
       [3, "b", -1, -1],
     ]);
   });
@@ -207,11 +209,11 @@ describe("run building", () => {
   test("blanks are never folded into a dynamic run", () => {
     // The dynamic atlas holds only the codepoints the companion baked; a
     // space folded into such a run would be a glyph the device cannot draw.
-    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, slot: 20 });
     const runs = rowRuns([dyn("文"), { ch: "", fg: -1, bg: -1, width: 0 }, cell(" "), dyn("字")]);
     expect(runs).toEqual([
-      [0, "文", -1, -1, 1],
-      [3, "字", -1, -1, 1],
+      [0, "文", -1, -1, 20, 2],
+      [3, "字", -1, -1, 20, 2],
     ]);
   });
 });
@@ -326,6 +328,25 @@ describe("runtime glyph atlas", () => {
       const length = outView.getUint32(entry + 12);
       expect([...out.subarray(offset, offset + length)]).toEqual([...tables[i].data]);
     }
+  });
+
+  test("the fallback chain spreads a terminal's glyphs across faces", () => {
+    // No single face covers a terminal: a CJK face has neither ⏺ nor ⎿, and
+    // ⏺ has outlines only in a math face — which is the whole reason there is
+    // a chain rather than one font. This asserts the routing actually lands
+    // on different faces, not merely that it answers.
+    const atlas = new DynamicAtlasSet();
+    const slots = [..."你⎿⏺"].map((ch) => atlas.slotFor(ch.codePointAt(0)!));
+    for (const slot of slots) {
+      expect(DYNAMIC_SLOTS).toContain(slot as (typeof DYNAMIC_SLOTS)[number]);
+    }
+    expect(new Set(slots).size).toBeGreaterThan(1);
+    // Baked codepoints never route: ASCII, and the box-drawing set the app
+    // spells out as a literal (which is why ❯ is the device's own glyph).
+    expect(atlas.slotFor("A".codePointAt(0)!)).toBe(-1);
+    expect(atlas.slotFor("❯".codePointAt(0)!)).toBe(-1);
+    // A face is chosen once and stays chosen.
+    expect(atlas.slotFor("你".codePointAt(0)!)).toBe(slots[0]);
   });
 
   test("advances are rewritten to whole cells", () => {

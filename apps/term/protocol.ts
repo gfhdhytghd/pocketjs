@@ -32,25 +32,42 @@ export const TERM_GLYPHS =
   "│┃─━┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╡╞▀▄█▌▐░▒▓■□▪▫▲►▼◄◆●○∙·•‾⌐¬½¼«»≈≠≤≥±÷×→←↑↓↔⏻…—–‘’“”➜❯❮✔✗λ";
 
 /** One run of same-styled cells: start column, text, fg, bg (0xRRGGBB ints,
- *  -1 = the theme default), and an optional font marker — 1 means the run's
- *  codepoints live in the dynamic atlas (DYNAMIC_FONT_SLOT) the companion
- *  bakes at runtime, not in the app's baked mono slot. */
-export type Run = [col: number, text: string, fg: number, bg: number, dyn?: 1];
+ *  -1 = the theme default), an optional font slot — present when the run's
+ *  codepoints live in one of the atlases the companion bakes at runtime
+ *  rather than in the app's baked mono slot — and the run's width in
+ *  columns, which is only sent when it differs from the character count
+ *  (a full-width glyph spans two). */
+export type Run = [
+  col: number,
+  text: string,
+  fg: number,
+  bg: number,
+  slot?: number,
+  span?: number,
+];
 
-/** Spare font slot (0..18 are the app's baked sizes, MAX_FONT_SLOTS is 24)
- *  that carries the runtime-baked atlas for codepoints the build never saw —
- *  CJK, and anything else a session prints. The device loads it through the
- *  spec `loadFontAtlas` op, the same reload path the note widget's runtime
- *  glyph coverage uses (docs/WIDGET.md, docs/BACKENDS.md
- *  `text.glyphs.runtime`); here the rasterizing happens on the companion and
- *  travels as atlas chunks, because the console has neither a font file nor
- *  a rasterizer. */
-export const DYNAMIC_FONT_SLOT = 19;
+/** Columns a run occupies. */
+export function runColumns(run: Run): number {
+  return run[5] ?? run[1].length;
+}
 
-/** Cells a dynamic-atlas glyph occupies. Terminals give CJK two columns, and
- *  the companion rewrites the baked advances to match so a run of them lands
- *  on the grid exactly. */
-export const DYNAMIC_CELL_COLUMNS = 2;
+/** Spare font slots (0..18 are the app's baked sizes, MAX_FONT_SLOTS is 24)
+ *  carrying atlases for codepoints the build never saw — CJK, and the
+ *  symbols a program draws its interface with. The device loads them through
+ *  the spec `loadFontAtlas` op, the same reload path the note widget's
+ *  runtime glyph coverage uses (docs/WIDGET.md, docs/BACKENDS.md
+ *  `text.glyphs.runtime`); here the rasterizing happens on the companion,
+ *  because the console has neither a font file nor a rasterizer.
+ *
+ *  There are several because no single face covers a terminal: the mono face
+ *  has ❯ but no CJK, a CJK face has neither ⏺ nor ⎿, and ⏺ has outlines only
+ *  in a math face. One slot per face in the companion's fallback chain. */
+export const DYNAMIC_SLOTS = [19, 20, 21, 22, 23] as const;
+
+/** Whether a run's font slot is one the companion supplies at runtime. */
+export function isDynamicSlot(slot: number | undefined): slot is number {
+  return slot !== undefined && slot >= DYNAMIC_SLOTS[0];
+}
 
 /** One replaced row: y, then the row's runs (empty = a blank row). */
 export type RowUpdate = [y: number, ...runs: Run[]];
@@ -100,12 +117,13 @@ export type HostLine =
   | { t: "hello"; proto: number; name: string; sid?: number }
   | { t: "sessions"; list: SessionInfo[]; active: number }
   | {
-      /** One chunk of the runtime-baked atlas for DYNAMIC_FONT_SLOT. `gen`
-       *  identifies the bake (it grows as sessions print new codepoints);
-       *  chunks of one gen arrive in order and the device loads the slot
-       *  when the last one lands. A device that joins mid-gen discards the
-       *  partial and waits for the next complete one. */
+      /** One chunk of a runtime-baked atlas. `gen` identifies the bake for
+       *  that slot (it grows as sessions print new codepoints); chunks of one
+       *  gen arrive in order and the device loads the slot when the last one
+       *  lands. A device that joins mid-gen discards the partial and waits
+       *  for the next complete one. */
       t: "atlas";
+      slot: number;
       gen: number;
       seq: number;
       more?: 1;

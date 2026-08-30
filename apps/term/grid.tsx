@@ -12,7 +12,7 @@
 
 import { For, Show } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
-import { DYNAMIC_FONT_SLOT, THEME_CURSOR, THEME_FG, type Run } from "./protocol.ts";
+import { THEME_CURSOR, THEME_FG, isDynamicSlot, runColumns, type Run } from "./protocol.ts";
 import { rgbToAbgr, type TermStore } from "./store.ts";
 
 export interface GridMetrics {
@@ -110,8 +110,7 @@ export function TermGrid(props: GridProps) {
                     class="absolute top-0"
                     style={{
                       insetL: run[0] * m.cellW,
-                      // A dynamic run's glyphs are two columns wide each.
-                      width: (run[4] === 1 ? run[1].length * 2 : run[1].length) * m.cellW,
+                      width: runColumns(run) * m.cellW,
                       height: m.cellH,
                       bgColor: rgbToAbgr(run[3]),
                     }}
@@ -120,13 +119,13 @@ export function TermGrid(props: GridProps) {
                 <Text
                   class="absolute top-0 font-mono text-xs"
                   style={
-                    run[4] === 1
+                    isDynamicSlot(run[4])
                       ? {
                           // The companion baked this atlas's advances to the
                           // grid, so it needs no tracking correction.
                           insetL: run[0] * m.cellW,
                           lineHeight: m.cellH,
-                          fontSlot: DYNAMIC_FONT_SLOT,
+                          fontSlot: run[4],
                           textColor: rgbToAbgr(run[2] >= 0 ? run[2] : THEME_FG),
                         }
                       : {

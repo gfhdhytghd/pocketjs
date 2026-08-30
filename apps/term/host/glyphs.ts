@@ -1,54 +1,85 @@
 // apps/term/host/glyphs.ts — runtime glyph coverage for the device.
 //
 // The console's atlases are baked at build time from the app's own string
-// literals, so a session that prints 你好 has nothing to draw with. This is
-// the same problem the note widget solves in its `cjk.rs` (docs/WIDGET.md):
-// rasterize the unseen codepoints from a system font, put them in a FONT
-// ATLAS blob, and reload the slot through the spec `loadFontAtlas` op. The
-// difference here is where the rasterizer lives — the 3DS has neither a font
-// file nor a rasterizer, so the companion bakes and the blob travels over the
-// svc channel.
+// literals, so a session that prints 你好 — or the ⏺ and ⎿ a coding agent
+// draws its transcript with — has nothing to draw. This is the problem the
+// note widget solves in its `cjk.rs` (docs/WIDGET.md): rasterize the unseen
+// codepoints from a system font, put them in a FONT ATLAS, and reload the
+// slot through the spec `loadFontAtlas` op. The difference here is that the
+// rasterizer lives on the companion, because the console has neither a font
+// file nor a rasterizer.
 //
-// The baker is the repository's own `bakeSlot` (framework/compiler/bake-font.ts,
-// opentype.js outlines + scanline coverage), so a glyph delivered at runtime
-// goes through exactly the code path a baked one did. Two things are rewritten
-// afterwards, both in the cmap (spec.ts FONT ATLAS v3):
+// It takes a CHAIN of faces, not one. No single font on a Mac covers what a
+// terminal shows: JetBrains Mono has ❯ and the box drawing but no CJK, a CJK
+// face has neither ⏺ nor ⎿, and ⏺ turns out to live in a math font. Each
+// face gets its own atlas in its own spare slot (0..18 are the app's baked
+// sizes, MAX_FONT_SLOTS is 24), and a codepoint goes to the first face that
+// has it — the same fallback a desktop text stack would do, done explicitly
+// because the wire has to say which slot each run selects.
 //
-//   * advance := columns * cellW — a terminal owns its grid, and the font's
-//     natural advance would drift a run off the cell boundaries. xterm tells
-//     us how many columns each codepoint occupies; that times the device's
-//     measured cell width is the advance the device needs.
-//   * the px size is chosen so the atlas cell is no taller than one terminal
-//     row, otherwise a CJK glyph paints into the rows above and below it.
+// Two things are rewritten after baking, both in the cmap (spec.ts FONT
+// ATLAS v3):
+//
+//   * advance := columns * cellW — a terminal owns its grid, and a font's
+//     natural advance would drift a run off the cell boundaries.
+//   * the px size is searched down until a cell fits BOTH one terminal row
+//     and the narrowest column span in the atlas. A proportional face's ⏺ is
+//     as wide as it is tall; dropped into a one-column cell at row height it
+//     would paint over its neighbour.
 
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 // Default import: opentype.js exposes its ESM build only through the
 // bundler-only `module` field (see framework/compiler/bake-font.ts).
 import opentype, { type Font } from "opentype.js";
 import { bakeSlot } from "../../../framework/compiler/bake-font.ts";
-import {
-  FONT_CMAP_ENTRY_SIZE,
-  FONT_HEADER_SIZE,
-} from "../../../contracts/spec/spec.ts";
-import { DYNAMIC_FONT_SLOT, TERM_GLYPHS } from "../protocol.ts";
+import { FONT_CMAP_ENTRY_SIZE, FONT_HEADER_SIZE } from "../../../contracts/spec/spec.ts";
+import { DYNAMIC_SLOTS, TERM_GLYPHS } from "../protocol.ts";
 
-/** Fonts to try, in order. A CJK face is ~20 MB of outlines; one is loaded
- *  lazily, the first time a session actually prints something unbaked. */
-const FONT_CANDIDATES = [
-  process.env.POCKET_TERM_CJK_FONT,
-  "/System/Library/Fonts/Hiragino Sans GB.ttc",
-  "/System/Library/Fonts/STHeiti Light.ttc",
-  "/System/Library/Fonts/PingFang.ttc",
-  // Linux, for when the companion runs there too.
-  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-  "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-].filter((path): path is string => typeof path === "string" && path.length > 0);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+/**
+ * The fallback chain, best face first. Each entry takes one atlas slot, so
+ * the list is capped by DYNAMIC_SLOTS; entries that are missing on this
+ * machine are skipped and the rest shift up.
+ *
+ * The order is a coverage argument, not a preference:
+ *   1. the terminal's own face, so a symbol it has looks like the text
+ *      around it (❯ ✓ ✗ and the arrows);
+ *   2. a real CJK face, which is what a Chinese session actually needs;
+ *   3. Apple Symbols for the box-adjacent technical glyphs (⎿);
+ *   4. a math face, the only place ⏺ and ⏵ have outlines rather than a
+ *      colour bitmap;
+ *   5. a broad pan-Unicode face as the last stop before a placeholder.
+ */
+const FONT_CHAIN: readonly { label: string; paths: readonly string[] }[] = [
+  { label: "mono", paths: [join(ROOT, "assets/fonts/JetBrainsMono-Regular.ttf")] },
+  {
+    label: "cjk",
+    paths: [
+      process.env.POCKET_TERM_CJK_FONT ?? "",
+      "/System/Library/Fonts/Hiragino Sans GB.ttc",
+      "/System/Library/Fonts/STHeiti Light.ttc",
+      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+      "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    ],
+  },
+  { label: "symbols", paths: ["/System/Library/Fonts/Apple Symbols.ttf"] },
+  { label: "math", paths: ["/System/Library/Fonts/Supplemental/STIXTwoMath.otf"] },
+  {
+    label: "unicode",
+    paths: [
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+      "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ],
+  },
+];
 
 /** Codepoints the device can already draw from its baked mono atlas: ASCII
- *  plus the box-drawing set the app spells out as a literal. Anything else is
- *  the dynamic atlas's job. A codepoint that is in fact baked but sent
- *  dynamically still renders — it just comes from the other face — so this
- *  set is allowed to be conservative, never wrong. */
+ *  plus the box-drawing set the app spells out as a literal. A codepoint
+ *  that is in fact baked but sent dynamically still renders — it just comes
+ *  from another face — so this set may be conservative, never wrong. */
 const BAKED = new Set<number>();
 for (let cp = 0x20; cp <= 0x7e; cp += 1) BAKED.add(cp);
 for (const ch of TERM_GLYPHS) BAKED.add(ch.codePointAt(0)!);
@@ -110,63 +141,57 @@ export function extractFromCollection(bytes: Uint8Array, index = 0): Uint8Array 
   return out;
 }
 
-function loadFont(): { font: Font; path: string } | null {
-  for (const path of FONT_CANDIDATES) {
+function loadFont(paths: readonly string[]): { font: Font; path: string } | null {
+  for (const path of paths) {
+    if (path === "") continue;
     try {
       const raw = new Uint8Array(readFileSync(path));
       const sfnt = extractFromCollection(raw);
       const buffer = sfnt.buffer.slice(sfnt.byteOffset, sfnt.byteOffset + sfnt.byteLength);
       return { font: opentype.parse(buffer as ArrayBuffer), path };
     } catch {
-      // Try the next candidate; a missing or unreadable face is not fatal.
+      // Missing or unparseable: try the next candidate for this rung.
     }
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// the atlas
+// one face's atlas
 // ---------------------------------------------------------------------------
 
-/** Glyphs kept in the atlas. The blob is re-sent whenever it grows, so this
- *  bounds both the bake and the transfer; least-recently-seen glyphs fall out
- *  when a session prints its way past the cap.
- *
- *  It also bounds device memory, which is the tighter constraint: the PICA200
- *  expands atlas coverage to RGBA8, so the glyph grid's power-of-two envelope
- *  costs 4 bytes per sample. 256 glyphs in a ~13x15 cell lands inside 256x256
- *  = 256 KiB; doubling the count would quadruple that. */
-const MAX_GLYPHS = 256;
+/** Glyphs kept per face. This bounds the bake, the transfer, and device
+ *  memory — the PICA200 expands atlas coverage to RGBA8, so the glyph grid's
+ *  power-of-two envelope costs 4 bytes per sample. */
+const MAX_GLYPHS = 224;
+/** Nothing below this is legible; a too-small glyph still beats one that
+ *  paints over the column beside it. */
+const MIN_PX = 7;
 
 export interface BakedDynamicAtlas {
+  slot: number;
   gen: number;
   bytes: Uint8Array;
   glyphCount: number;
   px: number;
-  cellH: number;
 }
 
-export class DynamicAtlas {
-  #font: Font | null = null;
-  #fontPath = "";
-  #loaded = false;
-  /** codepoint -> cell columns it occupies (1 or 2), in last-seen order. */
+class FaceAtlas {
+  readonly slot: number;
+  readonly label: string;
+  readonly font: Font;
+  readonly path: string;
+  /** codepoint -> cell columns, in last-seen order (the eviction order). */
   #wanted = new Map<number, number>();
   #dirty = false;
   #gen = 0;
   #baked: BakedDynamicAtlas | null = null;
 
-  get available(): boolean {
-    this.#ensureFont();
-    return this.#font !== null;
-  }
-
-  get fontPath(): string {
-    return this.#fontPath;
-  }
-
-  get generation(): number {
-    return this.#gen;
+  constructor(slot: number, label: string, font: Font, path: string) {
+    this.slot = slot;
+    this.label = label;
+    this.font = font;
+    this.path = path;
   }
 
   get dirty(): boolean {
@@ -177,31 +202,10 @@ export class DynamicAtlas {
     return this.#baked;
   }
 
-  #ensureFont(): void {
-    if (this.#loaded) return;
-    this.#loaded = true;
-    const found = loadFont();
-    if (found) {
-      this.#font = found.font;
-      this.#fontPath = found.path;
-    }
-  }
-
-  /** Whether this codepoint is one the companion can supply — unbaked on the
-   *  device, and present in the loaded face. A caller that gets false must
-   *  keep the grid honest itself (the device would draw nothing at all for a
-   *  glyph the atlas never carries). */
   covers(cp: number): boolean {
-    if (isBakedCodepoint(cp)) return false;
-    this.#ensureFont();
-    const font = this.#font;
-    if (font === null) return false;
-    return font.charToGlyphIndex(String.fromCodePoint(cp)) !== 0;
+    return this.font.charToGlyphIndex(String.fromCodePoint(cp)) !== 0;
   }
 
-  /** Record a codepoint the device needs, at the column width the terminal
-   *  gives it. Re-insertion keeps the map ordered least-recently-seen first,
-   *  which is what the cap evicts by. */
   want(cp: number, columns: number): void {
     const known = this.#wanted.get(cp);
     this.#wanted.delete(cp);
@@ -209,26 +213,24 @@ export class DynamicAtlas {
     if (known !== columns) this.#dirty = true;
   }
 
-  /** Bake the current charset into a blob whose advances land on `cellW`
-   *  boundaries and whose cells fit one `cellH`-px terminal row. */
   bake(cellW: number, cellH: number): BakedDynamicAtlas | null {
-    this.#ensureFont();
-    const font = this.#font;
-    if (font === null || this.#wanted.size === 0) return null;
+    if (this.#wanted.size === 0) return null;
     while (this.#wanted.size > MAX_GLYPHS) {
       const oldest = this.#wanted.keys().next();
       if (oldest.done) break;
       this.#wanted.delete(oldest.value);
     }
     const chars = [...this.#wanted.keys()].sort((a, b) => a - b);
+    // The cell has to fit the narrowest span in this atlas: one atlas has one
+    // cell size, and a two-column glyph's box would clip a one-column one's
+    // neighbour.
+    let narrowest = 2;
+    for (const columns of this.#wanted.values()) narrowest = Math.min(narrowest, columns);
+    const maxW = narrowest * cellW;
 
-    // A CJK face's ascent+descent runs past its em box, so the px that fits a
-    // terminal row is found rather than assumed. Bake down from the row height
-    // until the atlas cell fits; stop at 8 px, below which nothing is legible
-    // anyway and an unreadable row beats a row that paints over its neighbours.
-    let atlas = bakeSlot(font, DYNAMIC_FONT_SLOT, cellH, false, chars, 1);
-    for (let px = cellH - 1; atlas.cellH > cellH && px >= 8; px -= 1) {
-      atlas = bakeSlot(font, DYNAMIC_FONT_SLOT, px, false, chars, 1);
+    let atlas = bakeSlot(this.font, this.slot, cellH, false, chars, 1);
+    for (let px = cellH - 1; (atlas.cellH > cellH || atlas.cellW > maxW) && px >= MIN_PX; px -= 1) {
+      atlas = bakeSlot(this.font, this.slot, px, false, chars, 1);
     }
 
     const bytes = atlas.bytes.slice();
@@ -236,19 +238,103 @@ export class DynamicAtlas {
     this.#gen += 1;
     this.#dirty = false;
     this.#baked = {
+      slot: this.slot,
       gen: this.#gen,
       bytes,
       glyphCount: atlas.glyphCount,
       px: atlas.px,
-      cellH: atlas.cellH,
     };
     return this.#baked;
   }
 }
 
+// ---------------------------------------------------------------------------
+// the chain
+// ---------------------------------------------------------------------------
+
+export class DynamicAtlasSet {
+  #faces: FaceAtlas[] | null = null;
+  /** Resolved routing, so a repeat codepoint costs a map read. */
+  #route = new Map<number, number>();
+
+  #ensure(): FaceAtlas[] {
+    if (this.#faces !== null) return this.#faces;
+    const faces: FaceAtlas[] = [];
+    for (const rung of FONT_CHAIN) {
+      if (faces.length >= DYNAMIC_SLOTS.length) break;
+      const found = loadFont(rung.paths);
+      if (found === null) continue;
+      faces.push(new FaceAtlas(DYNAMIC_SLOTS[faces.length], rung.label, found.font, found.path));
+    }
+    this.#faces = faces;
+    return faces;
+  }
+
+  /** The faces that loaded, for the startup log. */
+  describe(): string {
+    return this.#ensure()
+      .map((face) => `${face.label}@${face.slot}=${face.path.split("/").pop()}`)
+      .join(" ");
+  }
+
+  /** The slot that can draw this codepoint, or -1 for nobody. Unbaked and
+   *  uncovered means the caller must keep the grid honest itself. */
+  slotFor(cp: number): number {
+    if (isBakedCodepoint(cp)) return -1;
+    const known = this.#route.get(cp);
+    if (known !== undefined) return known;
+    const text = String.fromCodePoint(cp);
+    for (const face of this.#ensure()) {
+      if (face.font.charToGlyphIndex(text) === 0) continue;
+      // A cmap hit with no outline (a colour-bitmap emoji face) would bake a
+      // blank cell, which reads as a dropped character rather than a missing
+      // one.
+      if (face.font.charToGlyph(text).getPath(0, 0, 16).commands.length === 0) continue;
+      this.#route.set(cp, face.slot);
+      return face.slot;
+    }
+    this.#route.set(cp, -1);
+    return -1;
+  }
+
+  /** Record a codepoint the device needs at the column width the terminal
+   *  gives it. `slot` comes from slotFor(). */
+  want(cp: number, columns: number, slot: number): void {
+    for (const face of this.#ensure()) {
+      if (face.slot === slot) {
+        face.want(cp, columns);
+        return;
+      }
+    }
+  }
+
+  get dirty(): boolean {
+    return this.#ensure().some((face) => face.dirty);
+  }
+
+  /** Re-bake every face whose charset moved. */
+  bake(cellW: number, cellH: number): BakedDynamicAtlas[] {
+    const out: BakedDynamicAtlas[] = [];
+    for (const face of this.#ensure()) {
+      if (!face.dirty) continue;
+      const baked = face.bake(cellW, cellH);
+      if (baked) out.push(baked);
+    }
+    return out;
+  }
+
+  /** Every atlas that currently has content, for delivery to a new replica. */
+  current(): BakedDynamicAtlas[] {
+    const out: BakedDynamicAtlas[] = [];
+    for (const face of this.#ensure()) {
+      if (face.current) out.push(face.current);
+    }
+    return out;
+  }
+}
+
 /** Rewrite every cmap entry's advance to `columns * cellW` (spec.ts FONT
- *  ATLAS v3 cmap: u32 codepoint, u16 gid, u8 advance, u8 xoff). gid 0 is the
- *  tofu box and has no cmap entry of its own beyond U+FFFD. */
+ *  ATLAS v3 cmap: u32 codepoint, u16 gid, u8 advance, u8 xoff). */
 export function forceAdvances(
   blob: Uint8Array,
   columnsFor: ReadonlyMap<number, number>,
