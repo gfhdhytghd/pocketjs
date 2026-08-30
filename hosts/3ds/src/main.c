@@ -671,6 +671,9 @@ int main(void) {
   /* No-op on an Old 3DS; on a New 3DS it unlocks the faster clock and the
    * extra cache, which the QuickJS guest feels directly. */
   osSetSpeedupEnable(true);
+  /* ZL/ZR ride ir:rst, not the HID pad. Absent on an Old 3DS, where the
+   * buttons do not exist either. */
+  input_init();
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 #ifndef POCKETJS_CAPTURE
   /* Debug UI must never make an otherwise admissible guest unbootable. */
@@ -759,6 +762,7 @@ int main(void) {
 
   while (aptMainLoop()) {
     hidScanInput();
+    input_scan();
 #ifdef POCKETJS_CAPTURE
     /* The tapes have no analog track: pin the stick to centre so scripted
      * runs stay deterministic. */
@@ -1024,6 +1028,7 @@ int main(void) {
   soc_shutdown();
   devmenu_shutdown();
 #endif
+  input_shutdown();
   gfx_shutdown();
   romfsExit();
   C3D_Fini();

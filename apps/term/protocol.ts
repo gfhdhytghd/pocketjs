@@ -14,7 +14,7 @@
 
 /** The pocket-svc app id (manifest `companions`, PKNT handshake, beacon). */
 export const TERM_APP = "term";
-export const TERM_PROTO = 1;
+export const TERM_PROTO = 2;
 
 /** Keep every emitted line comfortably under SVC_POLL_BUF. */
 export const LINE_BUDGET = 6144;
@@ -32,8 +32,25 @@ export const TERM_GLYPHS =
   "│┃─━┌┐└┘├┤┬┴┼╭╮╰╯═║╔╗╚╝╡╞▀▄█▌▐░▒▓■□▪▫▲►▼◄◆●○∙·•‾⌐¬½¼«»≈≠≤≥±÷×→←↑↓↔⏻…—–‘’“”➜❯❮✔✗λ";
 
 /** One run of same-styled cells: start column, text, fg, bg (0xRRGGBB ints,
- *  -1 = the theme default). */
-export type Run = [col: number, text: string, fg: number, bg: number];
+ *  -1 = the theme default), and an optional font marker — 1 means the run's
+ *  codepoints live in the dynamic atlas (DYNAMIC_FONT_SLOT) the companion
+ *  bakes at runtime, not in the app's baked mono slot. */
+export type Run = [col: number, text: string, fg: number, bg: number, dyn?: 1];
+
+/** Spare font slot (0..18 are the app's baked sizes, MAX_FONT_SLOTS is 24)
+ *  that carries the runtime-baked atlas for codepoints the build never saw —
+ *  CJK, and anything else a session prints. The device loads it through the
+ *  spec `loadFontAtlas` op, the same reload path the note widget's runtime
+ *  glyph coverage uses (docs/WIDGET.md, docs/BACKENDS.md
+ *  `text.glyphs.runtime`); here the rasterizing happens on the companion and
+ *  travels as atlas chunks, because the console has neither a font file nor
+ *  a rasterizer. */
+export const DYNAMIC_FONT_SLOT = 19;
+
+/** Cells a dynamic-atlas glyph occupies. Terminals give CJK two columns, and
+ *  the companion rewrites the baked advances to match so a run of them lands
+ *  on the grid exactly. */
+export const DYNAMIC_CELL_COLUMNS = 2;
 
 /** One replaced row: y, then the row's runs (empty = a blank row). */
 export type RowUpdate = [y: number, ...runs: Run[]];
@@ -46,9 +63,30 @@ export interface SessionInfo {
   title: string;
 }
 
+/** A replica's role. A `device` drives the sessions: its grid sets their
+ *  size and its input reaches the PTYs. A `mirror` is the read-only window
+ *  the companion opens on the desktop beside each session — it never writes
+ *  to a PTY and never resizes one, so plugging one in cannot disturb what
+ *  the console sees. */
+export type Role = "device" | "mirror";
+
 /** device -> host */
 export type ClientLine =
-  | { t: "hello"; proto: number; cols: number; rows: number }
+  | {
+      t: "hello";
+      proto: number;
+      cols: number;
+      rows: number;
+      /** The replica's measured cell box in px, [width, height]. The
+       *  companion bakes dynamic glyph advances against it, so a run of them
+       *  lands on the same column boundaries as the baked text beside it. */
+      cell?: [number, number];
+      role?: Role;
+      /** Reattach to this session if it still exists (the console remembers
+       *  what it was looking at across a reconnect); mirrors pass the one
+       *  session they were opened for and follow nothing else. */
+      want?: number;
+    }
   | { t: "new" }
   | { t: "kill"; sid: number }
   | { t: "attach"; sid: number }
@@ -59,8 +97,21 @@ export type ClientLine =
 
 /** host -> device */
 export type HostLine =
-  | { t: "hello"; proto: number; name: string }
+  | { t: "hello"; proto: number; name: string; sid?: number }
   | { t: "sessions"; list: SessionInfo[]; active: number }
+  | {
+      /** One chunk of the runtime-baked atlas for DYNAMIC_FONT_SLOT. `gen`
+       *  identifies the bake (it grows as sessions print new codepoints);
+       *  chunks of one gen arrive in order and the device loads the slot
+       *  when the last one lands. A device that joins mid-gen discards the
+       *  partial and waits for the next complete one. */
+      t: "atlas";
+      gen: number;
+      seq: number;
+      more?: 1;
+      /** Base64 of this chunk of the FONT ATLAS blob. */
+      b64: string;
+    }
   | {
       t: "grid";
       sid: number;

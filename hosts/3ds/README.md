@@ -236,6 +236,29 @@ companion (`apps/term/host/serve.ts`, run it with Node) owns the PTYs and one
 authoritative `@xterm/headless` core per session and streams cell-grid
 snapshots + ordered row diffs to the device replica.
 
+**The transport outlives the guest.** A hot-pushed `.pocket` restarts
+QuickJS, not this host, so the TCP connection and the companion's view of it
+both survive. A guest therefore re-introduces itself on its first frame
+(`svcOpen` rising edge → a fresh `hello`), and a companion must treat that
+hello as "this replica has loaded nothing" rather than as a new socket — the
+term companion re-sends its runtime font atlas there, without which the new
+guest draws blanks where the old one drew CJK.
+
+## ZL and ZR
+
+The New 3DS has four shoulder buttons and the PSP had two, so `BTN.ZL` /
+`BTN.ZR` (`contracts/spec/spec.ts`) take two bits the PSP never assigned.
+They are the only place a 3DS app can put a **held modifier**: every other
+bit already means something an app is using.
+
+They do not arrive on the ordinary HID pad. ZL, ZR and the C-stick live in
+**ir:rst**'s shared memory (libctru `irrst.h`), so `src/input.c` brings that
+service up in `input_init()`, refreshes it with `input_scan()` next to
+`hidScanInput()`, and ORs `irrstKeysHeld()` into the held mask. An Old 3DS
+has neither the service nor the buttons: `irrstInit()` fails, the bits are
+never set, and everything else is unaffected — which is why an app must
+treat them as an enhancement and keep a path that works without them.
+
 ## The CIA, and the memory region it asks for
 
 `--cia` writes `dist/3ds/<output>.cia` next to the `.3dsx`, from the same ELF

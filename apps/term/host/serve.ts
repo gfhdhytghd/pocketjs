@@ -22,8 +22,9 @@ import { createServer, type Socket } from "node:net";
 import { createSocket } from "node:dgram";
 import { hostname } from "node:os";
 import { chmodSync, existsSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn, type ChildProcess } from "node:child_process";
 import pty from "node-pty";
 // @xterm/headless is CJS; Node's ESM loader only offers its default export.
 import xterm from "@xterm/headless";
@@ -37,11 +38,13 @@ import {
   type ClientLine,
   type Cursor,
   type HostLine,
+  type Role,
   type RowUpdate,
   type Run,
   type SessionInfo,
 } from "../protocol.ts";
 import { chunkRows, resolveCell, rowKey, rowRuns, type Cell } from "./grid.ts";
+import { DynamicAtlas, isBakedCodepoint } from "./glyphs.ts";
 import { encodeKey } from "./keys.ts";
 import {
   FrameParser,
@@ -59,6 +62,12 @@ import {
 // options
 // ---------------------------------------------------------------------------
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(HERE, "../../..");
+/** The desktop host binary, which is also the `linux-app` one. */
+const MIRROR_BIN = join(ROOT, "hosts/desktop/target/release/pocket-desktop-host");
+const MIRROR_APP = "pocketterm-mirror-main";
+
 const options = {
   port: WIRE_PORT,
   beaconPort: WIRE_BEACON_PORT,
@@ -67,6 +76,8 @@ const options = {
   cwd: process.env.HOME ?? process.cwd(),
   unicast: [] as string[],
   beacon: true,
+  /** Open a read-only desktop window per session. */
+  mirror: true,
 };
 
 {
@@ -80,6 +91,7 @@ const options = {
     else if (a === "--cwd") options.cwd = argv[++i];
     else if (a === "--unicast") options.unicast.push(argv[++i]);
     else if (a === "--no-beacon") options.beacon = false;
+    else if (a === "--no-mirror") options.mirror = false;
     else {
       console.error(`unknown argument: ${a}`);
       process.exit(2);
@@ -192,13 +204,27 @@ const PING_INTERVAL_MS = 2000;
 const SILENCE_TIMEOUT_MS = 10_000;
 const FLUSH_INTERVAL_MS = 33;
 
+/** Base64 per atlas chunk. The device's svc transport discards any ctrl
+ *  frame over SVC_POLL_BUF (8192) bytes outright, so a chunk plus its JSON
+ *  wrapper has to stay well inside the line budget. */
+const ATLAS_CHUNK = 5600;
+
 class Conn {
   readonly socket: Socket;
   readonly parser = new FrameParser();
   hello: Uint8Array | null = new Uint8Array(0);
+  role: Role = "device";
   cols = 80;
   rows = 24;
+  cell: [number, number] = [7, 13];
   attachedSid = -1;
+  /** Atlas generation this replica has been sent, and the chunks still owed
+   *  to it. One chunk goes out per flush tick: the device's line queue is
+   *  32 KiB and drops its oldest entries when full, so a whole atlas dumped
+   *  at once would take the grid updates down with it. */
+  atlasGen = -1;
+  atlasQueue: string[] = [];
+  atlasSeq = 0;
   gen = 0;
   seq = 0;
   scrollback = 0;
@@ -242,12 +268,36 @@ class Hub {
   readonly sessions = new Map<number, Session>();
   readonly conns = new Set<Conn>();
   private nextSid = 1;
+  /** Sessions whose mirror window has been opened but has not connected back
+   *  yet. A mirror binds to the head of this queue, so windows and sessions
+   *  pair up in the order they were created. */
+  private pendingMirrors: number[] = [];
+  /** Set by the mirror supervisor; called once per new session. */
+  onSessionCreated: ((sid: number) => void) | null = null;
 
   create(cols: number, rows: number): Session {
     const session = new Session(this.nextSid++, cols, rows);
     this.sessions.set(session.sid, session);
     this.sessionsChanged();
+    if (this.onSessionCreated) {
+      this.pendingMirrors.push(session.sid);
+      this.onSessionCreated(session.sid);
+    }
     return session;
+  }
+
+  /** Claim the session a connecting mirror belongs to. */
+  takePendingMirror(want?: number): number | undefined {
+    if (want !== undefined && this.sessions.has(want)) {
+      const at = this.pendingMirrors.indexOf(want);
+      if (at >= 0) this.pendingMirrors.splice(at, 1);
+      return want;
+    }
+    while (this.pendingMirrors.length > 0) {
+      const sid = this.pendingMirrors.shift();
+      if (sid !== undefined && this.sessions.has(sid)) return sid;
+    }
+    return undefined;
   }
 
   kill(sid: number) {
@@ -255,6 +305,7 @@ class Hub {
     if (!session) return;
     session.dispose();
     this.sessions.delete(sid);
+    closeMirror(sid);
     this.reattachOrphans(sid);
     this.sessionsChanged();
   }
@@ -264,6 +315,7 @@ class Hub {
     if (!session) return;
     session.dispose();
     this.sessions.delete(sid);
+    closeMirror(sid);
     for (const conn of this.conns) {
       if (conn.sawClientHello) conn.sendLine({ t: "exit", sid });
     }
@@ -274,6 +326,14 @@ class Hub {
   private reattachOrphans(gone: number) {
     for (const conn of this.conns) {
       if (conn.attachedSid !== gone) continue;
+      if (conn.role === "mirror") {
+        // A mirror exists to show one session. When that session is over so
+        // is the window: it is closed rather than pointed at someone else's
+        // shell.
+        conn.socket.destroy();
+        this.conns.delete(conn);
+        continue;
+      }
       const fallback = [...this.sessions.values()].at(-1) ?? this.create(conn.cols, conn.rows);
       attach(conn, fallback.sid);
     }
@@ -298,6 +358,28 @@ const hub = new Hub();
 // the replica view: serialize, diff, flush
 // ---------------------------------------------------------------------------
 
+/** Codepoints the device cannot draw from its baked atlas, noted as the grid
+ *  is serialized so the next bake covers exactly what is on screen. */
+const atlas = new DynamicAtlas();
+
+/** Classify a resolved cell against the device's glyph coverage: baked text
+ *  passes through, a character the companion can bake is marked for the
+ *  dynamic slot, and one nobody can draw becomes a placeholder of the same
+ *  column width — an unrenderable glyph must not also shift the rest of the
+ *  row, which is what dropping it or leaving it to a missing atlas would do. */
+function classify(cell: Cell): void {
+  if (cell.width === 0 || cell.ch === "" || cell.ch === " ") return;
+  const cp = cell.ch.codePointAt(0);
+  if (cp === undefined || isBakedCodepoint(cp)) return;
+  const columns = cell.width === 2 ? 2 : 1;
+  if (atlas.covers(cp)) {
+    atlas.want(cp, columns);
+    cell.dyn = true;
+    return;
+  }
+  cell.ch = "?".repeat(columns);
+}
+
 /** Resolve the connection's visible window of the session buffer to runs. */
 function viewRows(session: Session, conn: Conn): Run[][] {
   const buffer = session.term.buffer.active;
@@ -310,12 +392,60 @@ function viewRows(session: Session, conn: Conn): Run[][] {
     if (line) {
       for (let x = 0; x < conn.cols; x += 1) {
         const cell = line.getCell(x, workCell);
-        cells.push(cell ? resolveCell(cell) : { ch: "", fg: -1, bg: -1 });
+        const resolved = cell ? resolveCell(cell) : { ch: "", fg: -1, bg: -1, width: 1 as const };
+        classify(resolved);
+        cells.push(resolved);
       }
     }
     rows.push(rowRuns(cells));
   }
   return rows;
+}
+
+/** Re-bake when the screen has shown codepoints the current atlas lacks. The
+ *  bake is debounced: a session that dumps a page of Chinese should cost one
+ *  bake, not one per row. */
+let atlasDebounce = 0;
+function pumpAtlasBake(): void {
+  if (!atlas.dirty) {
+    atlasDebounce = 0;
+    return;
+  }
+  atlasDebounce += 1;
+  if (atlasDebounce < 8) return; // ~250 ms at the flush interval
+  atlasDebounce = 0;
+  const conn = [...hub.conns].find((c) => c.sawClientHello);
+  const [cellW, cellH] = conn?.cell ?? [7, 13];
+  const baked = atlas.bake(cellW, cellH);
+  if (baked) {
+    console.log(
+      `[term] baked ${baked.glyphCount} runtime glyphs at ${baked.px}px ` +
+        `(${(baked.bytes.length / 1024).toFixed(1)} KiB) from ${atlas.fontPath}`,
+    );
+  }
+}
+
+/** Hand one atlas chunk to a replica per tick. */
+function pumpAtlasSend(conn: Conn): void {
+  const baked = atlas.current;
+  if (!baked || !conn.sawClientHello) return;
+  if (conn.atlasGen !== baked.gen && conn.atlasQueue.length === 0) {
+    conn.atlasGen = baked.gen;
+    conn.atlasSeq = 0;
+    const b64 = Buffer.from(baked.bytes).toString("base64");
+    for (let at = 0; at < b64.length; at += ATLAS_CHUNK) {
+      conn.atlasQueue.push(b64.slice(at, at + ATLAS_CHUNK));
+    }
+  }
+  const chunk = conn.atlasQueue.shift();
+  if (chunk === undefined) return;
+  conn.sendLine({
+    t: "atlas",
+    gen: conn.atlasGen,
+    seq: conn.atlasSeq++,
+    ...(conn.atlasQueue.length > 0 ? { more: 1 as const } : {}),
+    b64: chunk,
+  });
 }
 
 function cursorFor(session: Session, conn: Conn): Cursor {
@@ -339,6 +469,7 @@ function snapshot(conn: Conn) {
 }
 
 function flush(conn: Conn) {
+  pumpAtlasSend(conn);
   const session = hub.sessions.get(conn.attachedSid);
   if (!session || !conn.sawClientHello) return;
   if (session.bellPending) {
@@ -379,16 +510,48 @@ function attach(conn: Conn, sid: number) {
 // ---------------------------------------------------------------------------
 
 function handleLine(conn: Conn, line: ClientLine) {
+  // Read-only by construction, not by the mirror's good manners: a window
+  // that only watches cannot type into someone's shell even if its guest is
+  // replaced.
+  if (conn.role === "mirror" && line.t !== "hello" && line.t !== "resync") return;
   switch (line.t) {
     case "hello": {
       if (line.proto !== TERM_PROTO) return;
-      conn.cols = Math.max(20, Math.min(120, line.cols));
-      conn.rows = Math.max(5, Math.min(50, line.rows));
+      conn.role = line.role ?? "device";
+      conn.cols = Math.max(20, Math.min(200, line.cols));
+      conn.rows = Math.max(5, Math.min(80, line.rows));
+      if (line.cell) conn.cell = [Math.max(1, line.cell[0]), Math.max(1, line.cell[1])];
       conn.sawClientHello = true;
+      // A hello means a replica that has loaded nothing yet, which is not the
+      // same as a new socket: the console's transport is native and survives
+      // a guest reload, so the fresh guest arrives on the connection that
+      // already had an atlas. Re-send it or its CJK renders as blanks.
+      conn.atlasGen = -1;
+      conn.atlasQueue = [];
+      conn.atlasSeq = 0;
+
+      if (conn.role === "mirror") {
+        // A mirror shows one session and changes nothing about it: it takes
+        // the session it was opened for, renders whatever size that session
+        // already is, and never resizes a PTY.
+        const sid = hub.takePendingMirror(line.want);
+        const session = sid === undefined ? undefined : hub.sessions.get(sid);
+        if (!session) {
+          conn.socket.destroy();
+          hub.conns.delete(conn);
+          return;
+        }
+        conn.cols = session.term.cols;
+        conn.rows = session.term.rows;
+        conn.sendLine({ t: "hello", proto: TERM_PROTO, name: options.name, sid: session.sid });
+        attach(conn, session.sid);
+        break;
+      }
+
       conn.sendLine({ t: "hello", proto: TERM_PROTO, name: options.name });
-      // The demo convention: every session tracks the replica's grid (the
-      // tmux attach model, one window size at a time). Replicas that were
-      // already attached at another size get a fresh snapshot at the new one.
+      // The demo convention: every session tracks the driving replica's grid
+      // (the tmux attach model, one window size at a time). Other replicas
+      // that were sized differently get a fresh snapshot at the new size.
       for (const session of hub.sessions.values()) session.resize(conn.cols, conn.rows);
       for (const other of hub.conns) {
         if (other === conn || !other.sawClientHello) continue;
@@ -398,7 +561,10 @@ function handleLine(conn: Conn, line: ClientLine) {
           snapshot(other);
         }
       }
-      const target = [...hub.sessions.values()].at(-1) ?? hub.create(conn.cols, conn.rows);
+      // A reconnecting console names the session it was on, so the window it
+      // comes back to is the one it left rather than whichever is newest.
+      const wanted = line.want !== undefined ? hub.sessions.get(line.want) : undefined;
+      const target = wanted ?? [...hub.sessions.values()].at(-1) ?? hub.create(conn.cols, conn.rows);
       attach(conn, target.sid);
       break;
     }
@@ -511,7 +677,76 @@ setInterval(() => {
 
 setInterval(() => {
   for (const conn of hub.conns) flush(conn);
+  pumpAtlasBake();
 }, FLUSH_INTERVAL_MS);
+
+// ---------------------------------------------------------------------------
+// mirror windows
+// ---------------------------------------------------------------------------
+
+/** One desktop window per session, tracked so it closes with its session. */
+const mirrors = new Map<number, ChildProcess>();
+
+/** Open the read-only window for a session. The window is an ordinary
+ *  PocketJS app (apps/term-mirror) on the stock desktop host, pointed at this
+ *  daemon with --svc-connect; it binds to the session through the hello
+ *  queue. Nothing here is macOS-specific — the same binary is the linux-app
+ *  host. */
+function openMirror(sid: number, tcpPort: number): void {
+  if (!options.mirror) return;
+  if (!existsSync(MIRROR_BIN)) {
+    console.log(
+      `[term] no mirror window: ${MIRROR_BIN} is not built ` +
+        `(bun run macos term-mirror --build-only), continuing without one`,
+    );
+    options.mirror = false;
+    return;
+  }
+  const child = spawn(
+    MIRROR_BIN,
+    [
+      "--app", MIRROR_APP,
+      "--title", `Pocket Term #${sid}`,
+      "--viewport", "400x240",
+      "--fixed",
+      "--density", "2",
+      "--companions", TERM_APP,
+      "--svc-connect", `127.0.0.1:${tcpPort}`,
+    ],
+    {
+      env: { ...process.env, POCKETJS_DIST: join(ROOT, "dist"), RUST_LOG: "warn" },
+      stdio: "ignore",
+      detached: false,
+    },
+  );
+  mirrors.set(sid, child);
+  child.on("exit", () => {
+    if (mirrors.get(sid) === child) mirrors.delete(sid);
+  });
+  child.on("error", (error) => {
+    console.log(`[term] mirror window for #${sid} failed: ${error.message}`);
+    mirrors.delete(sid);
+  });
+}
+
+function closeMirror(sid: number): void {
+  const child = mirrors.get(sid);
+  if (!child) return;
+  mirrors.delete(sid);
+  child.kill();
+}
+
+function closeAllMirrors(): void {
+  for (const [, child] of mirrors) child.kill();
+  mirrors.clear();
+}
+
+for (const signal of ["exit", "SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    closeAllMirrors();
+    if (signal !== "exit") process.exit(0);
+  });
+}
 
 function startBeacon(tcpPort: number) {
   const beacon = createSocket("udp4");
@@ -532,6 +767,12 @@ const started = () => {
   const bound = (server.address() as { port: number }).port;
   console.log(`[term] PKNT listener on tcp/${bound} (app "${TERM_APP}")`);
   if (options.beacon) startBeacon(bound);
+  if (options.mirror) {
+    // Every session gets a window, including ones that already exist when
+    // the mirror feature comes up.
+    hub.onSessionCreated = (sid) => openMirror(sid, bound);
+    for (const sid of hub.sessions.keys()) openMirror(sid, bound);
+  }
 };
 
 // Several companions can share one machine (the pocket-youtube host also

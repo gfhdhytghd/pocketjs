@@ -23,11 +23,23 @@ export interface XtermCellLike {
   isInvisible(): number | boolean;
 }
 
-/** One resolved cell: concrete 0xRRGGBB colors (or -1 = theme default). */
+/** One resolved cell: concrete 0xRRGGBB colors (or -1 = theme default).
+ *
+ *  `width` is the terminal's own column count for the character — 2 for the
+ *  full-width forms, and 0 for the continuation cell that follows one. A
+ *  continuation carries no ink and must not be treated as a blank column
+ *  either: the wide glyph before it already covers that column, and inserting
+ *  a space there would push the rest of the row off the grid.
+ *
+ *  `dyn` marks a character the device cannot draw from its baked atlas and
+ *  the companion can supply at runtime (see host/glyphs.ts). Runs never mix
+ *  the two — they select different font slots. */
 export interface Cell {
   ch: string;
   fg: number;
   bg: number;
+  width?: 0 | 1 | 2;
+  dyn?: boolean;
 }
 
 /** The 256-color table: 16 themed ANSI colors, the 6x6x6 cube, 24 grays. */
@@ -61,7 +73,7 @@ function halve(rgb: number): number {
  *  through the shared theme first), invisible paints fg as bg. The device
  *  renders exactly what it is told. */
 export function resolveCell(cell: XtermCellLike): Cell {
-  const width = cell.getWidth();
+  const width = cell.getWidth() as 0 | 1 | 2;
   const ch = width === 0 ? "" : cell.getChars();
   let fg = -1;
   let bg = -1;
@@ -85,7 +97,7 @@ export function resolveCell(cell: XtermCellLike): Cell {
     bg = rf;
   }
   if (cell.isInvisible()) fg = bg < 0 ? THEME_BG : bg;
-  return { ch, fg, bg };
+  return { ch, fg, bg, width };
 }
 
 /** Merge a row of resolved cells into runs. Blank cells (spaces or wide-char
@@ -93,28 +105,42 @@ export function resolveCell(cell: XtermCellLike): Cell {
  *  same-styled stretch are kept so `foo bar` stays one run. */
 export function rowRuns(cells: readonly Cell[]): Run[] {
   const runs: Run[] = [];
-  let run: { col: number; text: string; fg: number; bg: number } | null = null;
+  let run: { col: number; text: string; fg: number; bg: number; dyn: boolean } | null = null;
   let pendingBlanks = 0;
   const close = () => {
-    if (run !== null) runs.push([run.col, run.text, run.fg, run.bg]);
+    if (run !== null) {
+      runs.push(run.dyn ? [run.col, run.text, run.fg, run.bg, 1] : [run.col, run.text, run.fg, run.bg]);
+    }
     run = null;
     pendingBlanks = 0;
   };
   for (let col = 0; col < cells.length; col += 1) {
     const cell = cells[col];
+    // The trailing half of a wide character: already covered, never a gap.
+    if (cell.width === 0) continue;
     const blank = (cell.ch === " " || cell.ch === "") && cell.bg < 0;
     if (blank) {
       if (run !== null) pendingBlanks += 1;
       continue;
     }
     const ch = cell.ch === "" ? " " : cell.ch;
-    if (run !== null && run.fg === cell.fg && run.bg === cell.bg && pendingBlanks <= 4) {
+    const dyn = cell.dyn === true;
+    // Blanks are only ever folded into a baked run: the dynamic atlas holds
+    // exactly the codepoints the companion was asked to bake, and a space is
+    // not one of them — folding one in would leave a hole mid-run.
+    if (
+      run !== null &&
+      run.fg === cell.fg &&
+      run.bg === cell.bg &&
+      run.dyn === dyn &&
+      (pendingBlanks === 0 || (!dyn && pendingBlanks <= 4))
+    ) {
       run.text += " ".repeat(pendingBlanks) + ch;
       pendingBlanks = 0;
       continue;
     }
     close();
-    run = { col, text: ch, fg: cell.fg, bg: cell.bg };
+    run = { col, text: ch, fg: cell.fg, bg: cell.bg, dyn };
   }
   close();
   return runs;

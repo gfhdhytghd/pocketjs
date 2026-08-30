@@ -1,0 +1,157 @@
+// apps/term/grid.tsx — the terminal surface itself, shared by every replica.
+//
+// The console app puts this on the top screen and keeps the tabs and the
+// keyboard on the touch screen; the desktop mirror window is this and nothing
+// else. Both draw the same cell grid from the same store, which is the point:
+// one renderer, one set of metrics, whatever machine is showing it.
+//
+// A row is a list of runs, and a run is one <Text> placed at its column. Runs
+// marked dynamic select the runtime-baked atlas (DYNAMIC_FONT_SLOT) whose
+// advances the companion pinned to the grid, so mixed CJK and ASCII lines
+// stay on their columns without the app measuring anything.
+
+import { For, Show } from "solid-js";
+import { Text, View } from "@pocketjs/framework/components";
+import { DYNAMIC_FONT_SLOT, THEME_CURSOR, THEME_FG, type Run } from "./protocol.ts";
+import { rgbToAbgr, type TermStore } from "./store.ts";
+
+export interface GridMetrics {
+  cols: number;
+  rows: number;
+  cellW: number;
+  cellH: number;
+  /** Per-glyph advance correction for the baked mono atlas. */
+  track: number;
+  statusH: number;
+}
+
+export interface GridProps {
+  store: TermStore;
+  metrics: GridMetrics;
+  /** Small right-aligned status text: the grid size, or "read-only". */
+  badge: string;
+  /** What the connect overlay tells the operator to do. */
+  hint: string;
+  title: string;
+}
+
+function connectionLabel(store: TermStore): string {
+  switch (store.conn()) {
+    case "no-svc":
+      return "this host has no companion channel";
+    case "search":
+      return "searching for the companion beacon (UDP 8621)…";
+    case "link":
+      return "companion linked — waiting for a session…";
+    case "live":
+      return "";
+  }
+}
+
+export function TermGrid(props: GridProps) {
+  const m = props.metrics;
+  const store = props.store;
+  const cursorLeft = () => (store.cursor()?.[0] ?? 0) * m.cellW;
+  const cursorTop = () => m.statusH + (store.cursor()?.[1] ?? 0) * m.cellH;
+  const cursorOn = () => store.cursor()?.[2] === 1 && store.conn() === "live";
+
+  return (
+    <View debugName="TermScreen" class="relative w-full h-full bg-[#10151c] overflow-hidden">
+      <View
+        debugName="TermStatus"
+        class={
+          store.bell()
+            ? "absolute left-0 right-0 top-0 bg-[#7a4a1d]"
+            : "absolute left-0 right-0 top-0 bg-[#1a2230]"
+        }
+        style={{ height: m.statusH }}
+      >
+        <Text class="absolute left-[6] top-0 text-xs text-[#9fb6d8] font-bold">{props.title}</Text>
+        <Text class="absolute left-[92] top-0 text-xs text-[#5d708c]">{store.hostName()}</Text>
+        <Show when={store.scrollback() > 0}>
+          <Text class="absolute right-[62] top-0 text-xs text-[#e0b060]">{`↟${store.scrollback()}`}</Text>
+        </Show>
+        <Text class="absolute right-[18] top-0 text-xs text-[#5d708c]">{props.badge}</Text>
+        <Text
+          class={
+            store.conn() === "live"
+              ? "absolute right-[6] top-0 text-xs text-[#61c16d]"
+              : "absolute right-[6] top-0 text-xs text-[#c95c5c]"
+          }
+        >
+          ●
+        </Text>
+      </View>
+
+      <Show when={cursorOn()}>
+        <View
+          class="absolute"
+          style={{
+            insetL: cursorLeft(),
+            insetT: cursorTop(),
+            width: m.cellW,
+            height: m.cellH,
+            // Translucent block under the glyphs (rows paint after this).
+            bgColor: ((0x66 << 24) | (rgbToAbgr(THEME_CURSOR) & 0xffffff)) >>> 0,
+          }}
+        />
+      </Show>
+
+      {Array.from({ length: m.rows }, (_, y) => (
+        <View
+          class="absolute left-0 right-0"
+          style={{ insetT: m.statusH + y * m.cellH, height: m.cellH }}
+        >
+          <For each={store.row(y)()}>
+            {(run: Run) => (
+              <>
+                <Show when={run[3] >= 0}>
+                  <View
+                    class="absolute top-0"
+                    style={{
+                      insetL: run[0] * m.cellW,
+                      // A dynamic run's glyphs are two columns wide each.
+                      width: (run[4] === 1 ? run[1].length * 2 : run[1].length) * m.cellW,
+                      height: m.cellH,
+                      bgColor: rgbToAbgr(run[3]),
+                    }}
+                  />
+                </Show>
+                <Text
+                  class="absolute top-0 font-mono text-xs"
+                  style={
+                    run[4] === 1
+                      ? {
+                          // The companion baked this atlas's advances to the
+                          // grid, so it needs no tracking correction.
+                          insetL: run[0] * m.cellW,
+                          lineHeight: m.cellH,
+                          fontSlot: DYNAMIC_FONT_SLOT,
+                          textColor: rgbToAbgr(run[2] >= 0 ? run[2] : THEME_FG),
+                        }
+                      : {
+                          insetL: run[0] * m.cellW,
+                          lineHeight: m.cellH,
+                          tracking: m.track,
+                          textColor: rgbToAbgr(run[2] >= 0 ? run[2] : THEME_FG),
+                        }
+                  }
+                >
+                  {run[1]}
+                </Text>
+              </>
+            )}
+          </For>
+        </View>
+      ))}
+
+      <Show when={store.conn() !== "live"}>
+        <View class="absolute left-0 right-0 top-0 bottom-0 flex-col items-center justify-center gap-[6] bg-[#10151cf0]">
+          <Text class="text-lg text-[#9fb6d8] font-bold">pocket term</Text>
+          <Text class="text-xs text-[#5d708c]">{connectionLabel(store)}</Text>
+          <Text class="text-xs text-[#3d4c63]">{props.hint}</Text>
+        </View>
+      </Show>
+    </View>
+  );
+}

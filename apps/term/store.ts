@@ -5,11 +5,14 @@
 // the host for a fresh snapshot instead of rendering from a hole.
 
 import { createSignal, type Accessor } from "solid-js";
+import { getOps } from "@pocketjs/framework";
 import {
+  DYNAMIC_FONT_SLOT,
   TERM_PROTO,
   type Cursor,
   type HostLine,
   type KeyName,
+  type Role,
   type Run,
   type SessionInfo,
 } from "./protocol.ts";
@@ -24,6 +27,37 @@ export function rgbToAbgr(rgb: number): number {
 
 const RESYNC_COOLDOWN_FRAMES = 30;
 
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const BASE64_VALUES = (() => {
+  const table = new Int16Array(128).fill(-1);
+  for (let i = 0; i < BASE64_ALPHABET.length; i += 1) table[BASE64_ALPHABET.charCodeAt(i)] = i;
+  return table;
+})();
+
+/** Decode base64 into bytes. The engine's own codec lives in an internal
+ *  module (framework/src/bytes.ts, no published subpath), and a font atlas is
+ *  the only binary this app carries, so it brings its own. */
+function base64ToBytes(text: string): Uint8Array {
+  let length = text.length;
+  while (length > 0 && text.charCodeAt(length - 1) === 61) length -= 1; // '='
+  const out = new Uint8Array(Math.floor((length * 3) / 4));
+  let at = 0;
+  let bits = 0;
+  let width = 0;
+  for (let i = 0; i < length; i += 1) {
+    const code = text.charCodeAt(i);
+    const value = code < 128 ? BASE64_VALUES[code] : -1;
+    if (value < 0) continue;
+    bits = (bits << 6) | value;
+    width += 6;
+    if (width >= 8) {
+      width -= 8;
+      out[at++] = (bits >> width) & 0xff;
+    }
+  }
+  return at === out.length ? out : out.subarray(0, at);
+}
+
 export interface TermStore {
   conn: Accessor<ConnState>;
   hostName: Accessor<string>;
@@ -33,19 +67,35 @@ export interface TermStore {
   cursor: Accessor<Cursor | null>;
   scrollback: Accessor<number>;
   bell: Accessor<boolean>;
+  /** Glyphs delivered at runtime for codepoints the build never baked; the
+   *  count is what the status bar reports. */
+  dynamicGlyphs: Accessor<number>;
   /** Pump the channel — call exactly once per frame. */
   frame(): void;
   sendText(s: string): void;
-  /** `k` is a KeyName, or a single character when ctrl/alt is held. */
   sendKey(k: KeyName | string, ctrl?: boolean, alt?: boolean): void;
   scroll(lines: number): void;
   newSession(): void;
-  killActive(): void;
+  kill(sid: number): void;
   attach(sid: number): void;
   attachSibling(step: 1 | -1): void;
 }
 
-export function createTermStore(cols: number, rows: number, svc: Svc | null): TermStore {
+export interface TermStoreOptions {
+  cols: number;
+  rows: number;
+  /** The measured cell box [w, h] in px — the companion bakes dynamic glyph
+   *  advances and cell heights against it. */
+  cell: [number, number];
+  role?: Role;
+  /** Read-only replicas never write to a PTY and never resize one. */
+  readOnly?: boolean;
+}
+
+export function createTermStore(options: TermStoreOptions, svc: Svc | null): TermStore {
+  const { cols, rows, cell } = options;
+  const role: Role = options.role ?? "device";
+  const readOnly = options.readOnly ?? false;
   const [conn, setConn] = createSignal<ConnState>(svc === null ? "no-svc" : "search");
   const [hostName, setHostName] = createSignal("");
   const [sessions, setSessions] = createSignal<SessionInfo[]>([]);
@@ -53,6 +103,7 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
   const [cursor, setCursor] = createSignal<Cursor | null>(null);
   const [scrollback, setScrollback] = createSignal(0);
   const [bell, setBell] = createSignal(false);
+  const [dynamicGlyphs, setDynamicGlyphs] = createSignal(0);
   const rowSignals = Array.from({ length: rows }, () => createSignal<Run[]>([]));
 
   let wasOpen = false;
@@ -61,6 +112,15 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
   let sawGrid = false;
   let resyncCooldown = 0;
   let bellFrames = 0;
+  /** Survives a reconnect so the console comes back to the session it was
+   *  looking at rather than to whichever one the host lists last. */
+  let lastWanted = -1;
+
+  // Atlas reassembly. A bake arrives as ordered chunks; a device that joins
+  // mid-bake has no use for the tail and waits for the next complete one.
+  let atlasGen = -1;
+  let atlasSeq = -1;
+  let atlasParts: string[] = [];
 
   const clearGrid = () => {
     for (const [, set] of rowSignals) set([]);
@@ -72,6 +132,30 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
     if (resyncCooldown > 0) return;
     resyncCooldown = RESYNC_COOLDOWN_FRAMES;
     svc?.send({ t: "resync" });
+  };
+
+  const applyAtlas = (line: Extract<HostLine, { t: "atlas" }>) => {
+    if (line.gen !== atlasGen) {
+      if (line.seq !== 0) return; // joined mid-bake; the next one starts clean
+      atlasGen = line.gen;
+      atlasSeq = -1;
+      atlasParts = [];
+    }
+    if (line.seq !== atlasSeq + 1) {
+      atlasGen = -1; // a gap; drop the bake and wait for the next
+      atlasParts = [];
+      return;
+    }
+    atlasSeq = line.seq;
+    atlasParts.push(line.b64);
+    if (line.more === 1) return;
+    const blob = base64ToBytes(atlasParts.join(""));
+    atlasParts = [];
+    const load = getOps().loadFontAtlas;
+    if (!load || blob.length < 16) return;
+    load(blob);
+    // The blob's header carries its glyph count (spec FONT ATLAS v3).
+    setDynamicGlyphs(blob[6] | (blob[7] << 8));
   };
 
   const applyGrid = (line: Extract<HostLine, { t: "grid" }>) => {
@@ -109,16 +193,23 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
     switch (line.t) {
       case "hello":
         setHostName(line.name);
+        if (line.sid !== undefined) {
+          setActiveSid(line.sid);
+          lastWanted = line.sid;
+        }
         break;
       case "sessions":
         setSessions(line.list);
         if (line.active !== activeSid()) {
           setActiveSid(line.active);
-          // The snapshot for the new session is already on the wire.
+          if (line.active >= 0) lastWanted = line.active;
         }
         break;
       case "grid":
         applyGrid(line);
+        break;
+      case "atlas":
+        applyAtlas(line);
         break;
       case "exit":
         // The host follows with a sessions line; nothing to do locally.
@@ -131,7 +222,9 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
   };
 
   const attach = (sid: number) => {
-    if (sid !== activeSid()) svc?.send({ t: "attach", sid });
+    if (readOnly || sid === activeSid()) return;
+    lastWanted = sid;
+    svc?.send({ t: "attach", sid });
   };
 
   return {
@@ -143,17 +236,29 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
     cursor,
     scrollback,
     bell,
+    dynamicGlyphs,
     frame() {
       if (svc === null) return;
       if (resyncCooldown > 0) resyncCooldown -= 1;
       if (bellFrames > 0 && --bellFrames === 0) setBell(false);
       const open = svc.open();
       if (open && !wasOpen) {
-        // Fresh transport (first frame or reconnect): re-introduce ourselves.
+        // Fresh transport (first frame or reconnect): re-introduce ourselves,
+        // naming the session we were on so a reconnect is invisible.
         gen = -1;
         seq = -1;
         sawGrid = false;
-        svc.send({ t: "hello", proto: TERM_PROTO, cols, rows });
+        atlasGen = -1;
+        atlasParts = [];
+        svc.send({
+          t: "hello",
+          proto: TERM_PROTO,
+          cols,
+          rows,
+          cell,
+          role,
+          ...(lastWanted >= 0 ? { want: lastWanted } : {}),
+        });
       }
       wasOpen = open;
       if (!open) {
@@ -164,20 +269,25 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
       for (const line of svc.poll()) apply(line);
     },
     sendText(s) {
-      if (s.length > 0) svc?.send({ t: "ch", s });
+      if (!readOnly && s.length > 0) svc?.send({ t: "ch", s });
     },
     sendKey(k, ctrl, alt) {
-      svc?.send({ t: "key", k, ...(ctrl ? { ctrl: 1 as const } : {}), ...(alt ? { alt: 1 as const } : {}) });
+      if (readOnly) return;
+      svc?.send({
+        t: "key",
+        k,
+        ...(ctrl ? { ctrl: 1 as const } : {}),
+        ...(alt ? { alt: 1 as const } : {}),
+      });
     },
     scroll(lines) {
       if (lines !== 0) svc?.send({ t: "scroll", d: lines });
     },
     newSession() {
-      svc?.send({ t: "new" });
+      if (!readOnly) svc?.send({ t: "new" });
     },
-    killActive() {
-      const sid = activeSid();
-      if (sid >= 0) svc?.send({ t: "kill", sid });
+    kill(sid) {
+      if (!readOnly && sid >= 0) svc?.send({ t: "kill", sid });
     },
     attach,
     attachSibling(step) {
@@ -189,3 +299,7 @@ export function createTermStore(cols: number, rows: number, svc: Svc | null): Te
     },
   };
 }
+
+/** The style a run of dynamically-atlased text needs: the runtime slot, and
+ *  no tracking correction — the companion baked the advances to the grid. */
+export const DYNAMIC_TEXT_STYLE = { fontSlot: DYNAMIC_FONT_SLOT } as const;

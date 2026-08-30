@@ -5,6 +5,8 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  FONT_CMAP_ENTRY_SIZE,
+  FONT_HEADER_SIZE,
   SVC_POLL_BUF,
   WIRE_HEADER_SIZE,
   WIRE_MAGIC,
@@ -29,6 +31,11 @@ import {
   type XtermCellLike,
 } from "../apps/term/host/grid.ts";
 import { encodeKey } from "../apps/term/host/keys.ts";
+import {
+  extractFromCollection,
+  forceAdvances,
+  isBakedCodepoint,
+} from "../apps/term/host/glyphs.ts";
 
 // ---------------------------------------------------------------------------
 // wire
@@ -114,7 +121,7 @@ function fakeCell(over: Partial<Record<keyof XtermCellLike, unknown>> = {}): Xte
 
 describe("cell resolution (authority-side SGR)", () => {
   test("defaults stay -1", () => {
-    expect(resolveCell(fakeCell())).toEqual({ ch: "x", fg: -1, bg: -1 });
+    expect(resolveCell(fakeCell())).toEqual({ ch: "x", fg: -1, bg: -1, width: 1 });
   });
 
   test("bold brightens the low palette", () => {
@@ -129,7 +136,12 @@ describe("cell resolution (authority-side SGR)", () => {
 
   test("inverse swaps resolved theme colors", () => {
     const cell = fakeCell({ isInverse: () => 1 });
-    expect(resolveCell(cell)).toEqual({ ch: "x", fg: THEME_BG, bg: THEME_FG });
+    expect(resolveCell(cell)).toEqual({ ch: "x", fg: THEME_BG, bg: THEME_FG, width: 1 });
+  });
+
+  test("carries the terminal's column width", () => {
+    expect(resolveCell(fakeCell({ getWidth: () => 2, getChars: () => "你" })).width).toBe(2);
+    expect(resolveCell(fakeCell({ getWidth: () => 0 })).width).toBe(0);
   });
 
   test("truecolor passes through; wide-char continuations blank out", () => {
@@ -166,6 +178,41 @@ describe("run building", () => {
 
   test("an all-blank row is an empty update", () => {
     expect(rowRuns([cell(""), cell(" "), cell("")])).toEqual([]);
+  });
+
+  test("a wide character's continuation column is skipped, not spaced", () => {
+    // 你好 occupies four columns: two glyph cells, each followed by the
+    // terminal's zero-width continuation. Treating a continuation as a blank
+    // would splice a space between the two characters and push the rest of
+    // the row one column right.
+    const wide = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const cont = (): Cell => ({ ch: "", fg: -1, bg: -1, width: 0 });
+    const runs = rowRuns([wide("你"), cont(), wide("好"), cont(), cell("!")]);
+    expect(runs).toEqual([
+      [0, "你好", -1, -1, 1],
+      [4, "!", -1, -1],
+    ]);
+  });
+
+  test("dynamic and baked text never share a run", () => {
+    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const runs = rowRuns([cell("a"), dyn("文"), { ch: "", fg: -1, bg: -1, width: 0 }, cell("b")]);
+    expect(runs).toEqual([
+      [0, "a", -1, -1],
+      [1, "文", -1, -1, 1],
+      [3, "b", -1, -1],
+    ]);
+  });
+
+  test("blanks are never folded into a dynamic run", () => {
+    // The dynamic atlas holds only the codepoints the companion baked; a
+    // space folded into such a run would be a glyph the device cannot draw.
+    const dyn = (ch: string): Cell => ({ ch, fg: -1, bg: -1, width: 2, dyn: true });
+    const runs = rowRuns([dyn("文"), { ch: "", fg: -1, bg: -1, width: 0 }, cell(" "), dyn("字")]);
+    expect(runs).toEqual([
+      [0, "文", -1, -1, 1],
+      [3, "字", -1, -1, 1],
+    ]);
   });
 });
 
@@ -216,5 +263,91 @@ describe("key encoding", () => {
 
   test("unknown multi-char names encode to nothing", () => {
     expect(encodeKey("F13", false, false, false)).toBe("");
+  });
+
+  test("ctrl reaches named keys that are single bytes", () => {
+    // The console sends Y as the named Space key, so a held Ctrl has to turn
+    // it into NUL exactly as ctrl+space from a real keyboard would.
+    expect(encodeKey("Space", true, false, false)).toBe("\x00");
+    expect(encodeKey("Space", false, false, false)).toBe(" ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runtime glyphs
+// ---------------------------------------------------------------------------
+
+describe("runtime glyph atlas", () => {
+  test("baked coverage is ASCII plus the app's box-drawing literal", () => {
+    expect(isBakedCodepoint("A".codePointAt(0)!)).toBe(true);
+    expect(isBakedCodepoint("│".codePointAt(0)!)).toBe(true);
+    expect(isBakedCodepoint("你".codePointAt(0)!)).toBe(false);
+  });
+
+  test("a font collection yields a standalone sfnt", () => {
+    // Every CJK face macOS ships is a .ttc and opentype.js rejects the
+    // signature outright, so the companion lifts one member out itself.
+    const tables = [
+      { tag: 0x676c7966, data: new Uint8Array([1, 2, 3]) }, // 'glyf'
+      { tag: 0x6c6f6361, data: new Uint8Array([4, 5]) }, // 'loca'
+    ];
+    // Build a one-face collection by hand.
+    const faceDirectory = 12 + tables.length * 16;
+    const header = 12 + 4;
+    const body: number[] = [];
+    const bytes = new Uint8Array(header + faceDirectory + 16);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 0x74746366); // 'ttcf'
+    view.setUint32(4, 0x00010000);
+    view.setUint32(8, 1);
+    view.setUint32(12, header);
+    view.setUint32(header, 0x00010000); // sfntVersion
+    view.setUint16(header + 4, tables.length);
+    let at = header + faceDirectory;
+    for (let i = 0; i < tables.length; i += 1) {
+      const entry = header + 12 + i * 16;
+      view.setUint32(entry, tables[i].tag);
+      view.setUint32(entry + 4, 0);
+      view.setUint32(entry + 8, at);
+      view.setUint32(entry + 12, tables[i].data.length);
+      bytes.set(tables[i].data, at);
+      at += (tables[i].data.length + 3) & ~3;
+      body.push(at);
+    }
+
+    const out = extractFromCollection(bytes);
+    const outView = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    expect(outView.getUint32(0)).toBe(0x00010000);
+    expect(outView.getUint16(4)).toBe(2);
+    for (let i = 0; i < tables.length; i += 1) {
+      const entry = 12 + i * 16;
+      expect(outView.getUint32(entry)).toBe(tables[i].tag);
+      const offset = outView.getUint32(entry + 8);
+      const length = outView.getUint32(entry + 12);
+      expect([...out.subarray(offset, offset + length)]).toEqual([...tables[i].data]);
+    }
+  });
+
+  test("advances are rewritten to whole cells", () => {
+    // A terminal owns its grid: the font's natural advance would drift a run
+    // of CJK off the columns the companion placed it on.
+    const glyphs = [
+      { cp: 0x41, columns: 1 },
+      { cp: 0x4f60, columns: 2 },
+    ];
+    const blob = new Uint8Array(FONT_HEADER_SIZE + glyphs.length * FONT_CMAP_ENTRY_SIZE);
+    const view = new DataView(blob.buffer);
+    view.setUint16(6, glyphs.length, true);
+    glyphs.forEach((glyph, i) => {
+      const at = FONT_HEADER_SIZE + i * FONT_CMAP_ENTRY_SIZE;
+      view.setUint32(at, glyph.cp, true);
+      view.setUint16(at + 4, i, true);
+      view.setUint8(at + 6, 99); // whatever the face said
+    });
+
+    forceAdvances(blob, new Map(glyphs.map((g) => [g.cp, g.columns])), 7);
+
+    expect(view.getUint8(FONT_HEADER_SIZE + 6)).toBe(7);
+    expect(view.getUint8(FONT_HEADER_SIZE + FONT_CMAP_ENTRY_SIZE + 6)).toBe(14);
   });
 });

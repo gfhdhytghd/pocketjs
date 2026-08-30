@@ -25,6 +25,8 @@
 #define BTN_LEFT 0x0080
 #define BTN_LTRIGGER 0x0100
 #define BTN_RTRIGGER 0x0200
+#define BTN_ZL 0x0400
+#define BTN_ZR 0x0800
 #define BTN_TRIANGLE 0x1000
 #define BTN_CIRCLE 0x2000
 #define BTN_CROSS 0x4000
@@ -36,6 +38,8 @@
 #define RUNTIME_DEVMENU_KEYS (KEY_L | KEY_R | KEY_SELECT)
 
 static bool devmenu_input_latched;
+/* ir:rst came up: this console has the extra shoulder pair. */
+static bool extra_shoulders;
 
 static const struct {
   uint32_t key;
@@ -47,6 +51,8 @@ static const struct {
   { KEY_Y, BTN_SQUARE },
   { KEY_L, BTN_LTRIGGER },
   { KEY_R, BTN_RTRIGGER },
+  { KEY_ZL, BTN_ZL },
+  { KEY_ZR, BTN_ZR },
   { KEY_START, BTN_START },
   { KEY_SELECT, BTN_SELECT },
   { KEY_DUP, BTN_UP },
@@ -55,8 +61,28 @@ static const struct {
   { KEY_DRIGHT, BTN_RIGHT },
 };
 
+/*
+ * ZL/ZR are New-3DS-only and do NOT arrive on the ordinary HID pad: they live
+ * in ir:rst's shared memory alongside the C-stick (libctru irrst.h). An Old
+ * 3DS has neither the buttons nor the service, so a failed init is simply a
+ * console without them — every other key is unaffected.
+ */
+void input_init(void) {
+  extra_shoulders = R_SUCCEEDED(irrstInit());
+}
+
+void input_shutdown(void) {
+  if (extra_shoulders) irrstExit();
+  extra_shoulders = false;
+}
+
+void input_scan(void) {
+  if (extra_shoulders) irrstScanInput();
+}
+
 int32_t input_buttons(void) {
   uint32_t held = hidKeysHeld();
+  if (extra_shoulders) held |= irrstKeysHeld() & (KEY_ZL | KEY_ZR);
   if ((held & RUNTIME_RELOAD_KEYS) == RUNTIME_RELOAD_KEYS) {
     held &= ~RUNTIME_RELOAD_KEYS;
   }

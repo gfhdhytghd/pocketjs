@@ -4,34 +4,45 @@
 // terminal state machine per session; this app is a passive replica in the
 // zhongduan sense: attach delivers a full cell-grid snapshot, then ordered
 // row diffs. The two screens split the terminal the way the contacts demo
-// split the phone app: the top screen is the grid — 12 px monospace cells
-// snapped to an integer advance — and the touch screen holds the session
-// tabs and the keyboard.
+// split the phone app: the top screen is the grid (grid.tsx, shared with the
+// desktop mirror window) and the touch screen holds the session tabs and the
+// keyboard.
 //
 // Physical controls: D-pad = arrow keys (with repeat), A = Enter,
-// B = Backspace, X = Tab, Y = Space, L/R = previous/next session,
-// START = Ctrl-C, SELECT = new session, circle pad = scrollback.
+// B = Backspace, X = Tab, Y = Space, START = Ctrl-C, SELECT = new session,
+// circle pad = scrollback.
+//
+// ZL is Ctrl: hold it and every key that follows carries the control
+// modifier, with the on-screen keyboard lighting its Ctrl cap so the state is
+// visible where the operator is already looking. ZL is New-3DS-only and
+// reaches the guest through ir:rst rather than the ordinary HID pad
+// (hosts/3ds/src/input.c), so L held is the same modifier on a console — or a
+// host — that has no ZL. L and R tapped step to the previous/next session; an
+// L that modified a key does not also switch on release.
 
 import { createSignal, For, Show } from "solid-js";
 import { AuxiliarySurface, Text, View, type NodeMirror } from "@pocketjs/framework/components";
 import { createGesture } from "@pocketjs/framework/gesture";
-import { analogY, onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
+import { analogY, onFrame } from "@pocketjs/framework/lifecycle";
 import { BTN } from "@pocketjs/framework/input";
 import { getOps } from "@pocketjs/framework";
+import { TermGrid } from "./grid.tsx";
 import { KB_H, Keyboard } from "./keyboard.tsx";
-import { THEME_CURSOR, THEME_FG, type Run } from "./protocol.ts";
 import { connectSvc } from "./svc.ts";
-import { createTermStore, rgbToAbgr, type TermStore } from "./store.ts";
+import { createTermStore } from "./store.ts";
 
 /* Grid geometry. The 12 px mono atlas is slot 16 (spec MONO_FONT_PX);
- * `font-mono text-xs` below is what makes the build bake it. The natural
- * advance (~7.2 px) is snapped down to a 7 px integer cell with negative
- * tracking so every column lands on a pixel. */
+ * `font-mono text-xs` in grid.tsx is what makes the build bake it. The
+ * natural advance (~7.2 px) is snapped down to a 7 px integer cell with
+ * negative tracking so every column lands on a pixel. */
 const MONO_SLOT = 16;
 const STATUS_H = 14;
 const CELL_H = 13;
 
 const TAB_H = 26;
+const TAB_W = 72;
+/** The close target on the active tab, measured from its right edge. */
+const TAB_CLOSE_W = 18;
 const KB_TOP = 240 - KB_H;
 
 const DPAD_KEYS: readonly [number, "Up" | "Down" | "Left" | "Right"][] = [
@@ -42,19 +53,8 @@ const DPAD_KEYS: readonly [number, "Up" | "Down" | "Left" | "Right"][] = [
 ];
 const DPAD_DELAY = 18;
 const DPAD_REPEAT = 4;
-
-function connectionLabel(store: TermStore): string {
-  switch (store.conn()) {
-    case "no-svc":
-      return "this host has no companion channel";
-    case "search":
-      return "searching for the companion beacon (UDP 8621)…";
-    case "link":
-      return "companion linked — waiting for a session…";
-    case "live":
-      return "";
-  }
-}
+/** Frames a shoulder may be down and still count as a tap on release. */
+const TAP_FRAMES = 14;
 
 export default function TermApp() {
   const ops = getOps();
@@ -65,25 +65,81 @@ export default function TermApp() {
   const ROWS = Math.floor((240 - STATUS_H) / CELL_H);
 
   const svc = connectSvc();
-  const store = createTermStore(COLS, ROWS, svc);
+  const store = createTermStore({ cols: COLS, rows: ROWS, cell: [CELL_W, CELL_H] }, svc);
+  /** The touch keyboard's one-shot Ctrl: armed by its cap, spent by the next
+   *  key. Holding L is the other way in, and the cap lights for both. */
   const [ctrlArmed, setCtrlArmed] = createSignal(false);
+  const [ctrlHeld, setCtrlHeld] = createSignal(false);
+  const ctrlActive = () => ctrlArmed() || ctrlHeld();
 
   const dpadHeld = new Map<number, number>();
   let scrollCarry = 0;
+  // Shoulder tap-vs-hold: a shoulder that goes down and comes back up
+  // quickly, having modified nothing, switches sessions; one that is held is
+  // a modifier and must not also switch on release.
+  let leftFrames = 0;
+  let rightFrames = 0;
+  let leftUsedAsModifier = false;
+
+  let prevButtons = 0;
 
   onFrame((buttons) => {
     store.frame();
 
+    const pressed = buttons & ~prevButtons;
+    prevButtons = buttons;
+    const leftDown = (buttons & BTN.LTRIGGER) !== 0;
+    const rightDown = (buttons & BTN.RTRIGGER) !== 0;
+    setCtrlHeld(leftDown || (buttons & BTN.ZL) !== 0);
+
+    let sentThisFrame = false;
+    const send = (key: string, ctrl: boolean) => {
+      store.sendKey(key, ctrl);
+      sentThisFrame = true;
+    };
+
+    // The d-pad repeats; everything else fires on its press edge. All of it
+    // is level-tested here rather than through onButtonPress so a key can
+    // read the modifier held on the same frame.
     for (const [mask, keyName] of DPAD_KEYS) {
       if (buttons & mask) {
         const held = (dpadHeld.get(mask) ?? 0) + 1;
         dpadHeld.set(mask, held);
         if (held === 1 || (held > DPAD_DELAY && (held - DPAD_DELAY) % DPAD_REPEAT === 0)) {
-          store.sendKey(keyName);
+          send(keyName, ctrlActive());
         }
       } else {
         dpadHeld.set(mask, 0);
       }
+    }
+    for (const [mask, key] of FACE_KEYS) {
+      if (pressed & mask) send(key, ctrlActive());
+    }
+    if (pressed & BTN.START) send("c", true);
+    if (pressed & BTN.SELECT) store.newSession();
+
+    if (sentThisFrame) {
+      if (ctrlArmed()) setCtrlArmed(false);
+      if (leftDown) leftUsedAsModifier = true;
+    }
+
+    // Shoulders: count frames down, decide on release. A shoulder that was
+    // held while a key went out was a modifier, and must not also switch
+    // sessions when it comes back up.
+    if (leftDown) {
+      leftFrames += 1;
+    } else {
+      if (leftFrames > 0 && leftFrames <= TAP_FRAMES && !leftUsedAsModifier) {
+        store.attachSibling(-1);
+      }
+      leftFrames = 0;
+      leftUsedAsModifier = false;
+    }
+    if (rightDown) {
+      rightFrames += 1;
+    } else {
+      if (rightFrames > 0 && rightFrames <= TAP_FRAMES) store.attachSibling(1);
+      rightFrames = 0;
     }
 
     // Circle pad Y scrubs scrollback: up = into history (positive delta).
@@ -100,125 +156,38 @@ export default function TermApp() {
     }
   });
 
-  onButtonPress(BTN.CIRCLE, () => store.sendKey("Enter")); // A
-  onButtonPress(BTN.CROSS, () => store.sendKey("Backspace")); // B
-  onButtonPress(BTN.TRIANGLE, () => store.sendKey("Tab")); // X
-  onButtonPress(BTN.SQUARE, () => store.sendText(" ")); // Y
-  onButtonPress(BTN.LTRIGGER, () => store.attachSibling(-1));
-  onButtonPress(BTN.RTRIGGER, () => store.attachSibling(1));
-  onButtonPress(BTN.START, () => store.sendKey("c", true));
-  onButtonPress(BTN.SELECT, () => store.newSession());
-
-  const activeTitle = () => {
-    const sid = store.activeSid();
-    return store.sessions().find((s) => s.sid === sid)?.title ?? "";
-  };
-
-  // Session tab strip on the touch screen.
+  // Session tab strip on the touch screen: tap a tab to attach, its × to
+  // close that session, the trailing + to open one.
   let tabsNode: NodeMirror | undefined;
-  const TAB_W = 72;
   createGesture({
     surface: "auxiliary",
     region: { node: () => tabsNode },
     onDown: (contact) => {
       const list = store.sessions();
       const index = Math.floor(contact.x / TAB_W);
-      if (index < list.length) {
-        store.attach(list[index].sid);
-      } else if (index === list.length) {
-        store.newSession();
+      if (index >= list.length) {
+        if (index === list.length) store.newSession();
+        return;
       }
+      const session = list[index];
+      const withinTab = contact.x - index * TAB_W;
+      if (session.sid === store.activeSid() && withinTab >= TAB_W - TAB_CLOSE_W) {
+        store.kill(session.sid);
+        return;
+      }
+      store.attach(session.sid);
     },
   });
 
-  const cursorLeft = () => (store.cursor()?.[0] ?? 0) * CELL_W;
-  const cursorTop = () => STATUS_H + (store.cursor()?.[1] ?? 0) * CELL_H;
-  const cursorOn = () => store.cursor()?.[2] === 1 && store.conn() === "live";
-
   return (
     <>
-      {/* Primary display: the grid replica. */}
-      <View debugName="TermScreen" class="relative w-full h-full bg-[#10151c] overflow-hidden">
-        <View
-          debugName="TermStatus"
-          class={
-            store.bell()
-              ? "absolute left-0 right-0 top-0 h-[14] bg-[#7a4a1d]"
-              : "absolute left-0 right-0 top-0 h-[14] bg-[#1a2230]"
-          }
-        >
-          <Text class="absolute left-[6] top-0 text-xs text-[#9fb6d8] font-bold">POCKET TERM</Text>
-          <Text class="absolute left-[92] top-0 text-xs text-[#5d708c]">{activeTitle()}</Text>
-          <Show when={store.scrollback() > 0}>
-            <Text class="absolute right-[56] top-0 text-xs text-[#e0b060]">{`↟${store.scrollback()}`}</Text>
-          </Show>
-          <Text class="absolute right-[18] top-0 text-xs text-[#5d708c]">{`${COLS}×${ROWS}`}</Text>
-          <Text
-            class={
-              store.conn() === "live"
-                ? "absolute right-[6] top-0 text-xs text-[#61c16d]"
-                : "absolute right-[6] top-0 text-xs text-[#c95c5c]"
-            }
-          >
-            ●
-          </Text>
-        </View>
-
-        <Show when={cursorOn()}>
-          <View
-            class="absolute"
-            style={{
-              insetL: cursorLeft(),
-              insetT: cursorTop(),
-              width: CELL_W,
-              height: CELL_H,
-              // Translucent block under the glyphs (rows paint after this).
-              bgColor: ((0x66 << 24) | (rgbToAbgr(THEME_CURSOR) & 0xffffff)) >>> 0,
-            }}
-          />
-        </Show>
-
-        {Array.from({ length: ROWS }, (_, y) => (
-          <View class="absolute left-0 right-0" style={{ insetT: STATUS_H + y * CELL_H, height: CELL_H }}>
-            <For each={store.row(y)()}>
-              {(run: Run) => (
-                <>
-                  <Show when={run[3] >= 0}>
-                    <View
-                      class="absolute top-0"
-                      style={{
-                        insetL: run[0] * CELL_W,
-                        width: run[1].length * CELL_W,
-                        height: CELL_H,
-                        bgColor: rgbToAbgr(run[3]),
-                      }}
-                    />
-                  </Show>
-                  <Text
-                    class="absolute top-0 font-mono text-xs"
-                    style={{
-                      insetL: run[0] * CELL_W,
-                      lineHeight: CELL_H,
-                      tracking: TRACK,
-                      textColor: rgbToAbgr(run[2] >= 0 ? run[2] : THEME_FG),
-                    }}
-                  >
-                    {run[1]}
-                  </Text>
-                </>
-              )}
-            </For>
-          </View>
-        ))}
-
-        <Show when={store.conn() !== "live"}>
-          <View class="absolute left-0 right-0 top-0 bottom-0 flex-col items-center justify-center gap-[6] bg-[#10151cf0]">
-            <Text class="text-lg text-[#9fb6d8] font-bold">pocket term</Text>
-            <Text class="text-xs text-[#5d708c]">{connectionLabel(store)}</Text>
-            <Text class="text-xs text-[#3d4c63]">on the Mac: node apps/term/host/serve.ts</Text>
-          </View>
-        </Show>
-      </View>
+      <TermGrid
+        store={store}
+        metrics={{ cols: COLS, rows: ROWS, cellW: CELL_W, cellH: CELL_H, track: TRACK, statusH: STATUS_H }}
+        badge={`${COLS}×${ROWS}`}
+        hint="on the Mac: node apps/term/host/serve.ts"
+        title="POCKET TERM"
+      />
 
       {/* Touch screen: tabs, status, keyboard. */}
       <AuxiliarySurface>
@@ -250,6 +219,13 @@ export default function TermApp() {
                   </Text>
                   <Show when={session.sid === store.activeSid()}>
                     <View class="absolute left-0 right-0 bottom-0 h-[2] bg-[#4c9bf5]" />
+                    <View
+                      class="absolute top-0 bottom-0 items-center justify-center bg-[#3b4560]"
+                      style={{ insetR: 0, width: TAB_CLOSE_W }}
+                      debugName="TabClose"
+                    >
+                      <Text class="text-xs text-[#9fb6d8]">×</Text>
+                    </View>
                   </Show>
                 </View>
               )}
@@ -271,16 +247,23 @@ export default function TermApp() {
             </View>
             <View class="grow" />
             <View class="flex-col gap-[2] items-end">
-              <Text class="text-xs text-[#3d4c63]">SELECT new · L/R switch · START ^C</Text>
-              <Text class="text-xs text-[#3d4c63]">pad scrolls history · A ⏎ · B ⌫</Text>
+              <Text class="text-xs text-[#3d4c63]">SELECT new · L/R switch · hold ZL = ctrl</Text>
+              <Text class="text-xs text-[#3d4c63]">
+                {store.dynamicGlyphs() > 0
+                  ? `pad scrolls · ${store.dynamicGlyphs()} runtime glyphs`
+                  : "pad scrolls history · A ⏎ · B ⌫"}
+              </Text>
             </View>
           </View>
 
           <Keyboard
             top={KB_TOP}
-            onChar={(ch) => store.sendText(ch)}
-            onKey={(name, ctrl) => store.sendKey(name, ctrl)}
-            ctrlArmed={ctrlArmed}
+            onChar={(ch) => {
+              store.sendText(ch);
+              setCtrlArmed(false);
+            }}
+            onKey={(name, ctrl) => store.sendKey(name, ctrl || ctrlHeld())}
+            ctrlArmed={ctrlActive}
             setCtrlArmed={setCtrlArmed}
           />
         </View>
@@ -288,3 +271,11 @@ export default function TermApp() {
     </>
   );
 }
+
+/** Face buttons that send a key, level-tested so a held Ctrl applies. */
+const FACE_KEYS: readonly [number, string][] = [
+  [BTN.CIRCLE, "Enter"],
+  [BTN.CROSS, "Backspace"],
+  [BTN.TRIANGLE, "Tab"],
+  [BTN.SQUARE, "Space"],
+];

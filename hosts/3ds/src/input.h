@@ -9,6 +9,12 @@
  * the PSP BTN bitmask, identical on every host; `analog` packs the left stick
  * as (x << 8) | y with 128 the centre of each axis. Call hidScanInput() once
  * per frame before either. */
+/** Bring up the New-3DS-only ir:rst pad (ZL/ZR). Safe on an Old 3DS, which
+ *  simply reports neither button. */
+void input_init(void);
+void input_shutdown(void);
+/** Refresh the ir:rst pad. Call once per frame next to hidScanInput(). */
+void input_scan(void);
 int32_t input_buttons(void);
 int32_t input_analog(void);
 /** Host-owned L+R+X edge. The complete chord is removed from app buttons. */
