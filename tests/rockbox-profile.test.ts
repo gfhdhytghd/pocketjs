@@ -16,6 +16,18 @@ const runtimePort = readFileSync(
   join(root, "hosts/rockbox/runtime_port.c"),
   "utf8",
 );
+const demoMain = readFileSync(
+  join(root, "hosts/rockbox/demo/main.tsx"),
+  "utf8",
+);
+const inputPage = readFileSync(
+  join(root, "hosts/rockbox/demo/input-test-page.tsx"),
+  "utf8",
+);
+const contactsPage = readFileSync(
+  join(root, "hosts/rockbox/demo/contacts-page.tsx"),
+  "utf8",
+);
 
 describe("Rockbox iPod classic development profile", () => {
   test("resolves the embedded 320x240 demo", () => {
@@ -47,5 +59,32 @@ describe("Rockbox iPod classic development profile", () => {
     expect(runtimePort).toContain(
       "#define POCKET_RUNTIME_JS_STACK_SIZE (8 * 1024 * 1024)",
     );
+  });
+
+  test("ships three hardware-switchable acceptance pages", () => {
+    expect(demoMain).toContain("const PAGE_COUNT = 3");
+    expect(demoMain).toContain("buttons & BTN.CIRCLE");
+    expect(demoMain).toContain("pressed & BTN.LEFT");
+    expect(demoMain).toContain("pressed & BTN.RIGHT");
+    expect(demoMain).toContain("<StandardPage />");
+    expect(demoMain).toContain("<InputTestPage />");
+    expect(demoMain).toContain("<ContactsPage />");
+  });
+
+  test("covers every iPod input and virtualizes 10,000 contacts", () => {
+    for (const button of [
+      "BTN.TRIANGLE",
+      "BTN.LEFT",
+      "BTN.CIRCLE",
+      "BTN.RIGHT",
+      "BTN.START",
+      "BTN.UP",
+      "BTN.DOWN",
+    ]) {
+      expect(inputPage).toContain(button);
+    }
+    expect(contactsPage).toContain("const CONTACT_COUNT = 10_000");
+    expect(contactsPage).toContain("<VirtualList");
+    expect(contactsPage).toContain("focusRow(0)");
   });
 });

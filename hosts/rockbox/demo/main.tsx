@@ -1,46 +1,49 @@
-import { createSignal } from "solid-js";
-import { mount } from "@pocketjs/framework";
+import { Show, createSignal } from "solid-js";
+import { mount } from "@pocketjs/framework/solid";
 import { Text, View } from "@pocketjs/framework/components";
 import { BTN } from "@pocketjs/framework/input";
 import { onButtonPress } from "@pocketjs/framework/lifecycle";
+import ContactsPage from "./contacts-page.tsx";
+import InputTestPage from "./input-test-page.tsx";
+import StandardPage from "./standard-page.tsx";
 
-function Demo() {
-  const [selection, setSelection] = createSignal(0);
-  const [lastInput, setLastInput] = createSignal("READY");
-  const items = ["PocketJS", "Rockbox", "iPod classic"] as const;
+const PAGE_COUNT = 3;
+const PAGE_LABELS = ["DEMO", "INPUT", "CONTACTS"] as const;
 
-  onButtonPress(BTN.UP, () => {
-    setSelection((value) => (value + items.length - 1) % items.length);
-    setLastInput("WHEEL BACK");
+function RockboxDemo() {
+  const [page, setPage] = createSignal(0);
+
+  onButtonPress(BTN.LEFT | BTN.RIGHT, (pressed, buttons) => {
+    if ((buttons & BTN.CIRCLE) === 0) return;
+    if ((pressed & BTN.LEFT) !== 0) {
+      setPage((value) => (value + PAGE_COUNT - 1) % PAGE_COUNT);
+    } else if ((pressed & BTN.RIGHT) !== 0) {
+      setPage((value) => (value + 1) % PAGE_COUNT);
+    }
   });
-  onButtonPress(BTN.DOWN, () => {
-    setSelection((value) => (value + 1) % items.length);
-    setLastInput("WHEEL FORWARD");
-  });
-  onButtonPress(BTN.LEFT, () => setLastInput("LEFT"));
-  onButtonPress(BTN.RIGHT, () => setLastInput("RIGHT"));
-  onButtonPress(BTN.CIRCLE, () => setLastInput("SELECT"));
-  onButtonPress(BTN.TRIANGLE, () => setLastInput("MENU"));
-  onButtonPress(BTN.START, () => setLastInput("PLAY/PAUSE"));
 
   return (
-    <View class="w-full h-full flex-col bg-[#10131a] p-[18]">
-      <Text class="text-lg font-bold text-[#f2f5ff]">PocketJS on Rockbox</Text>
-      <Text class="text-xs text-[#8fa5c8]">iPod classic 6G / 7G</Text>
-      <View class="h-[14]" />
-      {items.map((item, index) => (
-        <View class={selection() === index
-          ? "h-[38] flex-row items-center px-[12] bg-[#27a8ff]"
-          : "h-[38] flex-row items-center px-[12] bg-[#1b2230]"}>
-          <Text class="text-sm text-white">{item}</Text>
-        </View>
-      ))}
-      <View class="flex-1" />
-      <Text class="text-xs text-[#8fa5c8]">LAST INPUT</Text>
-      <Text class="text-sm font-bold text-[#f8d45a]">{lastInput()}</Text>
-      <Text class="text-xs text-[#8fa5c8]">Hold MENU to exit</Text>
+    <View class="relative w-full h-full bg-[#10131a] overflow-hidden">
+      <Show when={page() === 0}>
+        <StandardPage />
+      </Show>
+      <Show when={page() === 1}>
+        <InputTestPage />
+      </Show>
+      <Show when={page() === 2}>
+        <ContactsPage />
+      </Show>
+
+      <View class="absolute right-[6] top-[5] h-[18] px-[7] flex-row items-center rounded-[9] bg-[#111827cc]">
+        <Text class="text-xs text-white font-bold">
+          {page() + 1}/{PAGE_COUNT} {PAGE_LABELS[page()]}
+        </Text>
+      </View>
+      <View class="absolute left-[6] bottom-[5] h-[16] px-[6] flex-row items-center rounded-[8] bg-[#111827cc]">
+        <Text class="text-xs text-[#dbeafe]">SELECT + LEFT / RIGHT</Text>
+      </View>
     </View>
   );
 }
 
-mount(() => <Demo />);
+mount(() => <RockboxDemo />);
