@@ -27,6 +27,10 @@ extern void pocket_host_boot_stage(int stage);
 #define REPORT_BOOT_STAGE(stage) ((void)(stage))
 #endif
 
+#ifndef POCKET_RUNTIME_JS_STACK_SIZE
+#define POCKET_RUNTIME_JS_STACK_SIZE (256 * 1024)
+#endif
+
 typedef enum {
   HostCreateNode,
   HostDestroyNode,
@@ -561,7 +565,7 @@ int pocket_runtime_boot(
     return 0;
   }
   REPORT_BOOT_STAGE(4);
-  JS_SetMaxStackSize(runtime, 256 * 1024);
+  JS_SetMaxStackSize(runtime, POCKET_RUNTIME_JS_STACK_SIZE);
   context = JS_NewContext(runtime);
   if (context == 0) {
     set_error("QuickJS context allocation failed");
@@ -632,6 +636,7 @@ int pocket_runtime_boot(
 /* One guest turn (frame call + job drain), then `tick_count` core ticks. */
 static int run_frame(
   uint32_t buttons,
+  uint32_t analog,
   const PocketRuntimeContact *contacts,
   unsigned int contact_count,
   unsigned int tick_count
@@ -680,7 +685,7 @@ static int run_frame(
   }
   JSValue arguments[4] = {
     JS_NewUint32(context, buttons),
-    JS_NewInt32(context, POCKET_ANALOG_CENTER),
+    JS_NewUint32(context, analog),
     touch_array,
     hit_array,
   };
@@ -728,12 +733,22 @@ int pocket_runtime_tick(const PocketRuntimeInput *input) {
     input->touch_y,
     input->touch_hit
   );
-  return run_frame(input->buttons, &contact, count, 1);
+  return run_frame(input->buttons, POCKET_ANALOG_CENTER, &contact, count, 1);
+}
+
+int pocket_runtime_tick_analog(uint32_t buttons, uint32_t analog) {
+  return run_frame(buttons, analog, 0, 0, 1);
 }
 
 int pocket_runtime_tick_contacts(const PocketRuntimeContactsInput *input) {
   if (input == 0) return 0;
-  return run_frame(input->buttons, input->contacts, input->contact_count, 1);
+  return run_frame(
+    input->buttons,
+    POCKET_ANALOG_CENTER,
+    input->contacts,
+    input->contact_count,
+    1
+  );
 }
 
 int pocket_runtime_frame_contacts(
@@ -741,7 +756,13 @@ int pocket_runtime_frame_contacts(
   unsigned int tick_count
 ) {
   if (input == 0) return 0;
-  return run_frame(input->buttons, input->contacts, input->contact_count, tick_count);
+  return run_frame(
+    input->buttons,
+    POCKET_ANALOG_CENTER,
+    input->contacts,
+    input->contact_count,
+    tick_count
+  );
 }
 
 int pocket_runtime_frame_ticks(
@@ -753,7 +774,7 @@ int pocket_runtime_frame_ticks(
 ) {
   PocketRuntimeContact contact;
   unsigned int count = single_contact(&contact, touch_down, touch_x, touch_y, touch_hit);
-  return run_frame(0, &contact, count, tick_count);
+  return run_frame(0, POCKET_ANALOG_CENTER, &contact, count, tick_count);
 }
 
 int pocket_runtime_frame(int touch_down, int touch_x, int touch_y, int touch_hit) {
