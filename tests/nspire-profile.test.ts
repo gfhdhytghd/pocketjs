@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { POCKET_TARGETS } from "../contracts/spec/platforms.ts";
 import {
   NSPIRE_CX2_DEV_HOST_ABI,
@@ -43,6 +44,25 @@ describe("TI-Nspire CX II development profile", () => {
     });
     expect(plan.viewport.logical).toEqual(NSPIRE_CX2_VIEWPORT);
     expect(plan.viewport.rasterDensity).toBe(1);
+  });
+
+  test("resolves the button and analog acceptance guest", () => {
+    const inputTest = JSON.parse(
+      readFileSync(
+        new URL("../hosts/nspire/input-test/pocket.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const plan = resolveNspireCx2BuildPlan(inputTest);
+    expect(plan.app).toMatchObject({
+      entry: "hosts/nspire/input-test/main.tsx",
+      output: "nspire-input-test",
+    });
+    expect(plan.features).toMatchObject({
+      "input.analog.left": true,
+      "input.buttons": true,
+    });
+    expect(plan.features).not.toHaveProperty("input.touch");
   });
 
   test.each(["audio.pcm", "input.touch", "net.http"])(
