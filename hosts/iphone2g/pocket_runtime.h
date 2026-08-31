@@ -28,6 +28,8 @@ typedef struct {
   int touch_hit;
 } PocketRuntimeInput;
 int pocket_runtime_tick(const PocketRuntimeInput *input);
+/* Button + analog-only entry for hosts with a stick/trackpad and no touch. */
+int pocket_runtime_tick_analog(uint32_t buttons, uint32_t analog);
 
 /*
  * Multi-contact frame entry. `id` is the host's contact slot (0-255, stable
