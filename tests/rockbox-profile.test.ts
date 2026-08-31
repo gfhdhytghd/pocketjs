@@ -12,6 +12,10 @@ const manifest = JSON.parse(
   readFileSync(join(root, "hosts/rockbox/demo.pocket.json"), "utf8"),
 );
 const nativeHost = readFileSync(join(root, "hosts/rockbox/main.c"), "utf8");
+const runtimePort = readFileSync(
+  join(root, "hosts/rockbox/runtime_port.c"),
+  "utf8",
+);
 
 describe("Rockbox iPod classic development profile", () => {
   test("resolves the embedded 320x240 demo", () => {
@@ -31,9 +35,17 @@ describe("Rockbox iPod classic development profile", () => {
     expect(() => resolveRockboxBuildPlan(changed)).toThrow();
   });
 
-  test("uses Rockbox's audio buffer for the QuickJS heap", () => {
+  test("reserves a 16 MiB runtime stack before the QuickJS heap", () => {
     expect(nativeHost).toContain("rb->audio_stop();");
-    expect(nativeHost).toContain("rb->plugin_get_audio_buffer(&heap_size)");
-    expect(nativeHost).not.toContain("rb->plugin_get_buffer(&heap_size)");
+    expect(nativeHost).toContain("rb->plugin_get_audio_buffer(&audio_size)");
+    expect(nativeHost).toContain(
+      "#define POCKETJS_RUNTIME_STACK_SIZE (16u * 1024u * 1024u)",
+    );
+    expect(nativeHost).toContain("heap = audio_buffer + POCKETJS_RUNTIME_STACK_SIZE");
+    expect(nativeHost).toContain("rb->create_thread(");
+    expect(nativeHost).toContain("POCKETJS_RUNTIME_STACK_SIZE,");
+    expect(runtimePort).toContain(
+      "#define POCKET_RUNTIME_JS_STACK_SIZE (8 * 1024 * 1024)",
+    );
   });
 });

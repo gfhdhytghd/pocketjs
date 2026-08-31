@@ -18,7 +18,12 @@ extern const unsigned int pocket_app_js_len;
 extern const unsigned char pocket_app_pak[];
 extern const unsigned int pocket_app_pak_len;
 
+#define POCKETJS_RUNTIME_STACK_SIZE (16u * 1024u * 1024u)
+
 static fb_data display[LCD_WIDTH * LCD_HEIGHT] MEM_ALIGN_ATTR;
+static int boot_stage;
+static size_t runtime_heap_size;
+static enum plugin_status runtime_status;
 
 static const RockboxInputCodes input_codes = {
   .select = BUTTON_SELECT,
@@ -36,37 +41,25 @@ void *pocket_host_realloc(void *pointer, size_t size) {
   return tlsf_realloc(pointer, size);
 }
 void pocket_host_free(void *pointer) { tlsf_free(pointer); }
+void pocket_host_boot_stage(int stage) { boot_stage = stage; }
 
 static enum plugin_status show_runtime_error(void) {
   const char *message = pocket_runtime_error();
-  rb->splashf(HZ * 4, "PocketJS: %s", message && *message ? message : "runtime error");
+  rb->splashf(
+    HZ * 8,
+    "PJS S%d H%luK: %s",
+    boot_stage,
+    (unsigned long)(runtime_heap_size / 1024u),
+    message && *message ? message : "runtime error"
+  );
   return PLUGIN_ERROR;
 }
 
-enum plugin_status plugin_start(const void *parameter) {
+static void pocketjs_runtime_thread(void) {
   enum plugin_status status = PLUGIN_OK;
-  size_t heap_size = 0;
-  void *heap;
   int pending_event = BUTTON_NONE;
   int cadence = 0;
   bool runtime_ready = false;
-
-  (void)parameter;
-  /* The linked plugin leaves less than 1 MiB in PLUGIN_BUFFER_SIZE, which is
-     not enough for QuickJS to parse the bundled Solid application. Rockbox
-     exposes the much larger audio buffer to plugins that stop playback. */
-  rb->audio_stop();
-  heap = rb->plugin_get_audio_buffer(&heap_size);
-  if (heap == 0 || heap_size < 2u * 1024u * 1024u ||
-      init_memory_pool(heap_size, heap) == (size_t)-1) {
-    rb->splash(HZ * 3, "PocketJS: not enough audio memory");
-    return PLUGIN_ERROR;
-  }
-
-#ifdef HAVE_ADJUSTABLE_CPU_FREQ
-  rb->cpu_boost(true);
-#endif
-  rb->backlight_on();
 
   if (!pocket_runtime_boot(
         pocket_app_js,
@@ -122,8 +115,62 @@ enum plugin_status plugin_start(const void *parameter) {
 
 cleanup:
   if (runtime_ready) pocket_runtime_shutdown();
+  runtime_status = status;
+}
+
+enum plugin_status plugin_start(const void *parameter) {
+  size_t audio_size = 0;
+  size_t heap_size;
+  unsigned int thread_id;
+  unsigned char *audio_buffer;
+  unsigned char *heap;
+
+  (void)parameter;
+  /* QuickJS source evaluation needs substantially more native stack than the
+     8 KiB Rockbox main thread provides. Reserve a stable 16 MiB execution
+     stack from the audio buffer; the rest is the PocketJS allocation heap. */
+  rb->audio_stop();
+  audio_buffer = rb->plugin_get_audio_buffer(&audio_size);
+  if (audio_buffer == 0 ||
+      audio_size < POCKETJS_RUNTIME_STACK_SIZE + 2u * 1024u * 1024u) {
+    rb->splash(HZ * 3, "PocketJS: not enough audio memory");
+    return PLUGIN_ERROR;
+  }
+
+  heap = audio_buffer + POCKETJS_RUNTIME_STACK_SIZE;
+  heap_size = audio_size - POCKETJS_RUNTIME_STACK_SIZE;
+  runtime_heap_size = heap_size;
+  if (init_memory_pool(heap_size, heap) == (size_t)-1) {
+    rb->splash(HZ * 3, "PocketJS: heap init failed");
+    return PLUGIN_ERROR;
+  }
+
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+  rb->cpu_boost(true);
+#endif
+  rb->backlight_on();
+
+  runtime_status = PLUGIN_ERROR;
+  thread_id = rb->create_thread(
+    pocketjs_runtime_thread,
+    audio_buffer,
+    POCKETJS_RUNTIME_STACK_SIZE,
+    0,
+    "pocketjs"
+    IF_PRIO(, PRIORITY_USER_INTERFACE)
+    IF_COP(, CPU)
+  );
+  if (thread_id == 0) {
+    rb->splash(HZ * 3, "PocketJS: thread creation failed");
+#ifdef HAVE_ADJUSTABLE_CPU_FREQ
+    rb->cpu_boost(false);
+#endif
+    return PLUGIN_ERROR;
+  }
+
+  rb->thread_wait(thread_id);
 #ifdef HAVE_ADJUSTABLE_CPU_FREQ
   rb->cpu_boost(false);
 #endif
-  return status;
+  return runtime_status;
 }

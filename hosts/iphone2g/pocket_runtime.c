@@ -88,15 +88,30 @@ static void set_error(const char *message) {
 
 static void take_exception(JSContext *exception_context) {
   JSValue exception = JS_GetException(exception_context);
+  JSValue detail = JS_UNDEFINED;
   size_t length = 0;
-  const char *message = JS_ToCStringLen2(exception_context, &length, exception, 0);
+  const char *message = 0;
+  if (JS_IsObject(exception)) {
+    detail = JS_GetPropertyStr(exception_context, exception, "message");
+    if (!JS_IsException(detail) && !JS_IsUndefined(detail)) {
+      message = JS_ToCStringLen2(exception_context, &length, detail, 0);
+    }
+  }
+  if (message == 0 && !JS_IsException(detail)) {
+    message = JS_ToCStringLen2(exception_context, &length, exception, 0);
+  }
   if (message != 0) {
     size_t copy_length = length < sizeof(last_error) - 1 ? length : sizeof(last_error) - 1;
     memcpy(last_error, message, copy_length);
     last_error[copy_length] = '\0';
     JS_FreeCString(exception_context, message);
   } else {
-    set_error("QuickJS exception");
+    if (JS_IsNull(exception)) set_error("QuickJS out of memory");
+    else if (JS_IsUninitialized(exception)) set_error("QuickJS missing exception");
+    else set_error("QuickJS exception");
+  }
+  if (!JS_IsUndefined(detail) && !JS_IsException(detail)) {
+    JS_FreeValue(exception_context, detail);
   }
   JS_FreeValue(exception_context, exception);
 }
