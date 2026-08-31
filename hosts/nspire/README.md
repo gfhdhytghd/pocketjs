@@ -58,18 +58,20 @@ bun nspire build --manifest=path/to/pocket.json
 
 ### Input acceptance guest
 
-The input guest shows the **PocketJS button mask**, press and release edge
-counts, the **raw 0-255 analog axes**, and a touchpad-position marker:
+The input guest shows the **currently held CX II matrix keys**, the PocketJS
+button mask, the **raw 0-255 analog axes**, and a touchpad-position marker:
 
 ```sh
 bun nspire build --manifest=hosts/nspire/input-test/pocket.json
 # dist/nspire/pocketjs-cx2.tns
 ```
 
-An active button turns green. Every complete tap increments both its `P` and
-`R` counters. Moving across the touchpad moves the amber marker across the
-outlined range; lifting the finger reports `X 128 Y 128` because the host
-centers an absent analog sample.
+The left panel updates from a host-only diagnostic string and does not add
+calculator keys to the PocketJS button ABI. It recognizes the numeric,
+alphabetic, operator, navigation, modifier, document, menu, and touchpad-click
+matrix entries exposed by Ndless. Moving across the touchpad moves the amber
+marker across the outlined range; lifting the finger reports `X 128 Y 128`
+because the host centers an absent analog sample.
 
 Copy `pocketjs-cx2.tns` to the calculator and open it with Ndless. Hold
 **Ctrl+Esc** to leave the runtime. Default controls are:

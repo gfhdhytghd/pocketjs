@@ -1,33 +1,13 @@
-import { createSignal, For } from "solid-js";
+import { createSignal } from "solid-js";
 import { Text, View } from "@pocketjs/framework/components";
 import {
   analogRaw,
   onFrame,
 } from "@pocketjs/framework/lifecycle";
-import { BTN } from "@pocketjs/framework/input";
-
-interface ButtonProbe {
-  label: string;
-  mask: number;
-}
-
-const BUTTONS: readonly ButtonProbe[] = [
-  { label: "UP", mask: BTN.UP },
-  { label: "RIGHT", mask: BTN.RIGHT },
-  { label: "DOWN", mask: BTN.DOWN },
-  { label: "LEFT", mask: BTN.LEFT },
-  { label: "CIRCLE", mask: BTN.CIRCLE },
-  { label: "CROSS", mask: BTN.CROSS },
-  { label: "SQUARE", mask: BTN.SQUARE },
-  { label: "TRIANGLE", mask: BTN.TRIANGLE },
-  { label: "START", mask: BTN.START },
-  { label: "SELECT", mask: BTN.SELECT },
-] as const;
 
 interface ProbeState {
   buttons: number;
-  presses: readonly number[];
-  releases: readonly number[];
+  keys: string;
   rawX: number;
   rawY: number;
   frame: number;
@@ -40,39 +20,23 @@ function hex16(value: number): string {
 export default function InputTest() {
   const [state, setState] = createSignal<ProbeState>({
     buttons: 0,
-    presses: BUTTONS.map(() => 0),
-    releases: BUTTONS.map(() => 0),
+    keys: "NONE",
     rawX: 128,
     rawY: 128,
     frame: 0,
   });
-  let previousButtons = 0;
   let frame = 0;
-  const presses = BUTTONS.map(() => 0);
-  const releases = BUTTONS.map(() => 0);
 
   onFrame((buttons) => {
     frame += 1;
-    const pressed = buttons & ~previousButtons;
-    const released = previousButtons & ~buttons;
-    let edge = false;
-    BUTTONS.forEach((button, index) => {
-      if (pressed & button.mask) {
-        presses[index] += 1;
-        edge = true;
-      }
-      if (released & button.mask) {
-        releases[index] += 1;
-        edge = true;
-      }
-    });
-    previousButtons = buttons;
-    if (!edge && (frame & 1) !== 0) return;
+    if ((frame & 1) !== 0) return;
     const analog = analogRaw();
+    const diagnostic = (
+      globalThis as typeof globalThis & { __pocketInputDiagnostic?: string }
+    ).__pocketInputDiagnostic;
     setState({
       buttons,
-      presses: [...presses],
-      releases: [...releases],
+      keys: diagnostic && diagnostic.length > 0 ? diagnostic : "NONE",
       rawX: (analog >> 8) & 0xff,
       rawY: analog & 0xff,
       frame,
@@ -91,28 +55,13 @@ export default function InputTest() {
 
       <View class="flex-row gap-2">
         <View class="w-[164] flex-col gap-1">
-          <Text class="text-xs text-slate-400">
-            BUTTON MASK 0x{hex16(state().buttons)}
-          </Text>
-          <View class="flex-row flex-wrap gap-1">
-            <For each={BUTTONS}>
-              {(button, index) => {
-                const active = () => (state().buttons & button.mask) !== 0;
-                return (
-                  <View
-                    class={active()
-                      ? "w-[78] h-[31] px-1 py-[2] rounded bg-emerald-600 border-emerald-300"
-                      : "w-[78] h-[31] px-1 py-[2] rounded bg-slate-800 border-slate-600"}
-                  >
-                    <Text class="text-xs font-bold text-white">{button.label}</Text>
-                    <Text class="text-xs text-slate-300">
-                      P{state().presses[index()]} R{state().releases[index()]}
-                    </Text>
-                  </View>
-                );
-              }}
-            </For>
+          <Text class="text-xs text-slate-400">CURRENT KEYS</Text>
+          <View class="w-[164] h-[128] p-2 rounded bg-slate-800 border-slate-600">
+            <Text class="text-lg font-bold text-emerald-400">{state().keys}</Text>
           </View>
+          <Text class="text-xs text-slate-400">POCKET MASK</Text>
+          <Text class="text-sm font-bold text-white">0x{hex16(state().buttons)}</Text>
+          <Text class="text-xs text-slate-500">ALL CX II MATRIX KEYS SCANNED</Text>
         </View>
 
         <View class="w-[132] flex-col gap-1">

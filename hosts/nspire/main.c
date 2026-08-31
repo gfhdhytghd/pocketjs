@@ -27,6 +27,7 @@ void pocket_host_boot_stage(int stage) {
 
 int main(void) {
   uint16_t *screen;
+  char diagnostic_keys[512];
   unsigned frame = 0;
 
   pocket_host_boot_stage(0);
@@ -57,8 +58,10 @@ int main(void) {
   while (!nspire_input_exit_requested()) {
     const uint32_t buttons = nspire_input_buttons();
     const uint32_t analog = nspire_input_analog();
+    nspire_input_diagnostic(diagnostic_keys, sizeof(diagnostic_keys));
     if (frame == 0) pocket_host_boot_stage(30);
-    if (!pocket_runtime_tick_analog(buttons, analog)) {
+    if (!pocket_runtime_set_diagnostic_text(diagnostic_keys) ||
+        !pocket_runtime_tick_analog(buttons, analog)) {
       lcd_init(SCR_TYPE_INVALID);
       show_msgbox("PocketJS runtime error", pocket_runtime_error());
       pocket_runtime_shutdown();

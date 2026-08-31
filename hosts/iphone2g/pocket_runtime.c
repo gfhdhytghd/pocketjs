@@ -768,6 +768,18 @@ int pocket_runtime_tick_analog(uint32_t buttons, uint32_t analog) {
   return run_frame(buttons, analog, 0, 0, 1);
 }
 
+int pocket_runtime_set_diagnostic_text(const char *text) {
+  if (runtime == 0 || context == 0 || runtime_failed || JS_IsUndefined(global)) return 0;
+  JSValue value = JS_NewString(context, text == 0 ? "" : text);
+  if (JS_IsException(value) ||
+      JS_SetPropertyStr(context, global, "__pocketInputDiagnostic", value) < 0) {
+    take_exception(context);
+    runtime_failed = 1;
+    return 0;
+  }
+  return 1;
+}
+
 int pocket_runtime_tick_contacts(const PocketRuntimeContactsInput *input) {
   if (input == 0) return 0;
   return run_frame(
