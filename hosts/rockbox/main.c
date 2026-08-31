@@ -52,10 +52,14 @@ enum plugin_status plugin_start(const void *parameter) {
   bool runtime_ready = false;
 
   (void)parameter;
-  heap = rb->plugin_get_buffer(&heap_size);
-  if (heap == 0 || heap_size < 256u * 1024u ||
+  /* The linked plugin leaves less than 1 MiB in PLUGIN_BUFFER_SIZE, which is
+     not enough for QuickJS to parse the bundled Solid application. Rockbox
+     exposes the much larger audio buffer to plugins that stop playback. */
+  rb->audio_stop();
+  heap = rb->plugin_get_audio_buffer(&heap_size);
+  if (heap == 0 || heap_size < 2u * 1024u * 1024u ||
       init_memory_pool(heap_size, heap) == (size_t)-1) {
-    rb->splash(HZ * 3, "PocketJS: not enough plugin memory");
+    rb->splash(HZ * 3, "PocketJS: not enough audio memory");
     return PLUGIN_ERROR;
   }
 

@@ -11,6 +11,7 @@ const root = join(import.meta.dir, "..");
 const manifest = JSON.parse(
   readFileSync(join(root, "hosts/rockbox/demo.pocket.json"), "utf8"),
 );
+const nativeHost = readFileSync(join(root, "hosts/rockbox/main.c"), "utf8");
 
 describe("Rockbox iPod classic development profile", () => {
   test("resolves the embedded 320x240 demo", () => {
@@ -28,5 +29,11 @@ describe("Rockbox iPod classic development profile", () => {
     const changed = structuredClone(manifest);
     changed.app.viewport.fixed.logical = [176, 132];
     expect(() => resolveRockboxBuildPlan(changed)).toThrow();
+  });
+
+  test("uses Rockbox's audio buffer for the QuickJS heap", () => {
+    expect(nativeHost).toContain("rb->audio_stop();");
+    expect(nativeHost).toContain("rb->plugin_get_audio_buffer(&heap_size)");
+    expect(nativeHost).not.toContain("rb->plugin_get_buffer(&heap_size)");
   });
 });
