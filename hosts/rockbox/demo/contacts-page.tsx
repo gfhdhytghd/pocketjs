@@ -112,6 +112,25 @@ export default function ContactsPage() {
     ));
   };
 
+  const settleReleasedSelection = () => {
+    const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
+    const target = contactScrollTarget(
+      destinationIndex(),
+      listScroller.offset(),
+      maxOffset,
+    );
+    // Wheel pulses have no physical release event. Once the burst timeout
+    // expires, discard all accumulated velocity; only a fresh, non-overshoot
+    // spring may move the list toward its resting anchor.
+    listScroller.stop();
+    if (target !== null) {
+      listScroller.springTo(target, {
+        stiffness: CONTACT_SPRING_STIFFNESS,
+        damping: CONTACT_SPRING_DAMPING,
+      });
+    }
+  };
+
   const acceleratedWheelDelta = (direction: -1 | 1) => {
     if (wheelDirection !== direction || wheelIdleFrames >= WHEEL_ACCEL_RESET_FRAMES) {
       wheelDirection = direction;
@@ -131,6 +150,10 @@ export default function ContactsPage() {
       moveSelection(acceleratedWheelDelta(1));
     } else {
       wheelIdleFrames = Math.min(WHEEL_ACCEL_RESET_FRAMES, wheelIdleFrames + 1);
+      if (wheelDirection !== 0 && wheelIdleFrames === WHEEL_ACCEL_RESET_FRAMES) {
+        settleReleasedSelection();
+        resetWheelAcceleration();
+      }
     }
   });
 
