@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createScroller } from "../framework/src/kinetics.ts";
 import {
+  CONTACT_CENTER_ANCHOR_Y,
   CONTACT_DOWN_ANCHOR_Y,
   CONTACT_LIST_HEIGHT,
   CONTACT_MAX_OFFSCREEN_PX,
+  CONTACT_MAX_OFFSCREEN_ROWS,
   CONTACT_ROW_HEIGHT,
   CONTACT_UP_ANCHOR_Y,
   boundedVisualContactIndex,
@@ -20,11 +22,17 @@ describe("Rockbox contact wheel motion", () => {
       expect(contactScrollTarget(index, 0, MAX_OFFSET)).toBeNull();
     }
     const target = contactScrollTarget(5, 0, MAX_OFFSET);
-    expect(target).toBe(6);
+    expect(target).toBe(3);
     expect(5 * CONTACT_ROW_HEIGHT - target!).toBe(CONTACT_DOWN_ANCHOR_Y);
   });
 
-  test("uses mirrored one-row resting anchors", () => {
+  test("uses center-relative +2/-2 row resting anchors", () => {
+    expect(CONTACT_UP_ANCHOR_Y).toBe(
+      CONTACT_CENTER_ANCHOR_Y - 2 * CONTACT_ROW_HEIGHT,
+    );
+    expect(CONTACT_DOWN_ANCHOR_Y).toBe(
+      CONTACT_CENTER_ANCHOR_Y + 2 * CONTACT_ROW_HEIGHT,
+    );
     const down = contactScrollTarget(20, 0, MAX_OFFSET)!;
     expect(20 * CONTACT_ROW_HEIGHT - down).toBe(CONTACT_DOWN_ANCHOR_Y);
 
@@ -41,7 +49,9 @@ describe("Rockbox contact wheel motion", () => {
     expect(index * CONTACT_ROW_HEIGHT - target).toBe(CONTACT_DOWN_ANCHOR_Y);
   });
 
-  test("keeps the painted selection within 1.5 rows beyond either edge", () => {
+  test("keeps the painted selection within 0.5 rows beyond either edge", () => {
+    expect(CONTACT_MAX_OFFSCREEN_ROWS).toBe(0.5);
+    expect(CONTACT_MAX_OFFSCREEN_PX).toBe(CONTACT_ROW_HEIGHT / 2);
     const down = boundedVisualContactIndex(1024, 0, COUNT);
     const downNearEdge = down * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
     expect(downNearEdge).toBeGreaterThanOrEqual(0);
