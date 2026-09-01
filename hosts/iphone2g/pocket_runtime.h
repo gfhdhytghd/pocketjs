@@ -12,6 +12,14 @@ int pocket_runtime_boot(
   int width,
   int height
 );
+int pocket_runtime_boot_bytecode(
+  const uint8_t *bytecode,
+  size_t bytecode_length,
+  const uint8_t *pack,
+  size_t pack_length,
+  int width,
+  int height
+);
 /* `pack` is borrowed by QuickJS and must remain valid until shutdown. */
 /*
  * One guest turn followed by exactly one core tick — the frame contract
@@ -30,6 +38,11 @@ typedef struct {
 int pocket_runtime_tick(const PocketRuntimeInput *input);
 /* Button + analog-only entry for hosts with a wheel/stick and no touch. */
 int pocket_runtime_tick_analog(uint32_t buttons, uint32_t analog);
+int pocket_runtime_frame_analog(
+  uint32_t buttons,
+  uint32_t analog,
+  unsigned int tick_count
+);
 
 /*
  * Multi-contact frame entry. `id` is the host's contact slot (0-255, stable

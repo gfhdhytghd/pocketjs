@@ -157,6 +157,7 @@
     "./osk": "./framework/src/osk.tsx",
     "./package": "./contracts/spec/pocket-package.ts",
     "./platform": "./framework/src/platform.ts",
+    "./rockbox": "./framework/src/rockbox-services.ts",
     "./vita-package": "./tools/vita-package.ts",
     "./prelude": "./framework/src/prelude.ts",
     "./renderer": "./framework/src/renderer.ts",

@@ -1,12 +1,15 @@
 import {
   copyFileSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractHostBuildInputs } from "../framework/src/manifest/host-build-inputs.ts";
@@ -15,6 +18,13 @@ import {
   ROCKBOX_IPOD_CLASSIC_TARGET_ID,
   resolveRockboxBuildPlan,
 } from "./rockbox-profile.ts";
+import { POCKETROCK_QUICKJS_REVISION } from "./quickjs-bytecode.ts";
+import {
+  POCKET_SECTION,
+  decodePocketPackage,
+  findSection,
+  findVariant,
+} from "../contracts/spec/pocket-package.ts";
 
 const repository = fileURLToPath(new URL("..", import.meta.url));
 const hostDirectory = join(repository, "hosts/rockbox");
@@ -28,7 +38,6 @@ const coreArchive = join(
   coreDirectory,
   "target/armv5te-rockbox-eabi/release/libpocketjs_symbian_core.a",
 );
-const quickJsRevision = "ba5bdd0dc013518768e76cd9e05cd30ed53dd35b";
 const quickJsCheckout = join(outputDirectory, "quickjs-rs");
 const quickJsPatch = join(repository, "tools/rockbox/quickjs.patch");
 const command = Bun.argv[2] ?? "doctor";
@@ -44,6 +53,10 @@ function run(executable: string, args: readonly string[], cwd = repository): voi
   if (result.exitCode !== 0) {
     throw new Error(`${executable} ${args.join(" ")} failed (${result.exitCode})`);
   }
+}
+
+function sha256(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 function quickJsSource(): string | undefined {
@@ -76,7 +89,7 @@ function bootstrap(): void {
     run("git", ["clone", "--filter=blob:none", "--no-checkout",
       "https://github.com/pocket-stack/quickjs-rs.git", quickJsCheckout]);
   }
-  run("git", ["-C", quickJsCheckout, "checkout", "--detach", quickJsRevision]);
+  run("git", ["-C", quickJsCheckout, "checkout", "--detach", POCKETROCK_QUICKJS_REVISION]);
   const reverse = Bun.spawnSync({
     cmd: ["git", "-C", quickJsCheckout, "apply", "--unidiff-zero",
       "--reverse", "--check", quickJsPatch],
@@ -131,6 +144,132 @@ function buildCore(): void {
     "-Z", "json-target-spec", "-Z", "build-std=core,alloc,compiler_builtins",
     "-Z", "build-std-features=compiler-builtins-mem"], coreDirectory);
   if (!existsSync(coreArchive)) throw new Error(`missing Rust core ${coreArchive}`);
+}
+
+function stagePocketRockFirmware(source: string): void {
+  if (!quickJsSource()) bootstrap();
+  buildCore();
+  const shellOut = join(outputDirectory, "pocketrock-shell");
+  run(process.execPath, [
+    join(repository, "tools/pocket.ts"), "build",
+    "--target", "rockbox-ip6g",
+    "--manifest", join(repository, "apps/pocketrock/pocket.json"),
+    "--project-root", repository,
+    "--outdir", shellOut,
+  ]);
+  const packagePath = join(shellOut, "pocketrock-shell.pocket");
+  const variant = findVariant(
+    decodePocketPackage(new Uint8Array(readFileSync(packagePath))),
+    "rockbox-ip6g",
+  );
+  if (!variant || variant.hostAbi !== 10) throw new Error("PocketRock Shell package ABI drift");
+  const bytecode = findSection(variant, POCKET_SECTION.bytecode);
+  const pak = findSection(variant, POCKET_SECTION.pak);
+  if (!bytecode || !pak) throw new Error("PocketRock Shell package lacks bytecode or pak");
+
+  const generated = join(source, "apps/pocketrock/generated");
+  rmSync(generated, { recursive: true, force: true });
+  mkdirSync(join(generated, "sys"), { recursive: true });
+  writeFileSync(
+    join(generated, "app_data.c"),
+    cArray("pocketrock_shell_bytecode", bytecode) +
+      cArray("pocketrock_shell_pak", pak),
+  );
+  const copies: Array<[string, string]> = [
+    [join(repository, "hosts/rockbox/pocketrock_runtime_port.c"), "runtime_port.c"],
+    [join(repository, "hosts/rockbox/pocketrock_service.c"), "service_bridge.c"],
+    [join(repository, "hosts/rockbox/firmware_compat.c"), "firmware_compat.c"],
+    [join(repository, "hosts/rockbox/firmware_compat.h"), "firmware_compat.h"],
+    [join(repository, "hosts/rockbox/sys/time.h"), "sys/time.h"],
+    [join(repository, "hosts/iphone2g/pocket_runtime.c"), "pocket_runtime.c"],
+    [join(repository, "hosts/iphone2g/pocket_runtime.h"), "pocket_runtime.h"],
+    [join(repository, "hosts/iphone2g/pocket_spec.h"), "pocket_spec.h"],
+    [join(repository, "hosts/iphone2g/pocket_core.h"), "pocket_core.h"],
+  ];
+  for (const [from, to] of copies) {
+    copyFileSync(from, join(generated, to));
+  }
+  const quickjs = quickJsSource();
+  if (!quickjs) throw new Error("PocketRock QuickJS source unavailable");
+  for (const name of [
+    "quickjs.c", "quickjs.h", "quickjs-atom.h", "quickjs-opcode.h",
+    "cutils.c", "cutils.h", "list.h", "libregexp.c", "libregexp.h",
+    "libregexp-opcode.h", "libunicode.c", "libunicode.h", "libunicode-table.h",
+    "dtoa.c", "dtoa.h",
+  ]) copyFileSync(join(quickjs, name), join(generated, name));
+  for (const [wrapper, sourceName] of [
+    ["qjs_quickjs.c", "quickjs.c"], ["qjs_cutils.c", "cutils.c"],
+    ["qjs_libregexp.c", "libregexp.c"], ["qjs_libunicode.c", "libunicode.c"],
+    ["qjs_dtoa.c", "dtoa.c"],
+  ]) {
+    writeFileSync(join(generated, wrapper), `#include \"qjs_config.h\"\n#include \"${sourceName}\"\n`);
+  }
+  writeFileSync(join(generated, "qjs_config.h"), [
+    "#ifndef POCKETROCK_QJS_CONFIG_H",
+    "#define POCKETROCK_QJS_CONFIG_H",
+    "#define POCKETJS_NO_MALLOC_USABLE_SIZE 1",
+    "#define POCKETJS_NO_ATOMICS 1",
+    "#define POCKETJS_FIXED_TIMEZONE 1",
+    "#define CONFIG_VERSION \"pocketrock-quickjs-pinned\"",
+    "#include \"firmware_compat.h\"",
+    "#endif",
+    "",
+  ].join("\n"));
+  for (const name of ["tlsf.c", "tlsf.h", "target.h"]) {
+    copyFileSync(join(source, "lib/tlsf/src", name), join(generated, name));
+  }
+  copyFileSync(coreArchive, join(generated, "libpocketrock_runtime.a"));
+  console.log(`PocketRock firmware runtime staged in ${generated}`);
+}
+
+function release(source: string, buildDirectory: string): void {
+  const firmware = join(outputDirectory, "rockbox.ipod");
+  if (!existsSync(firmware)) throw new Error("build PocketRock firmware before release");
+
+  const stage = mkdtempSync(join(tmpdir(), "pocketrock-release-"));
+  const baseZip = process.env.POCKETROCK_BASE_ZIP;
+  if (baseZip) {
+    if (!existsSync(baseZip)) throw new Error(`POCKETROCK_BASE_ZIP not found: ${baseZip}`);
+    run("unzip", ["-q", baseZip, "-d", stage]);
+  } else {
+    run("make", ["NODEPS=1", "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "zip"], buildDirectory);
+    run("unzip", ["-q", join(buildDirectory, "rockbox.zip"), "-d", stage]);
+  }
+
+  const rbdir = join(stage, ".rockbox");
+  mkdirSync(join(rbdir, "pocketrock/apps"), { recursive: true });
+  mkdirSync(join(rbdir, "pocketrock/logs"), { recursive: true });
+  copyFileSync(firmware, join(rbdir, "rockbox.ipod"));
+  writeFileSync(join(rbdir, "pocketrock/apps/README.txt"),
+    "Copy trusted rockbox-ip6g .pocket packages into this directory.\n");
+  writeFileSync(join(rbdir, "pocketrock/NOTICE.txt"), [
+    "PocketRock v0.1 combines Rockbox (GPLv2 or later) with PocketJS (MIT).",
+    `Rockbox baseline: ${process.env.POCKETROCK_ROCKBOX_REVISION ?? "420537c8643cc6ffc844115d2fca9e6129f7ce71"}`,
+    `PocketJS revision: ${process.env.POCKETROCK_POCKETJS_REVISION ?? "working tree"}`,
+    `QuickJS revision: ${POCKETROCK_QUICKJS_REVISION}`,
+    "Corresponding source archives are shipped beside this ZIP.",
+    "Third-party .pocket applications are trusted and can access the iPod volume.",
+    "",
+  ].join("\n"));
+
+  const zip = join(outputDirectory, "pocketrock-ipod6g-rockbox.zip");
+  rmSync(zip, { force: true });
+  run("zip", ["-q", "-r", zip, ".rockbox"], stage);
+  run("git", ["archive", "--format=tar.gz", "-o",
+    join(outputDirectory, "pocketrock-rockbox-source.tar.gz"), "HEAD"], source);
+  run("git", ["archive", "--format=tar.gz", "-o",
+    join(outputDirectory, "pocketrock-pocketjs-source.tar.gz"), "HEAD"], repository);
+
+  const artifacts = [
+    "pocketrock-ipod6g-rockbox.zip",
+    "rockbox.ipod",
+    "pocketrock-rockbox-source.tar.gz",
+    "pocketrock-pocketjs-source.tar.gz",
+  ];
+  writeFileSync(join(outputDirectory, "SHA256SUMS"),
+    artifacts.map((name) => `${sha256(join(outputDirectory, name))}  ${name}`).join("\n") + "\n");
+  rmSync(stage, { recursive: true, force: true });
+  console.log(`PocketRock release artifacts: ${outputDirectory}`);
 }
 
 function copySources(stage: string, quickjs: string): void {
@@ -200,6 +339,38 @@ if (command === "doctor") doctor();
 else if (command === "bootstrap") bootstrap();
 else if (command === "bundle") bundle(manifestPath);
 else if (command === "build") build(manifestPath, false);
+else if (command === "firmware") {
+  const source = resolve(process.env.ROCKBOX_SOURCE ?? "");
+  if (!source || !existsSync(join(source, "tools/configure"))) {
+    throw new Error("set ROCKBOX_SOURCE to the PocketRock Rockbox checkout");
+  }
+  stagePocketRockFirmware(source);
+  const buildDirectory = resolve(process.env.ROCKBOX_BUILD ?? join(outputDirectory, "pocketrock-build"));
+  configureRockbox(source, buildDirectory, false);
+  run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
+    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "dep"], buildDirectory);
+  run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
+    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "bin"], buildDirectory);
+  mkdirSync(outputDirectory, { recursive: true });
+  copyFileSync(join(buildDirectory, "rockbox.ipod"), join(outputDirectory, "rockbox.ipod"));
+  console.log(`PocketRock firmware: ${join(outputDirectory, "rockbox.ipod")}`);
+}
+else if (command === "release") {
+  const source = resolve(process.env.ROCKBOX_SOURCE ?? "");
+  const buildDirectory = resolve(process.env.ROCKBOX_BUILD ?? join(outputDirectory, "pocketrock-build"));
+  if (!source || !existsSync(join(source, "tools/configure"))) {
+    throw new Error("set ROCKBOX_SOURCE to the PocketRock Rockbox checkout");
+  }
+  stagePocketRockFirmware(source);
+  configureRockbox(source, buildDirectory, false);
+  run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
+    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "dep"], buildDirectory);
+  run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
+    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "bin"], buildDirectory);
+  mkdirSync(outputDirectory, { recursive: true });
+  copyFileSync(join(buildDirectory, "rockbox.ipod"), join(outputDirectory, "rockbox.ipod"));
+  release(source, buildDirectory);
+}
 else if (command === "sim") build(manifestPath, true);
 else if (command === "test") {
   mkdirSync(outputDirectory, { recursive: true });
@@ -212,6 +383,6 @@ else if (command === "test") {
   rmSync(join(outputDirectory, "generated"), { recursive: true, force: true });
   rmSync(planPath, { force: true });
 } else {
-  console.error("usage: bun rockbox <doctor|bootstrap|bundle|test|sim|build|clean> [--manifest=path]");
+  console.error("usage: bun rockbox <doctor|bootstrap|bundle|test|sim|build|firmware|release|clean> [--manifest=path]");
   process.exit(1);
 }
