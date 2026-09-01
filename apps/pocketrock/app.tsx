@@ -14,7 +14,25 @@ import {
   system,
   type LibraryKind,
   type PlaybackSnapshot,
+  type SystemSnapshot,
 } from "@pocketjs/framework/rockbox";
+import AppsPage, { type AppsPageEntry } from "./pages/apps-page.tsx";
+import { DisplaySettingsPage, DEFAULT_DISPLAY_SETTINGS } from "./pages/display-settings-page.tsx";
+import { EqPage, DEFAULT_EQ_BANDS, DEFAULT_EQ_PRESETS, type EqBand } from "./pages/eq-page.tsx";
+import FilesPage from "./pages/files-page.tsx";
+import {
+  PocketRockHomePage,
+  PocketRockSettingsPage,
+  POCKETROCK_HOME_DESTINATIONS,
+  POCKETROCK_SETTINGS_DESTINATIONS,
+} from "./pages/home-settings-pages.tsx";
+import LibraryPage from "./pages/library-page.tsx";
+import NowPlayingPage from "./pages/now-playing-page.tsx";
+import PlaybackSettingsPage, { DEFAULT_PLAYBACK_SETTINGS } from "./pages/playback-settings-page.tsx";
+import QueuePage from "./pages/queue-page.tsx";
+import SoundSettingsPage, { type SoundSettingsModel } from "./pages/sound-settings-page.tsx";
+import { PowerPage, StoragePage, SystemInformationPage } from "./pages/system-pages.tsx";
+import UsbPage from "./pages/usb-page.tsx";
 import {
   CONTACT_LIST_HEIGHT,
   CONTACT_ROW_HEIGHT,
@@ -28,7 +46,8 @@ import {
 } from "../../framework/src/ipod-list-motion.ts";
 
 type Page = "Home" | "Now Playing" | "Music" | "Queue" | "Files" |
-  "Pocket Apps" | "Rockbox Apps" | "Settings" | "Library";
+  "Apps" | "Settings" | "Library" | "Sound" | "Equalizer" | "Playback" |
+  "Display" | "Power" | "Storage" | "System Information";
 
 interface Row {
   title: string;
@@ -55,13 +74,7 @@ interface ScreenSnapshot {
   notice: string;
 }
 
-const HOME: readonly Page[] = [
-  "Now Playing", "Music", "Queue", "Files", "Pocket Apps", "Rockbox Apps", "Settings",
-];
 const MUSIC: readonly LibraryKind[] = ["artists", "albums", "tracks", "playlists"];
-const SETTINGS = [
-  "Sound", "Playback", "Display", "Power", "Storage", "System Information",
-];
 const LIST_WINDOW_ROWS = Math.ceil(CONTACT_LIST_HEIGHT / CONTACT_ROW_HEIGHT) + 2;
 const WHEEL_IDLE_FRAMES = 6;
 const TRANSITION_FRAMES = 8;
@@ -163,6 +176,17 @@ function Shell() {
   const [stack, setStack] = createSignal<Route[]>([{ page: "Home", selected: 0, offset: 0 }]);
   const [selected, setSelected] = createSignal(0);
   const [notice, setNotice] = createSignal("");
+  const [soundModel, setSoundModel] = createSignal<SoundSettingsModel>({
+    volume: -1800,
+    balance: 0,
+    bass: 0,
+    treble: 0,
+    channelMode: "Stereo",
+    crossfeed: false,
+  });
+  const [eqEnabled, setEqEnabled] = createSignal(false);
+  const [eqPreset, setEqPreset] = createSignal<string>(DEFAULT_EQ_PRESETS[0]);
+  const [eqBands, setEqBands] = createSignal<EqBand[]>(DEFAULT_EQ_BANDS.map((band) => ({ ...band })));
   const [transitionSnapshot, setTransitionSnapshot] = createSignal<ScreenSnapshot | null>(null);
   let activePanel: NodeMirror | undefined;
   let transitionPanel: NodeMirror | undefined;
@@ -181,20 +205,23 @@ function Shell() {
     try { return playback.snapshot(); } catch { return null; }
   };
 
-  function settingValue(name: string): string | undefined {
-    if (!serviceActive()) return undefined;
-    try {
-      const snapshot = system.snapshot();
-      if (name === "Power") return `${snapshot.batteryPercent}%`;
-      if (name === "Storage") return `${Math.floor(snapshot.freeBytes / 1048576)} MiB free`;
-      if (name === "Display") return snapshot.backlight ? "Backlight on" : "Backlight off";
-    } catch { /* keep settings usable during USB transitions */ }
-    return undefined;
-  }
+  const safeSystem = (): SystemSnapshot | null => {
+    if (!serviceActive()) return null;
+    try { return system.snapshot(); } catch { return null; }
+  };
+
+  const allApps = (): AppsPageEntry[] => (appTable()?.apps ?? []).map((app) => ({
+    title: app.title,
+    id: app.id,
+    kind: app.kind ?? "pocket",
+    path: app.path,
+    builtIn: app.id?.startsWith("dev.pocket-stack."),
+    valid: app.kind === "rockbox" ? Boolean(app.path) : Boolean(app.id),
+  }));
 
   const rows = createMemo<Row[]>(() => {
     switch (page()) {
-    case "Home": return HOME.map((title) => ({ title, action: () => push({ page: title }) }));
+    case "Home": return POCKETROCK_HOME_DESTINATIONS.map((title) => ({ title, action: () => push({ page: title }) }));
     case "Music": return MUSIC.map((kind) => ({ title: titleCase(kind), action: () => openLibrary(kind) }));
     case "Library": return route().libraryRows ?? [];
     case "Queue": {
@@ -207,13 +234,29 @@ function Shell() {
         }));
       } catch (error) { return [{ title: "Queue unavailable", subtitle: String(error) }]; }
     }
-    case "Pocket Apps": return (appTable()?.apps ?? [])
-      .filter((app) => !app.kind || app.kind === "pocket")
-      .map((app) => ({ title: app.title, subtitle: app.id, action: () => launchPackage(app.id) }));
-    case "Rockbox Apps": return (appTable()?.apps ?? [])
-      .filter((app) => app.kind === "rockbox" && app.path)
-      .map((app) => ({ title: app.title, subtitle: app.path, action: () => launchNativePlugin(app.path!) }));
-    case "Settings": return SETTINGS.map((title) => ({ title, subtitle: settingValue(title) }));
+    case "Apps": return allApps().map((app) => ({
+      title: app.title ?? "Untitled package",
+      subtitle: app.path ?? app.id,
+      action: () => app.kind === "rockbox" && app.path
+        ? launchNativePlugin(app.path)
+        : app.id ? launchPackage(app.id) : undefined,
+    }));
+    case "Settings": return POCKETROCK_SETTINGS_DESTINATIONS.map((title) => ({
+      title,
+      action: () => push({ page: title }),
+    }));
+    case "Sound": return ["Volume", "Balance", "Bass", "Treble", "Channel Mode", "Crossfeed", "Equalizer"].map((title) => ({
+      title,
+      action: title === "Equalizer" ? () => push({ page: "Equalizer" }) : undefined,
+    }));
+    case "Equalizer": return ["Enabled", "Preset", ...eqBands().map((band) => band.frequency)].map((title) => ({ title }));
+    case "Playback": return DEFAULT_PLAYBACK_SETTINGS.map((row) => ({ title: row.label, subtitle: row.value }));
+    case "Display": return DEFAULT_DISPLAY_SETTINGS.map((row) => ({ title: row.label }));
+    case "Power": return [
+      { title: "Sleep" },
+      { title: "Power off", action: () => { if (serviceActive()) system.powerOff(); } },
+      { title: "Restart", action: () => { if (serviceActive()) system.reboot(); } },
+    ];
     case "Files": return [{ title: "/", subtitle: "Full-volume browser" }, { title: ".rockbox" }, { title: "Music" }];
     default: return [];
     }
@@ -364,6 +407,163 @@ function Shell() {
     return direction * wheelMultiplier(wheelBurst);
   }
 
+  function cycleEqPreset(direction: -1 | 1): void {
+    const presets = DEFAULT_EQ_PRESETS;
+    const current = Math.max(0, presets.indexOf(eqPreset() as typeof presets[number]));
+    setEqPreset(presets[(current + direction + presets.length) % presets.length]);
+  }
+
+  function adjustCurrent(direction: -1 | 1): void {
+    if (page() === "Now Playing") {
+      if (serviceActive()) direction < 0 ? playback.previous() : playback.next();
+      return;
+    }
+    if (page() === "Sound") {
+      const index = selected();
+      setSoundModel((value) => {
+        if (index === 0) return { ...value, volume: Math.max(-7400, Math.min(0, value.volume + direction * 100)) };
+        if (index === 1) return { ...value, balance: Math.max(-100, Math.min(100, value.balance + direction * 5)) };
+        if (index === 2) return { ...value, bass: Math.max(-24, Math.min(24, value.bass + direction)) };
+        if (index === 3) return { ...value, treble: Math.max(-24, Math.min(24, value.treble + direction)) };
+        if (index === 4) {
+          const modes: SoundSettingsModel["channelMode"][] = ["Stereo", "Mono", "Custom"];
+          const current = modes.indexOf(value.channelMode);
+          return { ...value, channelMode: modes[(current + direction + modes.length) % modes.length] };
+        }
+        if (index === 5) return { ...value, crossfeed: !value.crossfeed };
+        return value;
+      });
+      return;
+    }
+    if (page() === "Equalizer") {
+      const index = selected();
+      if (index === 0) setEqEnabled((value) => !value);
+      else if (index === 1) cycleEqPreset(direction);
+      else setEqBands((bands) => bands.map((band, bandIndex) => bandIndex === index - 2
+        ? { ...band, gain: Math.max(-12, Math.min(12, band.gain + direction)) }
+        : band));
+      return;
+    }
+    if (page() === "Playback" && serviceActive()) {
+      const now = safePlayback();
+      if (selected() === 0) {
+        const values = ["off", "all", "one"];
+        const current = Math.max(0, values.indexOf(now?.repeat ?? "off"));
+        playback.setRepeat(values[(current + direction + values.length) % values.length]);
+      } else if (selected() === 1) playback.setShuffle(!(now?.shuffle ?? false));
+    }
+  }
+
+  function CurrentPage() {
+    const now = safePlayback();
+    const device = safeSystem();
+    if (device && device.usb !== "disconnected") {
+      return <UsbPage connected mode={device.usb === "mass-storage" ? "mass-storage" : "charging"} />;
+    }
+    if (page() === "Home") {
+      return <PocketRockHomePage
+        selected={selected()}
+        nowPlaying={now ? { title: now.title, artist: now.artist, album: now.album, playing: now.status === "playing" } : null}
+        subtitles={{
+          Music: "Artists · Albums · Tracks",
+          Queue: "Current playlist",
+          Files: "iPod storage",
+          Apps: `${allApps().length} installed`,
+          Settings: "Sound · Display · System",
+        }}
+      />;
+    }
+    if (page() === "Now Playing") {
+      const rawVolume = now?.volume ?? -74;
+      const volume = Math.max(0, Math.min(100, Math.round((rawVolume + 74) * 100 / 74)));
+      const repeat = now?.repeat === "one" ? "one" : now?.repeat === "off" ? "off" : "all";
+      return <NowPlayingPage
+        title={now?.title || "Nothing Playing"}
+        artist={now?.artist || "Select a track"}
+        album={now?.album}
+        positionSeconds={(now?.elapsedMs ?? 0) / 1000}
+        durationSeconds={(now?.durationMs ?? 0) / 1000}
+        playing={now?.status === "playing"}
+        volume={volume}
+        shuffle={now?.shuffle ?? false}
+        repeat={repeat}
+        back
+      />;
+    }
+    if (page() === "Music") {
+      return <LibraryPage view="categories" selected={selected()} offset={listScroller.offset()} back />;
+    }
+    if (page() === "Library") {
+      return <LibraryPage
+        view="results"
+        kind={route().libraryKind}
+        items={(route().libraryRows ?? []).map((row, id) => ({ id, title: row.title, subtitle: row.subtitle }))}
+        selected={selected()}
+        offset={listScroller.offset()}
+        state={notice() === "Tagcache scanning" ? "scanning" : "ready"}
+        back
+      />;
+    }
+    if (page() === "Queue") {
+      const items = rows().map((row, index) => ({ index, title: row.title, artist: row.subtitle }));
+      return <QueuePage items={items} selected={selected()} offset={listScroller.offset()} playingIndex={now?.index} back />;
+    }
+    if (page() === "Files") {
+      return <FilesPage
+        path="/"
+        showParent={false}
+        selected={selected()}
+        offset={listScroller.offset()}
+        usbState="normal"
+        entries={[
+          { id: ".rockbox", name: ".rockbox", kind: "directory", subtitle: "Rockbox system" },
+          { id: "Music", name: "Music", kind: "directory", subtitle: "Audio files" },
+          { id: "Playlists", name: "Playlists", kind: "directory", subtitle: "Saved queues" },
+        ]}
+      />;
+    }
+    if (page() === "Apps") {
+      return <AppsPage apps={allApps()} selected={selected()} offset={listScroller.offset()} appTableAvailable={appTable() !== null} />;
+    }
+    if (page() === "Settings") {
+      return <PocketRockSettingsPage selected={selected()} values={{
+        Sound: now ? `${now.volume} dB` : "Audio",
+        Playback: now?.shuffle ? "Shuffle on" : "Repeat / Resume",
+        Display: device?.backlight ? "Backlight on" : "Backlight off",
+        Power: device ? `${device.batteryPercent}%` : "Battery",
+        Storage: device ? `${Math.floor(device.freeBytes / 1048576)} MiB free` : "Storage",
+        "System Information": "PocketRock 0.1",
+      }} />;
+    }
+    if (page() === "Sound") return <SoundSettingsPage model={soundModel()} selected={selected()} adjusting />;
+    if (page() === "Equalizer") return <EqPage
+      enabled={eqEnabled()}
+      preset={eqPreset()}
+      bands={eqBands()}
+      selectedControl={selected() === 0 ? "enabled" : selected() === 1 ? "preset" : "bands"}
+      selectedBand={Math.max(0, selected() - 2)}
+      adjusting={selected() >= 2}
+    />;
+    if (page() === "Playback") {
+      const settings = DEFAULT_PLAYBACK_SETTINGS.map((row, index) => index === 0
+        ? { ...row, value: now?.repeat ?? row.value }
+        : index === 1 ? { ...row, value: now?.shuffle ? "On" : "Off" } : row);
+      return <PlaybackSettingsPage rows={settings} selected={selected()} offset={listScroller.offset()} back />;
+    }
+    if (page() === "Display") return <DisplaySettingsPage rows={DEFAULT_DISPLAY_SETTINGS} selected={selected()} offset={listScroller.offset()} back />;
+    if (page() === "Power") return <PowerPage snapshot={device ?? undefined} selectedAction={selected()} onPowerOff={() => serviceActive() && system.powerOff()} onReboot={() => serviceActive() && system.reboot()} onBack={pop} />;
+    if (page() === "Storage") return <StoragePage snapshot={device ?? undefined} onBack={pop} />;
+    if (page() === "System Information") return <SystemInformationPage info={{
+      pocketRockVersion: "0.1.0",
+      rockboxVersion: "PocketRock",
+      quickJsVersion: "2025-09-13",
+      abiVersion: 10,
+      deviceModel: "iPod Classic 6/7G",
+      deviceName: "PocketRock",
+    }} onBack={pop} />;
+    return <PageSurface {...activeSnapshot()} />;
+  }
+
   onFrame((buttons) => {
     if (transitionFrames > 0) {
       transitionFrames -= 1;
@@ -385,26 +585,19 @@ function Shell() {
   });
 
   onButtonPress(BTN.CIRCLE, () => {
-    if (transitionFrames === 0) rows()[selected()]?.action?.();
+    if (transitionFrames !== 0) return;
+    if (page() === "Equalizer" && selected() < 2) adjustCurrent(1);
+    else rows()[selected()]?.action?.();
   }, { latched: true });
   onButtonPress(BTN.TRIANGLE, pop, { latched: true });
   onButtonPress(BTN.START, () => { if (serviceActive()) playback.toggle(); }, { latched: true });
-  onButtonPress(BTN.LEFT, () => { if (serviceActive()) playback.previous(); }, { latched: true });
-  onButtonPress(BTN.RIGHT, () => { if (serviceActive()) playback.next(); }, { latched: true });
+  onButtonPress(BTN.LEFT, () => adjustCurrent(-1), { latched: true });
+  onButtonPress(BTN.RIGHT, () => adjustCurrent(1), { latched: true });
 
   return (
     <View class="relative w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
       <View ref={(node) => (activePanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
-        <PageSurface
-          page={page()}
-          title={title()}
-          rows={rows()}
-          selected={selected()}
-          offset={listScroller.offset()}
-          back={stack().length > 1}
-          now={safePlayback()}
-          notice={notice()}
-        />
+        <Show when={page()} keyed>{(_currentPage) => <CurrentPage />}</Show>
       </View>
       <Show when={transitionSnapshot()} keyed>{(snapshot) =>
         <View ref={(node) => (transitionPanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
