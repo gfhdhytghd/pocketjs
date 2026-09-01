@@ -12,7 +12,7 @@ Shell owns the normal 320 x 240 user interface.
 - Host ABI: `10`
 - QuickJS: `ba5bdd0dc013518768e76cd9e05cd30ed53dd35b`
 - CPU/display/input: ARM926EJ-S, RGB565 320 x 240, Click Wheel
-- Guest allocation: one releasable Rockbox `core_alloc` arena, capped at 8 MiB
+- Guest allocation: one releasable Rockbox `core_alloc` arena, capped at 12 MiB
 - Native guest thread stack: 512 KiB
 - QuickJS stack limit: 384 KiB
 
@@ -97,6 +97,6 @@ also enter recovery. Runtime logs rotate between two files capped at 64 KiB:
 /.rockbox/pocketrock/logs/runtime.log.1
 ```
 
-Every guest teardown also logs the 8 MiB arena size and TLSF peak allocation,
+Every guest teardown also logs the 12 MiB arena size and TLSF peak allocation,
 so real-device runs can confirm the production budget rather than relying only
 on compile-time constants.

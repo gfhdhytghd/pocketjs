@@ -30,7 +30,7 @@ const repository = fileURLToPath(new URL("..", import.meta.url));
 const hostDirectory = join(repository, "hosts/rockbox");
 const outputDirectory = join(repository, "dist/rockbox");
 const pocketRockCoreFlags =
-  "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME -DPOCKETROCK_MINIMAL_UI -DTLSF_STATISTIC=1 -ffunction-sections -fdata-sections";
+  "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME -DPOCKETROCK_MINIMAL_UI -DPOCKETROCK_ARENA_MIB=12 -DTLSF_STATISTIC=1 -ffunction-sections -fdata-sections";
 const planPath = join(repository, ".pocket/rockbox-ipod-classic-dev/plan.json");
 const embeddedPath = join(outputDirectory, "generated/app_data.c");
 const defaultManifest = join(hostDirectory, "demo.pocket.json");

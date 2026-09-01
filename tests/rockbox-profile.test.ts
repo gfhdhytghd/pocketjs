@@ -85,10 +85,11 @@ describe("Rockbox iPod classic development profile", () => {
     );
   });
 
-  test("enforces the 8 MiB production shell budget", () => {
+  test("enforces the 12 MiB production shell budget", () => {
     expect(productionRuntimePort).toContain(
       "#define POCKET_RUNTIME_JS_STACK_SIZE (384 * 1024)",
     );
+    expect(releaseTool).toContain("-DPOCKETROCK_ARENA_MIB=12");
     expect(releaseTool).toContain("-DPOCKETROCK_MINIMAL_UI");
     expect(releaseTool).toContain("-DTLSF_STATISTIC=1");
     expect(releaseTool).toContain("-ffunction-sections -fdata-sections");
