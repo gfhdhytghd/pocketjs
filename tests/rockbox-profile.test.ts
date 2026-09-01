@@ -89,7 +89,8 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("rowBottom - LIST_HEIGHT");
     expect(contactsPage).toContain("acceleratedWheelDelta(-1)");
     expect(contactsPage).toContain("acceleratedWheelDelta(1)");
-    expect(contactsPage).toContain("wheelBurst >= 12 ? 8");
+    expect(contactsPage).toContain("const WHEEL_ACCEL_MAX_GEAR = 10");
+    expect(contactsPage).toContain("const multiplier = 1 << gear");
     expect(contactsPage).toContain("setDetailIndex(selectedIndex())");
     expect(contactsPage).toContain("style={{ width: 320 }}");
     expect(contactsPage).toContain('top-[36] w-[320] h-[204]');

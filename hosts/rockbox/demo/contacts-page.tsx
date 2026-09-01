@@ -14,6 +14,8 @@ const CONTACT_COUNT = 10_000;
 const ROW_HEIGHT = 30;
 const LIST_HEIGHT = 204;
 const WHEEL_ACCEL_RESET_FRAMES = 6;
+const WHEEL_ACCEL_EVENTS_PER_GEAR = 3;
+const WHEEL_ACCEL_MAX_GEAR = 10;
 const SURNAMES = [
   "Adams", "Bennett", "Carter", "Dawson", "Ellis", "Foster", "Garcia",
   "Hayes", "Irwin", "Jordan", "Keller", "Lewis", "Morris", "Nelson",
@@ -95,7 +97,11 @@ export default function ContactsPage() {
       wheelBurst += 1;
     }
     wheelIdleFrames = 0;
-    const multiplier = wheelBurst >= 12 ? 8 : wheelBurst >= 7 ? 4 : wheelBurst >= 3 ? 2 : 1;
+    const gear = Math.min(
+      WHEEL_ACCEL_MAX_GEAR,
+      Math.floor(wheelBurst / WHEEL_ACCEL_EVENTS_PER_GEAR),
+    );
+    const multiplier = 1 << gear;
     return direction * multiplier;
   };
 
