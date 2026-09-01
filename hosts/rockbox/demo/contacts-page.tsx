@@ -134,7 +134,6 @@ export default function ContactsPage() {
     max: () => CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT,
     extent: () => CONTACT_LIST_HEIGHT,
   });
-  const selected = createMemo(() => contact(destinationIndex()));
   const detail = createMemo(() => contact(detailIndex()));
 
   const resetWheelAcceleration = () => {
@@ -204,8 +203,10 @@ export default function ContactsPage() {
       moveSelection(acceleratedWheelDelta(1));
     } else {
       wheelIdleFrames = Math.min(WHEEL_ACCEL_RESET_FRAMES, wheelIdleFrames + 1);
-      if (wheelDirection !== 0 && wheelIdleFrames === WHEEL_ACCEL_RESET_FRAMES) {
+      if (wheelDirection !== 0 && wheelIdleFrames === 1) {
         settleReleasedSelection();
+      }
+      if (wheelDirection !== 0 && wheelIdleFrames === WHEEL_ACCEL_RESET_FRAMES) {
         resetWheelAcceleration();
       }
     }
@@ -234,23 +235,14 @@ export default function ContactsPage() {
         class="absolute left-0 top-0 w-[320] h-[240] bg-white overflow-hidden"
       >
         <View class="absolute left-0 top-[36] w-[320] h-[204] bg-white overflow-hidden">
+          <View
+            class="absolute left-0 top-0 w-[320] h-[30] bg-[#2378d4]"
+            style={{ translateY: selectionY() }}
+          />
           <RecycledContactList
             scroller={listScroller}
             afterStep={updateVisualSelection}
           />
-          <View
-            class="absolute left-0 top-0 w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-[#2378d4]"
-            style={{ translateY: selectionY() }}
-          >
-            <Text class="w-[62] h-[18] text-sm text-white">{selected().given}</Text>
-            <Text class="w-[174] h-[18] text-sm text-white font-bold">
-              {selected().surname}
-            </Text>
-            <Text class="absolute right-[8] top-[7] w-[50] h-[15] text-xs text-[#dbeafe]">
-              {selected().ordinal}
-            </Text>
-            <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#155da8]" />
-          </View>
         </View>
         <NavigationBar title="All Contacts" />
       </View>

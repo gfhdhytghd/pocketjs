@@ -18,20 +18,20 @@ const MAX_OFFSET = COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
 
 describe("Rockbox contact wheel motion", () => {
   test("keeps slow downward selection inside the viewport before scrolling", () => {
-    for (let index = 1; index <= 4; index++) {
+    for (let index = 1; index <= 5; index++) {
       expect(contactScrollTarget(index, 0, MAX_OFFSET)).toBeNull();
     }
-    const target = contactScrollTarget(5, 0, MAX_OFFSET);
+    const target = contactScrollTarget(6, 0, MAX_OFFSET);
     expect(target).toBe(3);
-    expect(5 * CONTACT_ROW_HEIGHT - target!).toBe(CONTACT_DOWN_ANCHOR_Y);
+    expect(6 * CONTACT_ROW_HEIGHT - target!).toBe(CONTACT_DOWN_ANCHOR_Y);
   });
 
-  test("uses center-relative +2/-2 row resting anchors", () => {
+  test("uses center-relative +3/-3 row resting anchors", () => {
     expect(CONTACT_UP_ANCHOR_Y).toBe(
-      CONTACT_CENTER_ANCHOR_Y - 2 * CONTACT_ROW_HEIGHT,
+      CONTACT_CENTER_ANCHOR_Y - 3 * CONTACT_ROW_HEIGHT,
     );
     expect(CONTACT_DOWN_ANCHOR_Y).toBe(
-      CONTACT_CENTER_ANCHOR_Y + 2 * CONTACT_ROW_HEIGHT,
+      CONTACT_CENTER_ANCHOR_Y + 3 * CONTACT_ROW_HEIGHT,
     );
     const down = contactScrollTarget(20, 0, MAX_OFFSET)!;
     expect(20 * CONTACT_ROW_HEIGHT - down).toBe(CONTACT_DOWN_ANCHOR_Y);
