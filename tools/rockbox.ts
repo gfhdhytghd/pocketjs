@@ -41,6 +41,10 @@ const coreArchive = join(
 const quickJsCheckout = join(outputDirectory, "quickjs-rs");
 const quickJsPatch = join(repository, "tools/rockbox/quickjs.patch");
 const command = Bun.argv[2] ?? "doctor";
+const bundledPocketApps = [
+  ["apps/hero-rockbox/pocket.json", "hero", "hero.pocket"],
+  ["apps/pocketjs-tests/pocket.json", "pocketjs-tests", "pocketjs-tests.pocket"],
+] as const;
 
 function run(executable: string, args: readonly string[], cwd = repository): void {
   const result = Bun.spawnSync({
@@ -146,6 +150,30 @@ function buildCore(): void {
   if (!existsSync(coreArchive)) throw new Error(`missing Rust core ${coreArchive}`);
 }
 
+function buildBundledPocketApps(destination: string): void {
+  mkdirSync(destination, { recursive: true });
+  for (const [manifest, output, installName] of bundledPocketApps) {
+    const outdir = join(outputDirectory, "bundled-apps", output);
+    rmSync(outdir, { recursive: true, force: true });
+    run(process.execPath, [
+      join(repository, "tools/pocket.ts"), "build",
+      "--target", "rockbox-ip6g",
+      "--manifest", join(repository, manifest),
+      "--project-root", repository,
+      "--outdir", outdir,
+    ]);
+    const packagePath = join(outdir, `${output}.pocket`);
+    const variant = findVariant(
+      decodePocketPackage(new Uint8Array(readFileSync(packagePath))),
+      "rockbox-ip6g",
+    );
+    if (!variant || variant.hostAbi !== 10) {
+      throw new Error(`${installName} is not a Rockbox Host ABI 10 package`);
+    }
+    copyFileSync(packagePath, join(destination, installName));
+  }
+}
+
 function stagePocketRockFirmware(source: string): void {
   if (!quickJsSource()) bootstrap();
   buildCore();
@@ -237,11 +265,27 @@ function release(source: string, buildDirectory: string): void {
   }
 
   const rbdir = join(stage, ".rockbox");
-  mkdirSync(join(rbdir, "pocketrock/apps"), { recursive: true });
+  const pocketApps = join(rbdir, "pocketrock/apps");
+  mkdirSync(pocketApps, { recursive: true });
   mkdirSync(join(rbdir, "pocketrock/logs"), { recursive: true });
+  mkdirSync(join(rbdir, "themes"), { recursive: true });
+  mkdirSync(join(rbdir, "wps"), { recursive: true });
   copyFileSync(firmware, join(rbdir, "rockbox.ipod"));
   copyFileSync(join(buildDirectory, "rockbox-info.txt"), join(rbdir, "rockbox-info.txt"));
-  writeFileSync(join(rbdir, "pocketrock/apps/README.txt"),
+  buildBundledPocketApps(pocketApps);
+  copyFileSync(
+    join(repository, "release/rockbox/themes/PocketRock.cfg"),
+    join(rbdir, "themes/PocketRock.cfg"),
+  );
+  copyFileSync(
+    join(repository, "release/rockbox/wps/pocketrock.sbs"),
+    join(rbdir, "wps/pocketrock.sbs"),
+  );
+  copyFileSync(
+    join(repository, "release/rockbox/wps/pocketrock.wps"),
+    join(rbdir, "wps/pocketrock.wps"),
+  );
+  writeFileSync(join(pocketApps, "README.txt"),
     "Copy trusted rockbox-ip6g .pocket packages into this directory.\n");
   writeFileSync(join(rbdir, "pocketrock/NOTICE.txt"), [
     "PocketRock v0.1 combines Rockbox (GPLv2 or later) with PocketJS (MIT).",

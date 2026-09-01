@@ -33,6 +33,21 @@ const pocketRockShell = readFileSync(
   join(root, "apps/pocketrock/app.tsx"),
   "utf8",
 );
+const heroManifest = JSON.parse(
+  readFileSync(join(root, "apps/hero-rockbox/pocket.json"), "utf8"),
+);
+const testsManifest = JSON.parse(
+  readFileSync(join(root, "apps/pocketjs-tests/pocket.json"), "utf8"),
+);
+const testsMain = readFileSync(
+  join(root, "apps/pocketjs-tests/main.tsx"),
+  "utf8",
+);
+const releaseTool = readFileSync(join(root, "tools/rockbox.ts"), "utf8");
+const nativeTheme = readFileSync(
+  join(root, "release/rockbox/themes/PocketRock.cfg"),
+  "utf8",
+);
 
 describe("Rockbox iPod classic development profile", () => {
   test("resolves the embedded 320x240 demo", () => {
@@ -166,5 +181,35 @@ describe("Rockbox iPod classic development profile", () => {
     expect(pocketRockShell).toContain('animate(activePanel, "translateX", 0');
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", 320');
     expect(pocketRockShell).toContain("const TRANSITION_MS = 110");
+  });
+
+  test("ships Hero and hardware tests as production Pocket apps", () => {
+    for (const app of [heroManifest, testsManifest]) {
+      expect(app.app.viewport.fixed).toEqual({
+        logical: [320, 240],
+        presentation: "native",
+      });
+      expect(app.engine.capabilities.requires).toEqual([
+        "input.buttons",
+        "text.glyphs.baked",
+      ]);
+    }
+    expect(heroManifest.name).toBe("hero");
+    expect(testsMain).toContain("<InputTestPage />");
+    expect(testsMain).toContain("<ContactsPage />");
+    expect(testsMain).not.toContain("<StandardPage />");
+    expect(releaseTool).toContain('["apps/hero-rockbox/pocket.json", "hero", "hero.pocket"]');
+    expect(releaseTool).toContain('"pocketjs-tests.pocket"');
+  });
+
+  test("release owns the native compatibility theme", () => {
+    expect(nativeTheme).toContain("foreground color: 18202A");
+    expect(nativeTheme).toContain("background color: F5F6F8");
+    expect(nativeTheme).toContain("line selector start color: 2378D4");
+    expect(nativeTheme).toContain("iconset: -");
+    expect(nativeTheme).toContain("show icons: off");
+    expect(releaseTool).toContain('join(rbdir, "themes/PocketRock.cfg")');
+    expect(releaseTool).toContain('join(rbdir, "wps/pocketrock.sbs")');
+    expect(releaseTool).toContain('join(rbdir, "wps/pocketrock.wps")');
   });
 });

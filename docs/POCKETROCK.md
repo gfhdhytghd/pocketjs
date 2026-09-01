@@ -35,6 +35,27 @@ Installed packages are trusted. PocketRock v0.1 has no signatures, permission
 prompts, or security sandbox. Do not install packages whose source you do not
 trust.
 
+The release installs two first-party packages in that directory:
+
+- `hero.pocket` — the official PocketJS Hero adapted to 320 x 240.
+- `pocketjs-tests.pocket` — the Click Wheel input matrix and 10,000-row
+  contacts/scrolling acceptance pages. Hold Select and press Left or Right to
+  switch pages.
+
+## Native compatibility surface
+
+The normal firmware path never enters Rockbox's root menu. The root-menu
+implementation remains linked only because its helpers are part of the stable
+`.rock` plugin API. Recovery invokes the native file browser directly, while
+PocketRock releases the complete JavaScript arena around every `plugin_load()`
+call exactly as before.
+
+PocketRock also ignores the Rockbox theme selected in `config.cfg`. At boot,
+before a native plugin, and after it returns, the firmware reapplies the fixed
+PocketRock native palette. The release supplies `PocketRock.cfg`,
+`pocketrock.sbs`, and `pocketrock.wps`; third-party theme files may remain on
+disk but are never selected by the PocketRock system path.
+
 ## Build
 
 ```sh
@@ -59,13 +80,13 @@ The output directory contains `pocketrock-ipod6g-rockbox.zip`, `rockbox.ipod`,
 
 ## Recovery
 
-Hold Menu during boot to bypass QuickJS. The native recovery menu can disable
-third-party applications, clear the active application, enter native Rockbox,
-open USB mode, reboot, or power off. Three consecutive Shell startup failures
+Hold Menu during boot to bypass QuickJS. The minimal native recovery menu can
+disable third-party applications, clear the active application, open the file
+browser or USB mode, reboot, or power off. It cannot enter the Rockbox root
+menu. Three consecutive Shell startup failures
 also enter recovery. Runtime logs rotate between two files capped at 64 KiB:
 
 ```text
 /.rockbox/pocketrock/logs/runtime.log
 /.rockbox/pocketrock/logs/runtime.log.1
 ```
-
