@@ -240,6 +240,7 @@ function release(source: string, buildDirectory: string): void {
   mkdirSync(join(rbdir, "pocketrock/apps"), { recursive: true });
   mkdirSync(join(rbdir, "pocketrock/logs"), { recursive: true });
   copyFileSync(firmware, join(rbdir, "rockbox.ipod"));
+  copyFileSync(join(buildDirectory, "rockbox-info.txt"), join(rbdir, "rockbox-info.txt"));
   writeFileSync(join(rbdir, "pocketrock/apps/README.txt"),
     "Copy trusted rockbox-ip6g .pocket packages into this directory.\n");
   writeFileSync(join(rbdir, "pocketrock/NOTICE.txt"), [
