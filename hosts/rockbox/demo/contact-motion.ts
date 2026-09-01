@@ -2,10 +2,9 @@ export const CONTACT_ROW_HEIGHT = 30;
 export const CONTACT_LIST_HEIGHT = 204;
 export const CONTACT_CENTER_ANCHOR_Y =
   (CONTACT_LIST_HEIGHT - CONTACT_ROW_HEIGHT) / 2;
-export const CONTACT_UP_ANCHOR_Y =
-  CONTACT_CENTER_ANCHOR_Y - 3 * CONTACT_ROW_HEIGHT;
+export const CONTACT_UP_ANCHOR_Y = 3 * CONTACT_ROW_HEIGHT;
 export const CONTACT_DOWN_ANCHOR_Y =
-  CONTACT_CENTER_ANCHOR_Y + 3 * CONTACT_ROW_HEIGHT;
+  CONTACT_LIST_HEIGHT - 3 * CONTACT_ROW_HEIGHT;
 export const CONTACT_SPRING_OVERSHOOT = 12;
 export const CONTACT_SPRING_STIFFNESS = 480;
 export const CONTACT_SPRING_DAMPING = 44;
@@ -58,5 +57,6 @@ export function contactScrollTarget(
   } else {
     return null;
   }
-  return Math.max(0, Math.min(maxOffset, target));
+  const clamped = Math.max(0, Math.min(maxOffset, target));
+  return clamped === currentIntent ? null : clamped;
 }

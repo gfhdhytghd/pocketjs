@@ -102,10 +102,13 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("contactScrollTarget(");
     expect(contactsPage).toContain("listScroller.springTo(target");
     expect(contactsPage).toContain("contactSelectionY(");
-    expect(contactsPage).toContain("style={{ translateY: selectionY() }}");
-    expect(contactsPage.indexOf('bg-[#2378d4]')).toBeLessThan(
-      contactsPage.indexOf("<RecycledContactList"),
-    );
+    expect(contactsPage).toContain("style={{ translateY: props.selectionY() }}");
+    const separatorLayer = contactsPage.indexOf("<ContactSeparator />");
+    const selectionLayer = contactsPage.indexOf('bg-[#2378d4]');
+    const textLayer = contactsPage.indexOf("<ContactRow index=");
+    expect(separatorLayer).toBeGreaterThan(-1);
+    expect(separatorLayer).toBeLessThan(selectionLayer);
+    expect(selectionLayer).toBeLessThan(textLayer);
     expect(contactsPage).not.toContain("selected().given");
     expect(contactsPage).not.toContain("selected().surname");
     expect(contactsPage).not.toContain("selected().ordinal");

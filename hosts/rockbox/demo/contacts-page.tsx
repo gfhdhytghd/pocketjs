@@ -79,6 +79,13 @@ function ContactRow(props: { index: Accessor<number> }) {
       <Text class="absolute right-[8] top-[7] w-[50] h-[15] text-xs text-[#8b95a3]">
         {item().ordinal}
       </Text>
+    </View>
+  );
+}
+
+function ContactSeparator() {
+  return (
+    <View class="relative w-[320] h-[30]">
       <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#d5d8dc]" />
     </View>
   );
@@ -86,6 +93,7 @@ function ContactRow(props: { index: Accessor<number> }) {
 
 function RecycledContactList(props: {
   scroller: Scroller;
+  selectionY: Accessor<number>;
   afterStep: () => void;
 }) {
   const [firstIndex, setFirstIndex] = createSignal(0);
@@ -105,6 +113,19 @@ function RecycledContactList(props: {
 
   return (
     <View class="relative w-[320] h-[204] overflow-hidden">
+      <View
+        class="absolute left-0 top-0 w-[320] flex-col"
+        style={{
+          height: CONTACT_WINDOW_ROWS * CONTACT_ROW_HEIGHT,
+          translateY: firstIndex() * CONTACT_ROW_HEIGHT - props.scroller.offset(),
+        }}
+      >
+        <For each={CONTACT_ROW_SLOTS}>{() => <ContactSeparator />}</For>
+      </View>
+      <View
+        class="absolute left-0 top-0 w-[320] h-[30] bg-[#2378d4]"
+        style={{ translateY: props.selectionY() }}
+      />
       <View
         class="absolute left-0 top-0 w-[320] flex-col"
         style={{
@@ -172,9 +193,9 @@ export default function ContactsPage() {
       listScroller.offset(),
       maxOffset,
     );
-    // Wheel pulses have no physical release event. Once the burst timeout
-    // expires, discard all accumulated velocity; only a fresh, non-overshoot
-    // spring may move the list toward its resting anchor.
+    // Freeze the accumulated wheel velocity first. A fresh zero-velocity
+    // spring may then pull the selected row from the half-row clip limit to
+    // the +3/-3 resting anchor; no pre-release momentum survives.
     listScroller.stop();
     if (target !== null) {
       listScroller.springTo(target, {
@@ -235,12 +256,9 @@ export default function ContactsPage() {
         class="absolute left-0 top-0 w-[320] h-[240] bg-white overflow-hidden"
       >
         <View class="absolute left-0 top-[36] w-[320] h-[204] bg-white overflow-hidden">
-          <View
-            class="absolute left-0 top-0 w-[320] h-[30] bg-[#2378d4]"
-            style={{ translateY: selectionY() }}
-          />
           <RecycledContactList
             scroller={listScroller}
+            selectionY={selectionY}
             afterStep={updateVisualSelection}
           />
         </View>
