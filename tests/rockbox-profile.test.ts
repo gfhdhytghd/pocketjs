@@ -94,8 +94,11 @@ describe("Rockbox iPod classic development profile", () => {
       expect(inputPage).toContain(button);
     }
     expect(contactsPage).toContain("const CONTACT_COUNT = 10_000");
-    expect(contactsPage).toContain("<VirtualList");
-    expect(contactsPage).toContain("focusRows={false}");
+    expect(contactsPage).toContain("const CONTACT_WINDOW_ROWS = Math.ceil(");
+    expect(contactsPage).toContain("<RecycledContactList");
+    expect(contactsPage).toContain("<For each={CONTACT_ROW_SLOTS}>");
+    expect(contactsPage).toContain("firstIndex() * CONTACT_ROW_HEIGHT");
+    expect(contactsPage).not.toContain("<VirtualList");
     expect(contactsPage).toContain("contactScrollTarget(");
     expect(contactsPage).toContain("listScroller.springTo(target");
     expect(contactsPage).toContain("contactSelectionY(");
@@ -106,7 +109,10 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("settleReleasedSelection()");
     expect(contactsPage).toContain("listScroller.stop()");
     expect(contactsPage).toContain("setDetailIndex(destinationIndex())");
-    expect(contactsPage).toContain("style={{ width: 320 }}");
+    expect(contactsPage).toContain('class="relative w-[320] h-[204] overflow-hidden"');
+    expect(contactsPage).toContain('w-[62] h-[18] text-sm');
+    expect(contactsPage).toContain('w-[174] h-[18] text-sm');
+    expect(contactsPage).toContain('w-[50] h-[15] text-xs');
     expect(contactsPage).toContain('top-[36] w-[320] h-[204]');
     expect(contactsPage).toContain('{ dur: 110, easing: "out" }');
     expect(contactsPage).toContain('animate(detailPanel, "translateX", 0');

@@ -1,4 +1,4 @@
-import { Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, type Accessor } from "solid-js";
 import { animate } from "@pocketjs/framework/animation";
 import {
   Text,
@@ -6,12 +6,13 @@ import {
   type NodeMirror,
 } from "@pocketjs/framework/components";
 import { BTN } from "@pocketjs/framework/input";
-import { createScroller } from "@pocketjs/framework/kinetics";
+import {
+  createScroller,
+  type Scroller,
+} from "@pocketjs/framework/kinetics";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
-import { VirtualList } from "@pocketjs/framework/virtual-list";
 import {
   CONTACT_LIST_HEIGHT,
-  CONTACT_MAX_OFFSCREEN_PX,
   CONTACT_ROW_HEIGHT,
   CONTACT_SPRING_DAMPING,
   CONTACT_SPRING_OVERSHOOT,
@@ -22,6 +23,11 @@ import {
 } from "./contact-motion.ts";
 
 const CONTACT_COUNT = 10_000;
+const CONTACT_WINDOW_ROWS = Math.ceil(CONTACT_LIST_HEIGHT / CONTACT_ROW_HEIGHT) + 2;
+const CONTACT_ROW_SLOTS = Array.from(
+  { length: CONTACT_WINDOW_ROWS },
+  (_, index) => index,
+);
 const WHEEL_ACCEL_RESET_FRAMES = 6;
 const SURNAMES = [
   "Adams", "Bennett", "Carter", "Dawson", "Ellis", "Foster", "Garcia",
@@ -62,9 +68,56 @@ function NavigationBar(props: { title: string; back?: boolean }) {
   );
 }
 
-function SelectionFollower(props: { update: () => void }) {
-  onFrame(() => props.update());
-  return null;
+function ContactRow(props: { index: Accessor<number> }) {
+  const item = createMemo(() => contact(props.index()));
+  return (
+    <View class="relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8]">
+      <Text class="w-[62] h-[18] text-sm text-[#1c222b]">{item().given}</Text>
+      <Text class="w-[174] h-[18] text-sm text-[#1c222b] font-bold">
+        {item().surname}
+      </Text>
+      <Text class="absolute right-[8] top-[7] w-[50] h-[15] text-xs text-[#8b95a3]">
+        {item().ordinal}
+      </Text>
+      <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#d5d8dc]" />
+    </View>
+  );
+}
+
+function RecycledContactList(props: {
+  scroller: Scroller;
+  afterStep: () => void;
+}) {
+  const [firstIndex, setFirstIndex] = createSignal(0);
+
+  onFrame(() => {
+    props.scroller.step();
+    const first = Math.max(
+      0,
+      Math.min(
+        CONTACT_COUNT - CONTACT_WINDOW_ROWS,
+        Math.floor(props.scroller.offset() / CONTACT_ROW_HEIGHT) - 1,
+      ),
+    );
+    setFirstIndex(first);
+    props.afterStep();
+  });
+
+  return (
+    <View class="relative w-[320] h-[204] overflow-hidden">
+      <View
+        class="absolute left-0 top-0 w-[320] flex-col"
+        style={{
+          height: CONTACT_WINDOW_ROWS * CONTACT_ROW_HEIGHT,
+          translateY: firstIndex() * CONTACT_ROW_HEIGHT - props.scroller.offset(),
+        }}
+      >
+        <For each={CONTACT_ROW_SLOTS}>
+          {(slot) => <ContactRow index={() => firstIndex() + slot} />}
+        </For>
+      </View>
+    </View>
+  );
 }
 
 export default function ContactsPage() {
@@ -174,23 +227,6 @@ export default function ContactsPage() {
     if (detailPanel) animate(detailPanel, "translateX", 320, { dur: 110, easing: "out" });
   }, { latched: true });
 
-  const row = (index: number) => {
-    const item = contact(index);
-    return (
-      <View class="relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-white">
-        <Text class="text-sm text-[#1c222b]">{item.given}</Text>
-        <Text class="ml-[4] text-sm text-[#1c222b] font-bold">
-          {item.surname}
-        </Text>
-        <View class="flex-1" />
-        <Text class="text-xs text-[#8b95a3]">
-          {item.ordinal}
-        </Text>
-        <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#d5d8dc]" />
-      </View>
-    );
-  };
-
   return (
     <View class="relative w-[320] h-[240] bg-white overflow-hidden">
       <View
@@ -198,29 +234,24 @@ export default function ContactsPage() {
         class="absolute left-0 top-0 w-[320] h-[240] bg-white overflow-hidden"
       >
         <View class="absolute left-0 top-[36] w-[320] h-[204] bg-white overflow-hidden">
-          <VirtualList
-            count={CONTACT_COUNT}
-            rowHeight={CONTACT_ROW_HEIGHT}
-            height={CONTACT_LIST_HEIGHT}
-            overscan={CONTACT_MAX_OFFSCREEN_PX + CONTACT_ROW_HEIGHT}
-            controller={listScroller}
-            focusRows={false}
-            inputActive={() => false}
-            renderRow={row}
-            style={{ width: 320 }}
+          <RecycledContactList
+            scroller={listScroller}
+            afterStep={updateVisualSelection}
           />
           <View
             class="absolute left-0 top-0 w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-[#2378d4]"
             style={{ translateY: selectionY() }}
           >
-            <Text class="text-sm text-white">{selected().given}</Text>
-            <Text class="ml-[4] text-sm text-white font-bold">{selected().surname}</Text>
-            <View class="flex-1" />
-            <Text class="text-xs text-[#dbeafe]">{selected().ordinal}</Text>
+            <Text class="w-[62] h-[18] text-sm text-white">{selected().given}</Text>
+            <Text class="w-[174] h-[18] text-sm text-white font-bold">
+              {selected().surname}
+            </Text>
+            <Text class="absolute right-[8] top-[7] w-[50] h-[15] text-xs text-[#dbeafe]">
+              {selected().ordinal}
+            </Text>
             <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#155da8]" />
           </View>
         </View>
-        <SelectionFollower update={updateVisualSelection} />
         <NavigationBar title="All Contacts" />
       </View>
 
