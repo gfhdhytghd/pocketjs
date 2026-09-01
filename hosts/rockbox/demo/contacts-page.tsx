@@ -11,8 +11,12 @@ import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import { VirtualList } from "@pocketjs/framework/virtual-list";
 import {
   CONTACT_LIST_HEIGHT,
+  CONTACT_MAX_OFFSCREEN_PX,
   CONTACT_ROW_HEIGHT,
+  CONTACT_SPRING_DAMPING,
   CONTACT_SPRING_OVERSHOOT,
+  CONTACT_SPRING_STIFFNESS,
+  boundedVisualContactIndex,
   contactScrollTarget,
   wheelMultiplier,
 } from "./contact-motion.ts";
@@ -58,8 +62,14 @@ function NavigationBar(props: { title: string; back?: boolean }) {
   );
 }
 
+function SelectionFollower(props: { update: () => void }) {
+  onFrame(() => props.update());
+  return null;
+}
+
 export default function ContactsPage() {
   const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [destinationIndex, setDestinationIndex] = createSignal(0);
   const [detailIndex, setDetailIndex] = createSignal(0);
   const [detailOpen, setDetailOpen] = createSignal(false);
   let listPanel: NodeMirror | undefined;
@@ -80,14 +90,26 @@ export default function ContactsPage() {
   };
 
   const moveSelection = (delta: number) => {
-    const next = Math.max(0, Math.min(CONTACT_COUNT - 1, selectedIndex() + delta));
-    if (next === selectedIndex()) return;
-    setSelectedIndex(next);
+    const next = Math.max(0, Math.min(CONTACT_COUNT - 1, destinationIndex() + delta));
+    if (next === destinationIndex()) return;
+    setDestinationIndex(next);
     const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
     const target = contactScrollTarget(next, listScroller.intent(), maxOffset);
     if (target !== null) {
-      listScroller.springTo(target, { overshootPx: CONTACT_SPRING_OVERSHOOT });
+      listScroller.springTo(target, {
+        overshootPx: CONTACT_SPRING_OVERSHOOT,
+        stiffness: CONTACT_SPRING_STIFFNESS,
+        damping: CONTACT_SPRING_DAMPING,
+      });
     }
+  };
+
+  const updateVisualSelection = () => {
+    setSelectedIndex(boundedVisualContactIndex(
+      destinationIndex(),
+      listScroller.offset(),
+      CONTACT_COUNT,
+    ));
   };
 
   const acceleratedWheelDelta = (direction: -1 | 1) => {
@@ -115,7 +137,7 @@ export default function ContactsPage() {
   onButtonPress(BTN.CIRCLE, () => {
     if (detailOpen()) return;
     resetWheelAcceleration();
-    setDetailIndex(selectedIndex());
+    setDetailIndex(destinationIndex());
     setDetailOpen(true);
     if (listPanel) animate(listPanel, "translateX", -64, { dur: 110, easing: "out" });
     if (detailPanel) animate(detailPanel, "translateX", 0, { dur: 110, easing: "out" });
@@ -165,7 +187,7 @@ export default function ContactsPage() {
             count={CONTACT_COUNT}
             rowHeight={CONTACT_ROW_HEIGHT}
             height={CONTACT_LIST_HEIGHT}
-            overscan={CONTACT_ROW_HEIGHT * 2}
+            overscan={CONTACT_MAX_OFFSCREEN_PX + CONTACT_ROW_HEIGHT}
             controller={listScroller}
             focusRows={false}
             inputActive={() => false}
@@ -173,6 +195,7 @@ export default function ContactsPage() {
             style={{ width: 320 }}
           />
         </View>
+        <SelectionFollower update={updateVisualSelection} />
         <NavigationBar title="All Contacts" />
       </View>
 

@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   CONTACT_DOWN_ANCHOR_Y,
   CONTACT_LIST_HEIGHT,
+  CONTACT_MAX_OFFSCREEN_PX,
   CONTACT_ROW_HEIGHT,
   CONTACT_UP_ANCHOR_Y,
+  boundedVisualContactIndex,
   contactScrollTarget,
   wheelMultiplier,
 } from "../hosts/rockbox/demo/contact-motion.ts";
@@ -36,6 +38,19 @@ describe("Rockbox contact wheel motion", () => {
     expect(index * CONTACT_ROW_HEIGHT).toBeGreaterThan(CONTACT_LIST_HEIGHT);
     const target = contactScrollTarget(index, 0, MAX_OFFSET)!;
     expect(index * CONTACT_ROW_HEIGHT - target).toBe(CONTACT_DOWN_ANCHOR_Y);
+  });
+
+  test("keeps the painted selection within 1.5 rows beyond either edge", () => {
+    const down = boundedVisualContactIndex(1024, 0, COUNT);
+    const downNearEdge = down * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
+    expect(downNearEdge).toBeGreaterThanOrEqual(0);
+    expect(downNearEdge).toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
+
+    const offset = 3000;
+    const up = boundedVisualContactIndex(0, offset, COUNT);
+    const upNearEdge = offset - (up + 1) * CONTACT_ROW_HEIGHT;
+    expect(upNearEdge).toBeGreaterThanOrEqual(0);
+    expect(upNearEdge).toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
   });
 
   test("clamps at real data edges instead of creating blank contacts", () => {

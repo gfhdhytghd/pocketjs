@@ -215,6 +215,18 @@ describe("retargetable spring", () => {
     expect(trace(s).at(-1)).toBe(900);
   });
 
+  test("accepts stronger per-follow spring constants without changing defaults", () => {
+    const normal = createScroller({ max: () => 2000 });
+    const strong = createScroller({ max: () => 2000 });
+    normal.springTo(1000);
+    strong.springTo(1000, { stiffness: 480, damping: 44 });
+    normal.step();
+    strong.step();
+    expect(strong.offset()).toBeGreaterThan(normal.offset());
+    expect(trace(normal).at(-1)).toBe(1000);
+    expect(trace(strong).at(-1)).toBe(1000);
+  });
+
   test("a reverse target brakes the preserved velocity before moving back", () => {
     const s = createScroller({ max: () => 2000 });
     s.springTo(1200, { overshootPx: 12 });

@@ -89,10 +89,11 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("focusRows={false}");
     expect(contactsPage).toContain("contactScrollTarget(");
     expect(contactsPage).toContain("listScroller.springTo(target");
+    expect(contactsPage).toContain("boundedVisualContactIndex(");
     expect(contactsPage).toContain("acceleratedWheelDelta(-1)");
     expect(contactsPage).toContain("acceleratedWheelDelta(1)");
     expect(contactsPage).toContain("wheelMultiplier(wheelBurst)");
-    expect(contactsPage).toContain("setDetailIndex(selectedIndex())");
+    expect(contactsPage).toContain("setDetailIndex(destinationIndex())");
     expect(contactsPage).toContain("style={{ width: 320 }}");
     expect(contactsPage).toContain('top-[36] w-[320] h-[204]');
     expect(contactsPage).toContain('{ dur: 110, easing: "out" }');

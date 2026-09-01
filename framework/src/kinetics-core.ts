@@ -75,9 +75,13 @@ export interface Scroller {
   /** Chase an absolute target (focus-follow, stick-to-bottom). */
   chaseTo(to: number): void;
   /** Spring toward an absolute target. Repeated calls preserve velocity.
-   *  `overshootPx` adds a bounded approach point beyond the final target,
-   *  then returns to the clamped target. */
-  springTo(to: number, opts?: { overshootPx?: number }): void;
+   *  `overshootPx` adds a bounded approach point beyond the final target;
+   *  stiffness/damping default to the edge-spring constants. */
+  springTo(to: number, opts?: {
+    overshootPx?: number;
+    stiffness?: number;
+    damping?: number;
+  }): void;
   /** Shift offset AND every in-flight anchor by delta after a prepend, so
    *  backfill never moves what the user is looking at (the im rebase). */
   rebase(delta: number): void;
@@ -153,6 +157,8 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
   let springDirection = 0; // approach direction, -1 / 0 / 1
   let springOvershoot = 0;
   let springReturning = false;
+  let springK = SPRING_K;
+  let springC = SPRING_C;
   let tweenFrom = 0;
   let tweenTo = 0;
   let tweenFrames = 1;
@@ -205,6 +211,8 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
     springDirection = 0;
     springOvershoot = 0;
     springReturning = false;
+    springK = SPRING_K;
+    springC = SPRING_C;
     state = "spring";
   }
 
@@ -289,18 +297,30 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
       state = "chase";
     },
 
-    springTo(to: number, o?: { overshootPx?: number }): void {
+    springTo(to: number, o?: {
+      overshootPx?: number;
+      stiffness?: number;
+      damping?: number;
+    }): void {
       const final = clampRange(to);
       const delta = final - pos;
       const direction = delta < 0 ? -1 : delta > 0 ? 1 : 0;
       const requested = o?.overshootPx ?? 0;
       const approach = Number.isFinite(requested) && requested > 0 ? requested : 0;
+      const requestedK = o?.stiffness;
+      const requestedC = o?.damping;
 
       if (state !== "spring" && state !== "fling") v = 0;
       springFinal = final;
       springDirection = direction;
       springOvershoot = direction === 0 ? 0 : approach;
       springReturning = false;
+      springK = requestedK !== undefined && Number.isFinite(requestedK) && requestedK > 0
+        ? requestedK
+        : SPRING_K;
+      springC = requestedC !== undefined && Number.isFinite(requestedC) && requestedC > 0
+        ? requestedC
+        : SPRING_C;
       springBound = final + direction * springOvershoot;
       if (springBound === pos && v === 0) {
         state = "idle";
@@ -389,7 +409,7 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
           }
         } else {
           const b = springBound;
-          const a = SPRING_K * (b - p) - SPRING_C * v;
+          const a = springK * (b - p) - springC * v;
           v += a * TICK_DT;
           p += v * TICK_DT;
           const dist = b - p;
