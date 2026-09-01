@@ -10,6 +10,7 @@ import {
   CONTACT_UP_ANCHOR_Y,
   contactSelectionY,
   contactScrollTarget,
+  contactVisibleIndex,
   wheelMultiplier,
 } from "../hosts/rockbox/demo/contact-motion.ts";
 
@@ -59,6 +60,18 @@ describe("Rockbox contact wheel motion", () => {
     expect(-up).toBe(CONTACT_MAX_OFFSCREEN_PX);
 
     expect(contactSelectionY(12, 300)).toBe(60);
+  });
+
+  test("keeps the real selected contact within 0.5 rows while a remote target sprints", () => {
+    const down = contactVisibleIndex(1024, 0, COUNT);
+    expect(down).toBe(6);
+    expect(down * CONTACT_ROW_HEIGHT + CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT)
+      .toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
+
+    const offset = 30_000;
+    const up = contactVisibleIndex(0, offset, COUNT);
+    expect(offset - up * CONTACT_ROW_HEIGHT)
+      .toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
   });
 
   test("clamps at real data edges instead of creating blank contacts", () => {

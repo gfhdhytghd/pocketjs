@@ -102,6 +102,8 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("contactScrollTarget(");
     expect(contactsPage).toContain("listScroller.springTo(target");
     expect(contactsPage).toContain("contactSelectionY(");
+    expect(contactsPage).toContain("contactVisibleIndex(");
+    expect(contactsPage).toContain("wheelTargetIndex");
     expect(contactsPage).toContain("style={{ translateY: props.selectionY() }}");
     const separatorLayer = contactsPage.indexOf("<ContactSeparator />");
     const selectionLayer = contactsPage.indexOf('bg-[#2378d4]');

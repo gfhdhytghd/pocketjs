@@ -19,6 +19,7 @@ import {
   CONTACT_SPRING_STIFFNESS,
   contactSelectionY,
   contactScrollTarget,
+  contactVisibleIndex,
   wheelMultiplier,
 } from "./contact-motion.ts";
 
@@ -150,6 +151,7 @@ export default function ContactsPage() {
   let detailPanel: NodeMirror | undefined;
   let wheelDirection = 0;
   let wheelBurst = 0;
+  let wheelTargetIndex = 0;
   let wheelIdleFrames = WHEEL_ACCEL_RESET_FRAMES;
   const listScroller = createScroller({
     max: () => CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT,
@@ -160,16 +162,30 @@ export default function ContactsPage() {
   const resetWheelAcceleration = () => {
     wheelDirection = 0;
     wheelBurst = 0;
+    wheelTargetIndex = destinationIndex();
     wheelIdleFrames = WHEEL_ACCEL_RESET_FRAMES;
   };
 
   const moveSelection = (delta: number) => {
-    const next = Math.max(0, Math.min(CONTACT_COUNT - 1, destinationIndex() + delta));
-    if (next === destinationIndex()) return;
-    setDestinationIndex(next);
-    setSelectionY(contactSelectionY(next, listScroller.offset()));
+    const nextTarget = Math.max(
+      0,
+      Math.min(CONTACT_COUNT - 1, wheelTargetIndex + delta),
+    );
+    if (nextTarget === wheelTargetIndex) return;
+    wheelTargetIndex = nextTarget;
+    const nextSelected = contactVisibleIndex(
+      wheelTargetIndex,
+      listScroller.offset(),
+      CONTACT_COUNT,
+    );
+    setDestinationIndex(nextSelected);
+    setSelectionY(contactSelectionY(nextSelected, listScroller.offset()));
     const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
-    const target = contactScrollTarget(next, listScroller.intent(), maxOffset);
+    const target = contactScrollTarget(
+      wheelTargetIndex,
+      listScroller.intent(),
+      maxOffset,
+    );
     if (target !== null) {
       listScroller.springTo(target, {
         overshootPx: CONTACT_SPRING_OVERSHOOT,
@@ -180,16 +196,29 @@ export default function ContactsPage() {
   };
 
   const updateVisualSelection = () => {
+    const nextSelected = contactVisibleIndex(
+      wheelTargetIndex,
+      listScroller.offset(),
+      CONTACT_COUNT,
+    );
+    setDestinationIndex(nextSelected);
     setSelectionY(contactSelectionY(
-      destinationIndex(),
+      nextSelected,
       listScroller.offset(),
     ));
   };
 
   const settleReleasedSelection = () => {
+    const selectedIndex = contactVisibleIndex(
+      wheelTargetIndex,
+      listScroller.offset(),
+      CONTACT_COUNT,
+    );
+    wheelTargetIndex = selectedIndex;
+    setDestinationIndex(selectedIndex);
     const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
     const target = contactScrollTarget(
-      destinationIndex(),
+      selectedIndex,
       listScroller.offset(),
       maxOffset,
     );
@@ -209,6 +238,7 @@ export default function ContactsPage() {
     if (wheelDirection !== direction || wheelIdleFrames >= WHEEL_ACCEL_RESET_FRAMES) {
       wheelDirection = direction;
       wheelBurst = 0;
+      wheelTargetIndex = destinationIndex();
     } else {
       wheelBurst += 1;
     }

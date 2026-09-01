@@ -35,6 +35,30 @@ export function contactSelectionY(
   );
 }
 
+/** Keep the real selected row within the same half-row clip bounds as the
+ * independent selection bar. A remote wheel target may remain far ahead and
+ * drive the sprint, but it cannot become the selected contact until the list
+ * has visually caught up to it. */
+export function contactVisibleIndex(
+  targetIndex: number,
+  offset: number,
+  count: number,
+  maxOffscreenPx = CONTACT_MAX_OFFSCREEN_PX,
+): number {
+  const first = Math.max(
+    0,
+    Math.ceil((offset - maxOffscreenPx) / CONTACT_ROW_HEIGHT),
+  );
+  const last = Math.min(
+    count - 1,
+    Math.floor(
+      (offset + CONTACT_LIST_HEIGHT - CONTACT_ROW_HEIGHT + maxOffscreenPx) /
+        CONTACT_ROW_HEIGHT,
+    ),
+  );
+  return Math.max(first, Math.min(last, targetIndex));
+}
+
 /** Final list offset required to bring a selected row back into the resting
  * band. null means the row can move inside the band without moving the list. */
 export function contactScrollTarget(
