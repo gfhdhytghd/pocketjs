@@ -6,6 +6,7 @@ import {
   ROCKBOX_IPOD_CLASSIC_TARGET_ID,
   resolveRockboxBuildPlan,
 } from "../tools/rockbox-profile.ts";
+import { parseClassLiteral } from "../framework/compiler/tailwind.ts";
 
 const root = join(import.meta.dir, "..");
 const manifest = JSON.parse(
@@ -99,5 +100,17 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain('animate(detailPanel, "translateX", 320');
     expect(demoMain).not.toContain("PAGE_LABELS");
     expect(demoMain).not.toContain("SELECT + LEFT / RIGHT");
+  });
+
+  test("compiles the fixed 320x36 contacts navigation bar", () => {
+    const navigationClass = contactsPage.match(
+      /function NavigationBar[\s\S]*?<View class="([^"]+)"/,
+    )?.[1];
+    expect(navigationClass).toBeDefined();
+    expect(parseClassLiteral(navigationClass!)).not.toBeNull();
+    expect(navigationClass).toContain("w-[320] h-[36]");
+    expect(contactsPage).toContain(
+      'left-0 right-0 bottom-0 h-[1] bg-[#3d4d64]',
+    );
   });
 });

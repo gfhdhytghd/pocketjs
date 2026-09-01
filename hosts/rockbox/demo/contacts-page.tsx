@@ -41,7 +41,7 @@ function contact(index: number) {
 
 function NavigationBar(props: { title: string; back?: boolean }) {
   return (
-    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b] border-b border-[#3d4d64]">
+    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b]">
       <Show when={!props.back}>
         <Text class="text-base text-white font-bold">{props.title}</Text>
       </Show>
@@ -50,6 +50,7 @@ function NavigationBar(props: { title: string; back?: boolean }) {
           <Text class="text-xs text-white font-bold">MENU: Back</Text>
         </View>
       </Show>
+      <View class="absolute left-0 right-0 bottom-0 h-[1] bg-[#3d4d64]" />
     </View>
   );
 }
