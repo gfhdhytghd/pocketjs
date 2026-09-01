@@ -87,11 +87,11 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("const CONTACT_COUNT = 10_000");
     expect(contactsPage).toContain("<VirtualList");
     expect(contactsPage).toContain("focusRows={false}");
-    expect(contactsPage).toContain("rowBottom - LIST_HEIGHT");
+    expect(contactsPage).toContain("contactScrollTarget(");
+    expect(contactsPage).toContain("listScroller.springTo(target");
     expect(contactsPage).toContain("acceleratedWheelDelta(-1)");
     expect(contactsPage).toContain("acceleratedWheelDelta(1)");
-    expect(contactsPage).toContain("const WHEEL_ACCEL_MAX_GEAR = 10");
-    expect(contactsPage).toContain("const multiplier = 1 << gear");
+    expect(contactsPage).toContain("wheelMultiplier(wheelBurst)");
     expect(contactsPage).toContain("setDetailIndex(selectedIndex())");
     expect(contactsPage).toContain("style={{ width: 320 }}");
     expect(contactsPage).toContain('top-[36] w-[320] h-[204]');

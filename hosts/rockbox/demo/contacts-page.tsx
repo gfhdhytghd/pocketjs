@@ -9,13 +9,16 @@ import { BTN } from "@pocketjs/framework/input";
 import { createScroller } from "@pocketjs/framework/kinetics";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import { VirtualList } from "@pocketjs/framework/virtual-list";
+import {
+  CONTACT_LIST_HEIGHT,
+  CONTACT_ROW_HEIGHT,
+  CONTACT_SPRING_OVERSHOOT,
+  contactScrollTarget,
+  wheelMultiplier,
+} from "./contact-motion.ts";
 
 const CONTACT_COUNT = 10_000;
-const ROW_HEIGHT = 30;
-const LIST_HEIGHT = 204;
 const WHEEL_ACCEL_RESET_FRAMES = 6;
-const WHEEL_ACCEL_EVENTS_PER_GEAR = 3;
-const WHEEL_ACCEL_MAX_GEAR = 10;
 const SURNAMES = [
   "Adams", "Bennett", "Carter", "Dawson", "Ellis", "Foster", "Garcia",
   "Hayes", "Irwin", "Jordan", "Keller", "Lewis", "Morris", "Nelson",
@@ -65,8 +68,8 @@ export default function ContactsPage() {
   let wheelBurst = 0;
   let wheelIdleFrames = WHEEL_ACCEL_RESET_FRAMES;
   const listScroller = createScroller({
-    max: () => CONTACT_COUNT * ROW_HEIGHT - LIST_HEIGHT,
-    extent: () => LIST_HEIGHT,
+    max: () => CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT,
+    extent: () => CONTACT_LIST_HEIGHT,
   });
   const detail = createMemo(() => contact(detailIndex()));
 
@@ -80,13 +83,10 @@ export default function ContactsPage() {
     const next = Math.max(0, Math.min(CONTACT_COUNT - 1, selectedIndex() + delta));
     if (next === selectedIndex()) return;
     setSelectedIndex(next);
-    const offset = listScroller.offset();
-    const rowTop = next * ROW_HEIGHT;
-    const rowBottom = rowTop + ROW_HEIGHT;
-    if (rowTop < offset) {
-      listScroller.scrollTo(rowTop, { immediate: true });
-    } else if (rowBottom > offset + LIST_HEIGHT) {
-      listScroller.scrollTo(rowBottom - LIST_HEIGHT, { immediate: true });
+    const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
+    const target = contactScrollTarget(next, listScroller.intent(), maxOffset);
+    if (target !== null) {
+      listScroller.springTo(target, { overshootPx: CONTACT_SPRING_OVERSHOOT });
     }
   };
 
@@ -98,12 +98,7 @@ export default function ContactsPage() {
       wheelBurst += 1;
     }
     wheelIdleFrames = 0;
-    const gear = Math.min(
-      WHEEL_ACCEL_MAX_GEAR,
-      Math.floor(wheelBurst / WHEEL_ACCEL_EVENTS_PER_GEAR),
-    );
-    const multiplier = 1 << gear;
-    return direction * multiplier;
+    return direction * wheelMultiplier(wheelBurst);
   };
 
   onFrame((buttons) => {
@@ -168,9 +163,9 @@ export default function ContactsPage() {
         <View class="absolute left-0 top-[36] w-[320] h-[204] bg-white overflow-hidden">
           <VirtualList
             count={CONTACT_COUNT}
-            rowHeight={ROW_HEIGHT}
-            height={LIST_HEIGHT}
-            overscan={ROW_HEIGHT * 2}
+            rowHeight={CONTACT_ROW_HEIGHT}
+            height={CONTACT_LIST_HEIGHT}
+            overscan={CONTACT_ROW_HEIGHT * 2}
             controller={listScroller}
             focusRows={false}
             inputActive={() => false}
