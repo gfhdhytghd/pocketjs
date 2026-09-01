@@ -17,6 +17,10 @@ const runtimePort = readFileSync(
   join(root, "hosts/rockbox/runtime_port.c"),
   "utf8",
 );
+const productionRuntimePort = readFileSync(
+  join(root, "hosts/rockbox/pocketrock_runtime_port.c"),
+  "utf8",
+);
 const demoMain = readFileSync(
   join(root, "hosts/rockbox/demo/main.tsx"),
   "utf8",
@@ -79,6 +83,15 @@ describe("Rockbox iPod classic development profile", () => {
     expect(runtimePort).toContain(
       "#define POCKET_RUNTIME_JS_STACK_SIZE (8 * 1024 * 1024)",
     );
+  });
+
+  test("enforces the 8 MiB production shell budget", () => {
+    expect(productionRuntimePort).toContain(
+      "#define POCKET_RUNTIME_JS_STACK_SIZE (384 * 1024)",
+    );
+    expect(releaseTool).toContain("-DPOCKETROCK_MINIMAL_UI");
+    expect(releaseTool).toContain("-DTLSF_STATISTIC=1");
+    expect(releaseTool).toContain("-ffunction-sections -fdata-sections");
   });
 
   test("renders native RGB565 and presents only the damaged LCD region", () => {

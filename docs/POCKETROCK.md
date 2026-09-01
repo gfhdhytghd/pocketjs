@@ -12,7 +12,9 @@ Shell owns the normal 320 x 240 user interface.
 - Host ABI: `10`
 - QuickJS: `ba5bdd0dc013518768e76cd9e05cd30ed53dd35b`
 - CPU/display/input: ARM926EJ-S, RGB565 320 x 240, Click Wheel
-- Guest allocation: one releasable Rockbox `core_alloc` arena, capped at 16 MiB
+- Guest allocation: one releasable Rockbox `core_alloc` arena, capped at 8 MiB
+- Native guest thread stack: 512 KiB
+- QuickJS stack limit: 384 KiB
 
 The embedded Shell and each installed application run as bytecode produced by
 the fixed QuickJS revision. One realm exists at a time. Starting a native
@@ -44,11 +46,15 @@ The release installs two first-party packages in that directory:
 
 ## Native compatibility surface
 
-The normal firmware path never enters Rockbox's root menu. The root-menu
-implementation remains linked only because its helpers are part of the stable
-`.rock` plugin API. Recovery invokes the native file browser directly, while
-PocketRock releases the complete JavaScript arena around every `plugin_load()`
-call exactly as before.
+The normal firmware path never enters Rockbox's root menu. Native boot progress,
+voice notices, and user-selected skin loading are disabled by the production
+build. Recovery is a small direct-framebuffer screen rather than a Rockbox menu.
+
+Rockbox list, menu, keyboard, browser, and skin implementations remain linked
+only as a `.rock` compatibility layer. Their function pointers are fields of
+the stable `plugin_api`; deleting the implementations would make existing
+plugins crash when they call those entries. PocketRock releases the complete
+JavaScript arena around every `plugin_load()` call.
 
 PocketRock also ignores the Rockbox theme selected in `config.cfg`. At boot,
 before a native plugin, and after it returns, the firmware reapplies the fixed
@@ -80,13 +86,17 @@ The output directory contains `pocketrock-ipod6g-rockbox.zip`, `rockbox.ipod`,
 
 ## Recovery
 
-Hold Menu during boot to bypass QuickJS. The minimal native recovery menu can
-disable third-party applications, clear the active application, open the file
-browser or USB mode, reboot, or power off. It cannot enter the Rockbox root
-menu. Three consecutive Shell startup failures
+Hold Menu during boot to bypass QuickJS. The minimal native recovery screen can
+disable third-party applications, clear the active application, enter USB mode,
+reboot, or power off. It cannot enter the Rockbox root menu or file browser.
+Three consecutive Shell startup failures
 also enter recovery. Runtime logs rotate between two files capped at 64 KiB:
 
 ```text
 /.rockbox/pocketrock/logs/runtime.log
 /.rockbox/pocketrock/logs/runtime.log.1
 ```
+
+Every guest teardown also logs the 8 MiB arena size and TLSF peak allocation,
+so real-device runs can confirm the production budget rather than relying only
+on compile-time constants.

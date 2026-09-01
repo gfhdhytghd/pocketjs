@@ -29,6 +29,8 @@ import {
 const repository = fileURLToPath(new URL("..", import.meta.url));
 const hostDirectory = join(repository, "hosts/rockbox");
 const outputDirectory = join(repository, "dist/rockbox");
+const pocketRockCoreFlags =
+  "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME -DPOCKETROCK_MINIMAL_UI -DTLSF_STATISTIC=1 -ffunction-sections -fdata-sections";
 const planPath = join(repository, ".pocket/rockbox-ipod-classic-dev/plan.json");
 const embeddedPath = join(outputDirectory, "generated/app_data.c");
 const defaultManifest = join(hostDirectory, "demo.pocket.json");
@@ -260,7 +262,7 @@ function release(source: string, buildDirectory: string): void {
     if (!existsSync(baseZip)) throw new Error(`POCKETROCK_BASE_ZIP not found: ${baseZip}`);
     run("unzip", ["-q", baseZip, "-d", stage]);
   } else {
-    run("make", ["NODEPS=1", "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "zip"], buildDirectory);
+    run("make", ["NODEPS=1", pocketRockCoreFlags, "zip"], buildDirectory);
     run("unzip", ["-q", join(buildDirectory, "rockbox.zip"), "-d", stage]);
   }
 
@@ -393,9 +395,9 @@ else if (command === "firmware") {
   const buildDirectory = resolve(process.env.ROCKBOX_BUILD ?? join(outputDirectory, "pocketrock-build"));
   configureRockbox(source, buildDirectory, false);
   run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
-    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "dep"], buildDirectory);
+    pocketRockCoreFlags, "dep"], buildDirectory);
   run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
-    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "bin"], buildDirectory);
+    pocketRockCoreFlags, "bin"], buildDirectory);
   mkdirSync(outputDirectory, { recursive: true });
   copyFileSync(join(buildDirectory, "rockbox.ipod"), join(outputDirectory, "rockbox.ipod"));
   console.log(`PocketRock firmware: ${join(outputDirectory, "rockbox.ipod")}`);
@@ -409,9 +411,9 @@ else if (command === "release") {
   stagePocketRockFirmware(source);
   configureRockbox(source, buildDirectory, false);
   run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
-    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "dep"], buildDirectory);
+    pocketRockCoreFlags, "dep"], buildDirectory);
   run("make", ["-j", String(Math.max(1, navigator.hardwareConcurrency ?? 1)),
-    "EXTRA_DEFINES+=-DHAVE_POCKETROCK_RUNTIME", "bin"], buildDirectory);
+    pocketRockCoreFlags, "bin"], buildDirectory);
   mkdirSync(outputDirectory, { recursive: true });
   copyFileSync(join(buildDirectory, "rockbox.ipod"), join(outputDirectory, "rockbox.ipod"));
   release(source, buildDirectory);
