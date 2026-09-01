@@ -45,7 +45,7 @@ export default function StandardPage() {
   });
 
   return (
-    <View class="w-full h-full flex-col justify-between p-[16] pb-[24] bg-gradient-to-b from-slate-50 to-slate-100">
+    <View class="w-[320] h-[240] flex-col justify-between p-[16] bg-gradient-to-b from-slate-50 to-slate-100">
       <View class="flex-row items-center justify-between">
         <View class="flex-row items-center gap-[8]">
           <Image class="w-[34] h-[34] rounded-[8] shadow" src="logo.png" />

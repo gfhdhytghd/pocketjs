@@ -118,7 +118,6 @@ function vpHit(): number[] {
 
 interface MountOpts {
   count?: () => number;
-  dpadStepPx?: number;
   onRowPress?: (i: number) => void;
   focusRows?: boolean;
   stickToBottom?: boolean;
@@ -136,7 +135,6 @@ function mountList(opts: MountOpts = {}): VirtualListHandle {
       rowHeight: 10,
       height: 50,
       overscan: 20,
-      dpadStepPx: opts.dpadStepPx,
       focusRows: opts.focusRows,
       onRowPress: opts.onRowPress,
       stickToBottom: opts.stickToBottom,
@@ -226,18 +224,6 @@ describe("d-pad focus", () => {
     frame(BTN.DOWN); // controller resumes from its own index
     for (let i = 0; i < 30; i++) frame(0);
     expect(h.focusedIndex()).not.toBeNull();
-  });
-});
-
-describe("d-pad scrolling", () => {
-  test("uses the host-tuned held-frame step when rows do not own focus", () => {
-    const h = mountList({ focusRows: false, dpadStepPx: 30 });
-    frame(BTN.DOWN);
-    expect(h.scroller.intent()).toBe(30);
-    frame(BTN.DOWN);
-    expect(h.scroller.intent()).toBe(60);
-    frame(BTN.UP);
-    expect(h.scroller.intent()).toBe(30);
   });
 });
 

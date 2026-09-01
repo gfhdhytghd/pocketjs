@@ -1,8 +1,13 @@
 import { Show, createMemo, createSignal } from "solid-js";
-import { Text, View } from "@pocketjs/framework/components";
+import { animate } from "@pocketjs/framework/animation";
+import {
+  Text,
+  View,
+  type NodeMirror,
+} from "@pocketjs/framework/components";
 import { BTN } from "@pocketjs/framework/input";
 import { createScroller } from "@pocketjs/framework/kinetics";
-import { onButtonPress } from "@pocketjs/framework/lifecycle";
+import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import { VirtualList } from "@pocketjs/framework/virtual-list";
 
 const CONTACT_COUNT = 10_000;
@@ -34,7 +39,9 @@ function contact(index: number) {
 function NavigationBar(props: { title: string; back?: boolean }) {
   return (
     <View class="relative w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b] border-b border-[#3d4d64]">
-      <Text class="text-base text-white font-bold">{props.title}</Text>
+      <Show when={!props.back}>
+        <Text class="text-base text-white font-bold">{props.title}</Text>
+      </Show>
       <Show when={props.back}>
         <View class="absolute left-[5] top-[6] h-[24] px-[8] flex-row items-center rounded-[4] bg-[#71839e] border border-[#40516a]">
           <Text class="text-xs text-white font-bold">MENU: Back</Text>
@@ -45,28 +52,54 @@ function NavigationBar(props: { title: string; back?: boolean }) {
 }
 
 export default function ContactsPage() {
-  const [detailIndex, setDetailIndex] = createSignal<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = createSignal(0);
+  const [detailIndex, setDetailIndex] = createSignal(0);
+  const [detailOpen, setDetailOpen] = createSignal(false);
+  let listPanel: NodeMirror | undefined;
+  let detailPanel: NodeMirror | undefined;
   const listScroller = createScroller({
     max: () => CONTACT_COUNT * ROW_HEIGHT - LIST_HEIGHT,
     extent: () => LIST_HEIGHT,
   });
-  const currentIndex = createMemo(() => Math.max(
-    0,
-    Math.min(CONTACT_COUNT - 1, Math.round(listScroller.offset() / ROW_HEIGHT)),
-  ));
-  const current = createMemo(() => contact(currentIndex()));
-  const detail = createMemo(() => contact(detailIndex() ?? currentIndex()));
+  const detail = createMemo(() => contact(detailIndex()));
+
+  const moveSelection = (delta: number) => {
+    const next = Math.max(0, Math.min(CONTACT_COUNT - 1, selectedIndex() + delta));
+    if (next === selectedIndex()) return;
+    setSelectedIndex(next);
+    const offset = listScroller.offset();
+    const rowTop = next * ROW_HEIGHT;
+    const rowBottom = rowTop + ROW_HEIGHT;
+    if (rowTop < offset) {
+      listScroller.scrollTo(rowTop, { immediate: true });
+    } else if (rowBottom > offset + LIST_HEIGHT) {
+      listScroller.scrollTo(rowBottom - LIST_HEIGHT, { immediate: true });
+    }
+  };
+
+  onFrame((buttons) => {
+    if (detailOpen()) return;
+    if ((buttons & BTN.UP) !== 0) moveSelection(-1);
+    else if ((buttons & BTN.DOWN) !== 0) moveSelection(1);
+  });
 
   onButtonPress(BTN.CIRCLE, () => {
-    if (detailIndex() === null) setDetailIndex(currentIndex());
+    if (detailOpen()) return;
+    setDetailIndex(selectedIndex());
+    setDetailOpen(true);
+    if (listPanel) animate(listPanel, "translateX", -64, { dur: 180, easing: "out" });
+    if (detailPanel) animate(detailPanel, "translateX", 0, { dur: 180, easing: "out" });
   }, { latched: true });
   onButtonPress(BTN.TRIANGLE, () => {
-    if (detailIndex() !== null) setDetailIndex(null);
+    if (!detailOpen()) return;
+    setDetailOpen(false);
+    if (listPanel) animate(listPanel, "translateX", 0, { dur: 180, easing: "out" });
+    if (detailPanel) animate(detailPanel, "translateX", 320, { dur: 180, easing: "out" });
   }, { latched: true });
 
   const row = (index: number) => {
     const item = contact(index);
-    const active = () => currentIndex() === index;
+    const active = () => selectedIndex() === index;
     return (
       <View class={active()
         ? "relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-[#2378d4]"
@@ -92,32 +125,10 @@ export default function ContactsPage() {
 
   return (
     <View class="relative w-[320] h-[240] bg-white overflow-hidden">
-      <Show when={detailIndex() === null} fallback={
-        <View class="w-[320] h-[240] flex-col bg-[#c5ccd3]">
-          <NavigationBar title="Contact Info" back />
-          <View class="flex-1 flex-col px-[14] pt-[14]">
-            <View class="h-[56] flex-col justify-center px-[12] rounded-[8] bg-white border border-[#a4abb3]">
-              <Text class="text-lg text-[#15181c] font-bold">{detail().given} {detail().surname}</Text>
-              <Text class="text-xs text-[#6a727b]">Contact {detail().ordinal} of 10,000</Text>
-            </View>
-            <View class="h-[10]" />
-            <View class="h-[72] flex-col rounded-[8] bg-white border border-[#a4abb3] overflow-hidden">
-              <View class="h-[35] flex-row items-center px-[10]">
-                <Text class="w-[55] text-xs text-[#55677d] font-bold">mobile</Text>
-                <Text class="text-sm text-[#15181c]">{detail().phone}</Text>
-              </View>
-              <View class="h-[1] bg-[#c9ced4]" />
-              <View class="h-[35] flex-row items-center px-[10]">
-                <Text class="w-[55] text-xs text-[#55677d] font-bold">email</Text>
-                <Text class="text-sm text-[#1b4fa8]">{detail().email}</Text>
-              </View>
-            </View>
-            <View class="flex-1" />
-            <Text class="text-xs text-[#596979]">Press MENU to return to the list</Text>
-            <View class="h-[22]" />
-          </View>
-        </View>
-      }>
+      <View
+        ref={(node) => (listPanel = node)}
+        class="absolute left-0 top-0 w-[320] h-[240] bg-white"
+      >
         <NavigationBar title="All Contacts" />
         <VirtualList
           count={CONTACT_COUNT}
@@ -126,16 +137,38 @@ export default function ContactsPage() {
           overscan={ROW_HEIGHT * 2}
           controller={listScroller}
           focusRows={false}
-          dpadStepPx={ROW_HEIGHT}
+          inputActive={() => false}
           renderRow={row}
           style={{ width: 320 }}
         />
-        <View class="absolute right-[5] bottom-[5] h-[18] px-[7] flex-row items-center rounded-[9] bg-[#1e3a5fcc]">
-          <Text class="text-xs text-white font-bold">
-            {current().given} {current().surname} · {current().ordinal}
-          </Text>
+      </View>
+
+      <View
+        ref={(node) => (detailPanel = node)}
+        class="absolute left-0 top-0 w-[320] h-[240] flex-col bg-[#c5ccd3]"
+        style={{ translateX: 320 }}
+      >
+        <NavigationBar title="Contact Info" back />
+        <View class="flex-1 flex-col px-[14] pt-[14]">
+          <View class="h-[56] flex-col justify-center px-[12] rounded-[8] bg-white border border-[#a4abb3]">
+            <Text class="text-lg text-[#15181c] font-bold">{detail().given} {detail().surname}</Text>
+            <Text class="text-xs text-[#6a727b]">Contact {detail().ordinal} of 10,000</Text>
+          </View>
+          <View class="h-[10]" />
+          <View class="h-[72] flex-col rounded-[8] bg-white border border-[#a4abb3] overflow-hidden">
+            <View class="h-[35] flex-row items-center px-[10]">
+              <Text class="w-[55] text-xs text-[#55677d] font-bold">mobile</Text>
+              <Text class="text-sm text-[#15181c]">{detail().phone}</Text>
+            </View>
+            <View class="h-[1] bg-[#c9ced4]" />
+            <View class="h-[35] flex-row items-center px-[10]">
+              <Text class="w-[55] text-xs text-[#55677d] font-bold">email</Text>
+              <Text class="text-sm text-[#1b4fa8]">{detail().email}</Text>
+            </View>
+          </View>
+          <View class="flex-1" />
         </View>
-      </Show>
+      </View>
     </View>
   );
 }

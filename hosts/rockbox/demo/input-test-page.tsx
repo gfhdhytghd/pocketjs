@@ -60,7 +60,7 @@ export default function InputTestPage() {
   const active = (mask: number) => ((held() | flash()) & mask) !== 0;
 
   return (
-    <View class="w-full h-full flex-col bg-[#101722] px-[14] pt-[12] pb-[22]">
+    <View class="w-[320] h-[240] flex-col bg-[#101722] p-[14]">
       <Text class="text-lg text-white font-bold">Hardware Input Test</Text>
       <Text class="text-xs text-[#7f95b2]">Green means held or recently pulsed</Text>
 

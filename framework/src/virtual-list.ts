@@ -77,9 +77,6 @@ export interface VirtualListProps {
   /** Rows are Focusable and the d-pad drives a focused index (default).
    *  false: rows are plain views and the d-pad scrolls the im way. */
   focusRows?: boolean;
-  /** Logical pixels added to the scroll target for each held d-pad frame when
-   *  focusRows is false. Default 6. Click wheels commonly use one row. */
-  dpadStepPx?: number;
   onRowPress?: (index: number) => void;
   /** Fired every frame while the offset is within nearStartPx of the top —
    *  guard with your own loading/hasMore flags (the im convention). */
@@ -232,7 +229,7 @@ export function VirtualList(props: VirtualListProps): SolidJSX.Element {
         }
       });
     } else {
-      bindDpadScroll(scroller, { active, stepPx: props.dpadStepPx });
+      bindDpadScroll(scroller, { active });
     }
   });
 

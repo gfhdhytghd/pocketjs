@@ -86,8 +86,14 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain("const CONTACT_COUNT = 10_000");
     expect(contactsPage).toContain("<VirtualList");
     expect(contactsPage).toContain("focusRows={false}");
-    expect(contactsPage).toContain("dpadStepPx={ROW_HEIGHT}");
-    expect(contactsPage).toContain("setDetailIndex(currentIndex())");
+    expect(contactsPage).toContain("moveSelection(-1)");
+    expect(contactsPage).toContain("moveSelection(1)");
+    expect(contactsPage).toContain("rowBottom - LIST_HEIGHT");
+    expect(contactsPage).toContain("setDetailIndex(selectedIndex())");
     expect(contactsPage).toContain("style={{ width: 320 }}");
+    expect(contactsPage).toContain('animate(detailPanel, "translateX", 0');
+    expect(contactsPage).toContain('animate(detailPanel, "translateX", 320');
+    expect(demoMain).not.toContain("PAGE_LABELS");
+    expect(demoMain).not.toContain("SELECT + LEFT / RIGHT");
   });
 });
