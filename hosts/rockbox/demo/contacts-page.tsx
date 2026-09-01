@@ -13,6 +13,7 @@ import { VirtualList } from "@pocketjs/framework/virtual-list";
 const CONTACT_COUNT = 10_000;
 const ROW_HEIGHT = 30;
 const LIST_HEIGHT = 204;
+const WHEEL_ACCEL_RESET_FRAMES = 6;
 const SURNAMES = [
   "Adams", "Bennett", "Carter", "Dawson", "Ellis", "Foster", "Garcia",
   "Hayes", "Irwin", "Jordan", "Keller", "Lewis", "Morris", "Nelson",
@@ -38,7 +39,7 @@ function contact(index: number) {
 
 function NavigationBar(props: { title: string; back?: boolean }) {
   return (
-    <View class="relative w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b] border-b border-[#3d4d64]">
+    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b] border-b border-[#3d4d64]">
       <Show when={!props.back}>
         <Text class="text-base text-white font-bold">{props.title}</Text>
       </Show>
@@ -57,11 +58,20 @@ export default function ContactsPage() {
   const [detailOpen, setDetailOpen] = createSignal(false);
   let listPanel: NodeMirror | undefined;
   let detailPanel: NodeMirror | undefined;
+  let wheelDirection = 0;
+  let wheelBurst = 0;
+  let wheelIdleFrames = WHEEL_ACCEL_RESET_FRAMES;
   const listScroller = createScroller({
     max: () => CONTACT_COUNT * ROW_HEIGHT - LIST_HEIGHT,
     extent: () => LIST_HEIGHT,
   });
   const detail = createMemo(() => contact(detailIndex()));
+
+  const resetWheelAcceleration = () => {
+    wheelDirection = 0;
+    wheelBurst = 0;
+    wheelIdleFrames = WHEEL_ACCEL_RESET_FRAMES;
+  };
 
   const moveSelection = (delta: number) => {
     const next = Math.max(0, Math.min(CONTACT_COUNT - 1, selectedIndex() + delta));
@@ -77,24 +87,43 @@ export default function ContactsPage() {
     }
   };
 
+  const acceleratedWheelDelta = (direction: -1 | 1) => {
+    if (wheelDirection !== direction || wheelIdleFrames >= WHEEL_ACCEL_RESET_FRAMES) {
+      wheelDirection = direction;
+      wheelBurst = 0;
+    } else {
+      wheelBurst += 1;
+    }
+    wheelIdleFrames = 0;
+    const multiplier = wheelBurst >= 12 ? 8 : wheelBurst >= 7 ? 4 : wheelBurst >= 3 ? 2 : 1;
+    return direction * multiplier;
+  };
+
   onFrame((buttons) => {
     if (detailOpen()) return;
-    if ((buttons & BTN.UP) !== 0) moveSelection(-1);
-    else if ((buttons & BTN.DOWN) !== 0) moveSelection(1);
+    if ((buttons & BTN.UP) !== 0) {
+      moveSelection(acceleratedWheelDelta(-1));
+    } else if ((buttons & BTN.DOWN) !== 0) {
+      moveSelection(acceleratedWheelDelta(1));
+    } else {
+      wheelIdleFrames = Math.min(WHEEL_ACCEL_RESET_FRAMES, wheelIdleFrames + 1);
+    }
   });
 
   onButtonPress(BTN.CIRCLE, () => {
     if (detailOpen()) return;
+    resetWheelAcceleration();
     setDetailIndex(selectedIndex());
     setDetailOpen(true);
-    if (listPanel) animate(listPanel, "translateX", -64, { dur: 180, easing: "out" });
-    if (detailPanel) animate(detailPanel, "translateX", 0, { dur: 180, easing: "out" });
+    if (listPanel) animate(listPanel, "translateX", -64, { dur: 110, easing: "out" });
+    if (detailPanel) animate(detailPanel, "translateX", 0, { dur: 110, easing: "out" });
   }, { latched: true });
   onButtonPress(BTN.TRIANGLE, () => {
     if (!detailOpen()) return;
+    resetWheelAcceleration();
     setDetailOpen(false);
-    if (listPanel) animate(listPanel, "translateX", 0, { dur: 180, easing: "out" });
-    if (detailPanel) animate(detailPanel, "translateX", 320, { dur: 180, easing: "out" });
+    if (listPanel) animate(listPanel, "translateX", 0, { dur: 110, easing: "out" });
+    if (detailPanel) animate(detailPanel, "translateX", 320, { dur: 110, easing: "out" });
   }, { latched: true });
 
   const row = (index: number) => {
@@ -127,29 +156,30 @@ export default function ContactsPage() {
     <View class="relative w-[320] h-[240] bg-white overflow-hidden">
       <View
         ref={(node) => (listPanel = node)}
-        class="absolute left-0 top-0 w-[320] h-[240] bg-white"
+        class="absolute left-0 top-0 w-[320] h-[240] bg-white overflow-hidden"
       >
+        <View class="absolute left-0 top-[36] w-[320] h-[204] bg-white overflow-hidden">
+          <VirtualList
+            count={CONTACT_COUNT}
+            rowHeight={ROW_HEIGHT}
+            height={LIST_HEIGHT}
+            overscan={ROW_HEIGHT * 2}
+            controller={listScroller}
+            focusRows={false}
+            inputActive={() => false}
+            renderRow={row}
+            style={{ width: 320 }}
+          />
+        </View>
         <NavigationBar title="All Contacts" />
-        <VirtualList
-          count={CONTACT_COUNT}
-          rowHeight={ROW_HEIGHT}
-          height={LIST_HEIGHT}
-          overscan={ROW_HEIGHT * 2}
-          controller={listScroller}
-          focusRows={false}
-          inputActive={() => false}
-          renderRow={row}
-          style={{ width: 320 }}
-        />
       </View>
 
       <View
         ref={(node) => (detailPanel = node)}
-        class="absolute left-0 top-0 w-[320] h-[240] flex-col bg-[#c5ccd3]"
+        class="absolute left-0 top-0 w-[320] h-[240] bg-[#c5ccd3] overflow-hidden"
         style={{ translateX: 320 }}
       >
-        <NavigationBar title="Contact Info" back />
-        <View class="flex-1 flex-col px-[14] pt-[14]">
+        <View class="absolute left-0 top-[36] w-[320] h-[204] flex-col px-[14] pt-[14] bg-[#c5ccd3] overflow-hidden">
           <View class="h-[56] flex-col justify-center px-[12] rounded-[8] bg-white border border-[#a4abb3]">
             <Text class="text-lg text-[#15181c] font-bold">{detail().given} {detail().surname}</Text>
             <Text class="text-xs text-[#6a727b]">Contact {detail().ordinal} of 10,000</Text>
@@ -168,6 +198,7 @@ export default function ContactsPage() {
           </View>
           <View class="flex-1" />
         </View>
+        <NavigationBar title="Contact Info" back />
       </View>
     </View>
   );
