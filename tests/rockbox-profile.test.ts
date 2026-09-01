@@ -29,6 +29,10 @@ const contactsPage = readFileSync(
   join(root, "hosts/rockbox/demo/contacts-page.tsx"),
   "utf8",
 );
+const pocketRockShell = readFileSync(
+  join(root, "apps/pocketrock/app.tsx"),
+  "utf8",
+);
 
 describe("Rockbox iPod classic development profile", () => {
   test("resolves the embedded 320x240 demo", () => {
@@ -143,5 +147,24 @@ describe("Rockbox iPod classic development profile", () => {
     expect(contactsPage).toContain(
       'left-0 right-0 bottom-0 h-[1] bg-[#3d4d64]',
     );
+  });
+
+  test("reuses the contacts motion and page transition in PocketRock", () => {
+    expect(pocketRockShell).toContain('from "../../framework/src/ipod-list-motion.ts"');
+    expect(pocketRockShell).toContain("wheelMultiplier(wheelBurst)");
+    expect(pocketRockShell).toContain("contactVisibleIndex(");
+    expect(pocketRockShell).toContain("contactSelectionY(");
+    expect(pocketRockShell).toContain("listScroller.stop()");
+    expect(pocketRockShell).toContain("wheelIdleFrames === 1");
+    const separators = pocketRockShell.indexOf('bg-[#d5d9df]');
+    const selection = pocketRockShell.indexOf('bg-[#2378d4]');
+    const text = pocketRockShell.indexOf("{row.title}");
+    expect(separators).toBeGreaterThan(-1);
+    expect(separators).toBeLessThan(selection);
+    expect(selection).toBeLessThan(text);
+    expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", -64');
+    expect(pocketRockShell).toContain('animate(activePanel, "translateX", 0');
+    expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", 320');
+    expect(pocketRockShell).toContain("const TRANSITION_MS = 110");
   });
 });

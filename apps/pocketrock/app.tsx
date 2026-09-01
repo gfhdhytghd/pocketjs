@@ -3,6 +3,7 @@ import { animate, jump } from "@pocketjs/framework/animation";
 import { Text, View, type NodeMirror } from "@pocketjs/framework/components";
 import { getOps } from "@pocketjs/framework/host";
 import { BTN } from "@pocketjs/framework/input";
+import { createScroller } from "@pocketjs/framework/kinetics";
 import { appTable, launchNativePlugin, launchPackage } from "@pocketjs/framework/launcher";
 import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
 import { mount } from "@pocketjs/framework/solid";
@@ -14,6 +15,17 @@ import {
   type LibraryKind,
   type PlaybackSnapshot,
 } from "@pocketjs/framework/rockbox";
+import {
+  CONTACT_LIST_HEIGHT,
+  CONTACT_ROW_HEIGHT,
+  CONTACT_SPRING_DAMPING,
+  CONTACT_SPRING_OVERSHOOT,
+  CONTACT_SPRING_STIFFNESS,
+  contactSelectionY,
+  contactScrollTarget,
+  contactVisibleIndex,
+  wheelMultiplier,
+} from "../../framework/src/ipod-list-motion.ts";
 
 type Page = "Home" | "Now Playing" | "Music" | "Queue" | "Files" |
   "Pocket Apps" | "Rockbox Apps" | "Settings" | "Library";
@@ -24,6 +36,25 @@ interface Row {
   action?: () => void;
 }
 
+interface Route {
+  page: Page;
+  selected: number;
+  offset: number;
+  libraryKind?: LibraryKind;
+  libraryRows?: Row[];
+}
+
+interface ScreenSnapshot {
+  page: Page;
+  title: string;
+  rows: Row[];
+  selected: number;
+  offset: number;
+  back: boolean;
+  now: PlaybackSnapshot | null;
+  notice: string;
+}
+
 const HOME: readonly Page[] = [
   "Now Playing", "Music", "Queue", "Files", "Pocket Apps", "Rockbox Apps", "Settings",
 ];
@@ -31,10 +62,10 @@ const MUSIC: readonly LibraryKind[] = ["artists", "albums", "tracks", "playlists
 const SETTINGS = [
   "Sound", "Playback", "Display", "Power", "Storage", "System Information",
 ];
-const ROW_H = 30;
-const LIST_TOP = 36;
-const VISIBLE_ROWS = 6;
-const WHEEL_IDLE = 6;
+const LIST_WINDOW_ROWS = Math.ceil(CONTACT_LIST_HEIGHT / CONTACT_ROW_HEIGHT) + 2;
+const WHEEL_IDLE_FRAMES = 6;
+const TRANSITION_FRAMES = 8;
+const TRANSITION_MS = 110;
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -42,29 +73,107 @@ function titleCase(value: string): string {
 
 function TopBar(props: { title: string; back: boolean }) {
   return (
-    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#b9c5d7] via-[#8394ad] to-[#63758f] border-b border-[#3d4e66]">
-      <Show when={props.back}>
-        <Text class="absolute left-[8] top-[10] text-xs text-white font-bold">MENU</Text>
+    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b]">
+      <Show when={!props.back}>
+        <Text class="text-base text-white font-bold">{props.title}</Text>
       </Show>
-      <Text class="text-base text-white font-bold">{props.title}</Text>
-      <Text class="absolute right-[8] top-[10] text-xs text-[#e7edf5]">PocketRock</Text>
+      <Show when={props.back}>
+        <View class="absolute left-[5] top-[6] h-[24] px-[8] flex-row items-center rounded-[4] bg-[#71839e] border border-[#40516a]">
+          <Text class="text-xs text-white font-bold">MENU: Back</Text>
+        </View>
+        <Text class="text-base text-white font-bold">{props.title}</Text>
+      </Show>
+      <View class="absolute left-0 right-0 bottom-0 h-[1] bg-[#3d4d64]" />
+    </View>
+  );
+}
+
+function ListSurface(props: { rows: Row[]; selected: number; offset: number }) {
+  const first = createMemo(() => Math.max(
+    0,
+    Math.min(
+      Math.max(0, props.rows.length - LIST_WINDOW_ROWS),
+      Math.floor(props.offset / CONTACT_ROW_HEIGHT) - 1,
+    ),
+  ));
+  const visible = createMemo(() => props.rows.slice(first(), first() + LIST_WINDOW_ROWS));
+  const translateY = createMemo(() => first() * CONTACT_ROW_HEIGHT - props.offset);
+
+  return (
+    <View class="absolute left-0 top-[36] w-[320] h-[204] bg-[#f5f6f8] overflow-hidden">
+      <View class="absolute left-0 top-0 w-[320] flex-col" style={{ translateY: translateY() }}>
+        <For each={visible()}>{(_, index) => {
+          const rowIndex = () => first() + index();
+          return (
+            <View class="relative w-[320] h-[30]">
+              <Show when={
+                rowIndex() + 1 < props.rows.length &&
+                rowIndex() !== props.selected &&
+                rowIndex() + 1 !== props.selected
+              }>
+                <View class="absolute left-[12] right-0 bottom-0 h-[1] bg-[#d5d9df]" />
+              </Show>
+            </View>
+          );
+        }}</For>
+      </View>
+
+      <Show when={props.rows.length > 0}>
+        <View
+          class="absolute left-0 top-0 w-[320] h-[30] bg-[#2378d4]"
+          style={{ translateY: contactSelectionY(props.selected, props.offset) }}
+        />
+      </Show>
+
+      <View class="absolute left-0 top-0 w-[320] flex-col" style={{ translateY: translateY() }}>
+        <For each={visible()}>{(row) =>
+          <View class="relative w-[320] h-[30] flex-col justify-center pl-[12] pr-[9]">
+            <Text class="text-sm text-[#18202a] font-bold">{row.title}</Text>
+            <Show when={row.subtitle}>
+              <Text class="absolute right-[9] top-[9] text-xs text-[#687484]">{row.subtitle}</Text>
+            </Show>
+          </View>
+        }</For>
+      </View>
+    </View>
+  );
+}
+
+function PageSurface(props: ScreenSnapshot) {
+  return (
+    <View class="absolute left-0 top-0 w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
+      <Show when={props.page === "Now Playing"} fallback={
+        <ListSurface rows={props.rows} selected={props.selected} offset={props.offset} />
+      }>
+        <View class="absolute left-0 top-[36] w-[320] h-[204] flex-col items-center pt-[20] bg-[#18212e]">
+          <View class="w-[112] h-[112] rounded-[8] bg-gradient-to-b from-[#3a4658] to-[#202938] border border-[#586579]" />
+          <Text class="mt-[9] text-base text-white font-bold">{props.now?.title ?? "Nothing Playing"}</Text>
+          <Text class="text-xs text-[#aeb9c8]">{props.now?.artist ?? "SELECT a track"}</Text>
+        </View>
+      </Show>
+      <TopBar title={props.title} back={props.back} />
+      <Show when={props.notice}>
+        <Text class="absolute left-[8] bottom-[5] text-xs text-[#697586]">{props.notice}</Text>
+      </Show>
     </View>
   );
 }
 
 function Shell() {
-  const [stack, setStack] = createSignal<Page[]>(["Home"]);
+  const [stack, setStack] = createSignal<Route[]>([{ page: "Home", selected: 0, offset: 0 }]);
   const [selected, setSelected] = createSignal(0);
-  const [libraryKind, setLibraryKind] = createSignal<LibraryKind>("artists");
-  const [libraryRows, setLibraryRows] = createSignal<Row[]>([]);
   const [notice, setNotice] = createSignal("");
-  let pageNode: NodeMirror | undefined;
+  const [transitionSnapshot, setTransitionSnapshot] = createSignal<ScreenSnapshot | null>(null);
+  let activePanel: NodeMirror | undefined;
+  let transitionPanel: NodeMirror | undefined;
   let wheelDirection = 0;
   let wheelBurst = 0;
-  let wheelIdle = WHEEL_IDLE;
-  let pendingPopFrames = 0;
+  let wheelTargetIndex = 0;
+  let wheelIdleFrames = WHEEL_IDLE_FRAMES;
+  let transitionFrames = 0;
 
-  const page = createMemo(() => stack()[stack().length - 1]);
+  const route = createMemo(() => stack()[stack().length - 1]);
+  const page = createMemo(() => route().page);
   const serviceActive = () => typeof getOps().pocketrockCall === "function";
 
   const safePlayback = (): PlaybackSnapshot | null => {
@@ -72,14 +181,22 @@ function Shell() {
     try { return playback.snapshot(); } catch { return null; }
   };
 
+  function settingValue(name: string): string | undefined {
+    if (!serviceActive()) return undefined;
+    try {
+      const snapshot = system.snapshot();
+      if (name === "Power") return `${snapshot.batteryPercent}%`;
+      if (name === "Storage") return `${Math.floor(snapshot.freeBytes / 1048576)} MiB free`;
+      if (name === "Display") return snapshot.backlight ? "Backlight on" : "Backlight off";
+    } catch { /* keep settings usable during USB transitions */ }
+    return undefined;
+  }
+
   const rows = createMemo<Row[]>(() => {
     switch (page()) {
-    case "Home": return HOME.map((title) => ({ title, action: () => push(title) }));
-    case "Music": return MUSIC.map((kind) => ({
-      title: titleCase(kind),
-      action: () => openLibrary(kind),
-    }));
-    case "Library": return libraryRows();
+    case "Home": return HOME.map((title) => ({ title, action: () => push({ page: title }) }));
+    case "Music": return MUSIC.map((kind) => ({ title: titleCase(kind), action: () => openLibrary(kind) }));
+    case "Library": return route().libraryRows ?? [];
     case "Queue": {
       if (!serviceActive()) return [{ title: "Queue unavailable", subtitle: "Host ABI 10 required" }];
       try {
@@ -95,125 +212,205 @@ function Shell() {
       .map((app) => ({ title: app.title, subtitle: app.id, action: () => launchPackage(app.id) }));
     case "Rockbox Apps": return (appTable()?.apps ?? [])
       .filter((app) => app.kind === "rockbox" && app.path)
-      .map((app) => ({
-        title: app.title,
-        subtitle: app.path,
-        action: () => launchNativePlugin(app.path!),
-      }));
+      .map((app) => ({ title: app.title, subtitle: app.path, action: () => launchNativePlugin(app.path!) }));
     case "Settings": return SETTINGS.map((title) => ({ title, subtitle: settingValue(title) }));
     case "Files": return [{ title: "/", subtitle: "Full-volume browser" }, { title: ".rockbox" }, { title: "Music" }];
     default: return [];
     }
   });
 
-  function settingValue(name: string): string | undefined {
-    if (!serviceActive()) return undefined;
-    try {
-      const snapshot = system.snapshot();
-      if (name === "Power") return `${snapshot.batteryPercent}%`;
-      if (name === "Storage") return `${Math.floor(snapshot.freeBytes / 1048576)} MiB free`;
-      if (name === "Display") return snapshot.backlight ? "Backlight on" : "Backlight off";
-    } catch { /* keep the settings page usable during USB transitions */ }
-    return undefined;
+  const maxOffset = () => Math.max(0, rows().length * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT);
+  const listScroller = createScroller({ max: maxOffset, extent: () => CONTACT_LIST_HEIGHT });
+  const title = () => page() === "Library"
+    ? titleCase(route().libraryKind ?? "artists")
+    : page();
+
+  const activeSnapshot = (): ScreenSnapshot => ({
+    page: page(),
+    title: title(),
+    rows: rows(),
+    selected: selected(),
+    offset: listScroller.offset(),
+    back: stack().length > 1,
+    now: safePlayback(),
+    notice: notice(),
+  });
+  const saveCurrentRoute = (): Route => ({
+    ...route(),
+    selected: selected(),
+    offset: listScroller.offset(),
+  });
+
+  function resetWheel(nextSelected: number): void {
+    wheelDirection = 0;
+    wheelBurst = 0;
+    wheelTargetIndex = nextSelected;
+    wheelIdleFrames = WHEEL_IDLE_FRAMES;
   }
 
-  function animateIn(): void {
-    if (!pageNode) return;
-    jump(pageNode, "translateX", 320);
-    animate(pageNode, "translateX", 0, { dur: 95, easing: "out" });
+  function restoreRoute(next: Route): void {
+    listScroller.stop();
+    listScroller.scrollTo(next.offset, { immediate: true });
+    setSelected(next.selected);
+    resetWheel(next.selected);
   }
 
-  function push(next: Page): void {
-    setSelected(0);
-    setStack((value) => [...value, next]);
-    queueMicrotask(animateIn);
+  function beginTransition(snapshot: ScreenSnapshot, direction: "push" | "pop"): void {
+    setTransitionSnapshot(snapshot);
+    transitionFrames = TRANSITION_FRAMES;
+    queueMicrotask(() => {
+      if (!activePanel || !transitionPanel) return;
+      if (direction === "push") {
+        jump(activePanel, "translateX", 320);
+        jump(transitionPanel, "translateX", 0);
+        animate(transitionPanel, "translateX", -64, { dur: TRANSITION_MS, easing: "out" });
+        animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
+      } else {
+        jump(activePanel, "translateX", -64);
+        jump(transitionPanel, "translateX", 0);
+        animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
+        animate(transitionPanel, "translateX", 320, { dur: TRANSITION_MS, easing: "out" });
+      }
+    });
+  }
+
+  function push(next: Pick<Route, "page"> & Partial<Route>): void {
+    if (transitionFrames > 0) return;
+    const snapshot = activeSnapshot();
+    const current = saveCurrentRoute();
+    const destination: Route = {
+      page: next.page,
+      selected: next.selected ?? 0,
+      offset: next.offset ?? 0,
+      libraryKind: next.libraryKind,
+      libraryRows: next.libraryRows,
+    };
+    setStack((value) => [...value.slice(0, -1), current, destination]);
+    restoreRoute(destination);
+    beginTransition(snapshot, "push");
   }
 
   function pop(): void {
-    if (stack().length <= 1 || pendingPopFrames > 0) return;
-    if (pageNode) animate(pageNode, "translateX", 320, { dur: 90, easing: "out" });
-    pendingPopFrames = 6;
+    if (stack().length <= 1 || transitionFrames > 0) return;
+    const snapshot = activeSnapshot();
+    const destination = stack()[stack().length - 2];
+    setStack((value) => value.slice(0, -1));
+    restoreRoute(destination);
+    beginTransition(snapshot, "pop");
   }
 
   function openLibrary(kind: LibraryKind): void {
-    setLibraryKind(kind);
+    let libraryRows: Row[];
     if (!serviceActive()) {
-      setLibraryRows([{ title: "Library unavailable", subtitle: "Tagcache service is offline" }]);
+      libraryRows = [{ title: "Library unavailable", subtitle: "Tagcache service is offline" }];
     } else {
       try {
         const result = library.page(kind, 0, 64);
-        setLibraryRows(result.items.map((item) => ({ title: item.title, subtitle: item.subtitle })));
+        libraryRows = result.items.map((item) => ({ title: item.title, subtitle: item.subtitle }));
         if (result.scanning) setNotice("Tagcache scanning");
       } catch (error) {
-        setLibraryRows([{ title: "Library unavailable", subtitle: String(error) }]);
+        libraryRows = [{ title: "Library unavailable", subtitle: String(error) }];
       }
     }
-    push("Library");
+    push({ page: "Library", libraryKind: kind, libraryRows });
   }
 
-  function wheelMove(direction: -1 | 1): void {
-    if (wheelDirection !== direction || wheelIdle >= WHEEL_IDLE) {
+  function moveSelection(delta: number): void {
+    const count = rows().length;
+    if (count === 0) return;
+    const nextTarget = Math.max(0, Math.min(count - 1, wheelTargetIndex + delta));
+    if (nextTarget === wheelTargetIndex) return;
+    wheelTargetIndex = nextTarget;
+    setSelected(contactVisibleIndex(nextTarget, listScroller.offset(), count));
+    const target = contactScrollTarget(nextTarget, listScroller.intent(), maxOffset());
+    if (target !== null) {
+      listScroller.springTo(target, {
+        overshootPx: CONTACT_SPRING_OVERSHOOT,
+        stiffness: CONTACT_SPRING_STIFFNESS,
+        damping: CONTACT_SPRING_DAMPING,
+      });
+    }
+  }
+
+  function updateVisualSelection(): void {
+    if (rows().length === 0) return;
+    setSelected(contactVisibleIndex(wheelTargetIndex, listScroller.offset(), rows().length));
+  }
+
+  function settleReleasedSelection(): void {
+    if (rows().length === 0) return;
+    const nextSelected = contactVisibleIndex(wheelTargetIndex, listScroller.offset(), rows().length);
+    wheelTargetIndex = nextSelected;
+    setSelected(nextSelected);
+    const target = contactScrollTarget(nextSelected, listScroller.offset(), maxOffset());
+    listScroller.stop();
+    if (target !== null) {
+      listScroller.springTo(target, {
+        stiffness: CONTACT_SPRING_STIFFNESS,
+        damping: CONTACT_SPRING_DAMPING,
+      });
+    }
+  }
+
+  function acceleratedWheelDelta(direction: -1 | 1): number {
+    if (wheelDirection !== direction || wheelIdleFrames >= WHEEL_IDLE_FRAMES) {
       wheelDirection = direction;
       wheelBurst = 0;
-    } else wheelBurst = Math.min(10, wheelBurst + 1);
-    wheelIdle = 0;
-    const multiplier = 1 << wheelBurst;
-    const max = Math.max(0, rows().length - 1);
-    setSelected((value) => Math.max(0, Math.min(max, value + direction * multiplier)));
+      wheelTargetIndex = selected();
+    } else {
+      wheelBurst += 1;
+    }
+    wheelIdleFrames = 0;
+    return direction * wheelMultiplier(wheelBurst);
   }
 
   onFrame((buttons) => {
-    if (pendingPopFrames > 0 && --pendingPopFrames === 0) {
-      setStack((value) => value.slice(0, -1));
-      setSelected(0);
-      if (pageNode) jump(pageNode, "translateX", 0);
+    if (transitionFrames > 0) {
+      transitionFrames -= 1;
+      if (transitionFrames === 0) {
+        setTransitionSnapshot(null);
+        if (activePanel) jump(activePanel, "translateX", 0);
+      }
       return;
     }
-    if ((buttons & BTN.UP) !== 0) wheelMove(-1);
-    else if ((buttons & BTN.DOWN) !== 0) wheelMove(1);
+    listScroller.step();
+    updateVisualSelection();
+    if ((buttons & BTN.UP) !== 0) moveSelection(acceleratedWheelDelta(-1));
+    else if ((buttons & BTN.DOWN) !== 0) moveSelection(acceleratedWheelDelta(1));
     else {
-      wheelIdle = Math.min(WHEEL_IDLE, wheelIdle + 1);
-      if (wheelIdle === WHEEL_IDLE) { wheelDirection = 0; wheelBurst = 0; }
+      wheelIdleFrames = Math.min(WHEEL_IDLE_FRAMES, wheelIdleFrames + 1);
+      if (wheelDirection !== 0 && wheelIdleFrames === 1) settleReleasedSelection();
+      if (wheelDirection !== 0 && wheelIdleFrames === WHEEL_IDLE_FRAMES) resetWheel(selected());
     }
   });
-  onButtonPress(BTN.CIRCLE, () => rows()[selected()]?.action?.(), { latched: true });
+
+  onButtonPress(BTN.CIRCLE, () => {
+    if (transitionFrames === 0) rows()[selected()]?.action?.();
+  }, { latched: true });
   onButtonPress(BTN.TRIANGLE, pop, { latched: true });
   onButtonPress(BTN.START, () => { if (serviceActive()) playback.toggle(); }, { latched: true });
   onButtonPress(BTN.LEFT, () => { if (serviceActive()) playback.previous(); }, { latched: true });
   onButtonPress(BTN.RIGHT, () => { if (serviceActive()) playback.next(); }, { latched: true });
 
-  const first = createMemo(() => Math.max(0, selected() - (VISIBLE_ROWS - 1)));
-  const visible = createMemo(() => rows().slice(first(), first() + VISIBLE_ROWS));
-  const now = createMemo(safePlayback);
-
   return (
     <View class="relative w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
-      <View ref={(node) => (pageNode = node)} class="absolute left-0 top-0 w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
-        <Show when={page() === "Now Playing"} fallback={
-          <View class="absolute left-0 top-[36] w-[320] h-[204] overflow-hidden">
-            <View class="absolute left-0 top-0 w-[320] h-[30] bg-[#247bd5]" style={{ translateY: (selected() - first()) * ROW_H }} />
-            <View class="absolute left-0 top-0 w-[320] flex-col">
-              <For each={visible()}>{(row, index) =>
-                <View class="relative w-[320] h-[30] flex-col justify-center pl-[12] pr-[9]">
-                  <Text class="text-sm text-[#18202a] font-bold">{row.title}</Text>
-                  <Show when={row.subtitle}><Text class="absolute right-[9] top-[9] text-xs text-[#687484]">{row.subtitle}</Text></Show>
-                  <Show when={index() !== selected() - first() && index() + 1 !== selected() - first() && index() + first() + 1 < rows().length}>
-                    <View class="absolute left-[12] right-0 bottom-0 h-[1] bg-[#d5d9df]" />
-                  </Show>
-                </View>
-              }</For>
-            </View>
-          </View>
-        }>
-          <View class="absolute left-0 top-[36] w-[320] h-[204] flex-col items-center pt-[20] bg-[#18212e]">
-            <View class="w-[112] h-[112] rounded-[8] bg-gradient-to-b from-[#3a4658] to-[#202938] border border-[#586579]" />
-            <Text class="mt-[9] text-base text-white font-bold">{now()?.title ?? "Nothing Playing"}</Text>
-            <Text class="text-xs text-[#aeb9c8]">{now()?.artist ?? "SELECT a track"}</Text>
-          </View>
-        </Show>
-        <TopBar title={page() === "Library" ? titleCase(libraryKind()) : page()} back={stack().length > 1} />
-        <Show when={notice()}><Text class="absolute left-[8] bottom-[5] text-xs text-[#697586]">{notice()}</Text></Show>
+      <View ref={(node) => (activePanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
+        <PageSurface
+          page={page()}
+          title={title()}
+          rows={rows()}
+          selected={selected()}
+          offset={listScroller.offset()}
+          back={stack().length > 1}
+          now={safePlayback()}
+          notice={notice()}
+        />
       </View>
+      <Show when={transitionSnapshot()} keyed>{(snapshot) =>
+        <View ref={(node) => (transitionPanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
+          <PageSurface {...snapshot} />
+        </View>
+      }</Show>
     </View>
   );
 }
