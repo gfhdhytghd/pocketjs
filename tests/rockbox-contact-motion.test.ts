@@ -8,7 +8,7 @@ import {
   CONTACT_MAX_OFFSCREEN_ROWS,
   CONTACT_ROW_HEIGHT,
   CONTACT_UP_ANCHOR_Y,
-  boundedVisualContactIndex,
+  contactSelectionY,
   contactScrollTarget,
   wheelMultiplier,
 } from "../hosts/rockbox/demo/contact-motion.ts";
@@ -49,19 +49,17 @@ describe("Rockbox contact wheel motion", () => {
     expect(index * CONTACT_ROW_HEIGHT - target).toBe(CONTACT_DOWN_ANCHOR_Y);
   });
 
-  test("keeps the painted selection within 0.5 rows beyond either edge", () => {
+  test("keeps the independent selection bar within 0.5 rows of either edge", () => {
     expect(CONTACT_MAX_OFFSCREEN_ROWS).toBe(0.5);
     expect(CONTACT_MAX_OFFSCREEN_PX).toBe(CONTACT_ROW_HEIGHT / 2);
-    const down = boundedVisualContactIndex(1024, 0, COUNT);
-    const downNearEdge = down * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
-    expect(downNearEdge).toBeGreaterThanOrEqual(0);
-    expect(downNearEdge).toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
+    const down = contactSelectionY(1024, 0);
+    expect(down + CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT)
+      .toBe(CONTACT_MAX_OFFSCREEN_PX);
 
-    const offset = 3000;
-    const up = boundedVisualContactIndex(0, offset, COUNT);
-    const upNearEdge = offset - (up + 1) * CONTACT_ROW_HEIGHT;
-    expect(upNearEdge).toBeGreaterThanOrEqual(0);
-    expect(upNearEdge).toBeLessThanOrEqual(CONTACT_MAX_OFFSCREEN_PX);
+    const up = contactSelectionY(0, 3000);
+    expect(-up).toBe(CONTACT_MAX_OFFSCREEN_PX);
+
+    expect(contactSelectionY(12, 300)).toBe(60);
   });
 
   test("clamps at real data edges instead of creating blank contacts", () => {

@@ -18,28 +18,22 @@ export function wheelMultiplier(burst: number): number {
   return 1 << gear;
 }
 
-/** Keep the painted selection no farther than maxOffscreenPx beyond either
- * viewport edge while its accelerated logical destination may remain far
- * ahead. The row's nearest edge is used symmetrically. */
-export function boundedVisualContactIndex(
-  destinationIndex: number,
+/** Position an independent selection bar over its logical row while possible,
+ * then clamp the bar itself so no more than maxOffscreenPx can be clipped at
+ * either viewport edge. The real row remains free to travel far off-screen. */
+export function contactSelectionY(
+  selectedIndex: number,
   offset: number,
-  count: number,
   maxOffscreenPx = CONTACT_MAX_OFFSCREEN_PX,
 ): number {
-  const first = Math.max(
-    0,
-    Math.ceil(
-      (offset - maxOffscreenPx - CONTACT_ROW_HEIGHT) / CONTACT_ROW_HEIGHT,
+  const rowY = selectedIndex * CONTACT_ROW_HEIGHT - offset;
+  return Math.max(
+    -maxOffscreenPx,
+    Math.min(
+      CONTACT_LIST_HEIGHT - CONTACT_ROW_HEIGHT + maxOffscreenPx,
+      rowY,
     ),
   );
-  const last = Math.min(
-    count - 1,
-    Math.floor(
-      (offset + CONTACT_LIST_HEIGHT + maxOffscreenPx) / CONTACT_ROW_HEIGHT,
-    ),
-  );
-  return Math.max(first, Math.min(last, destinationIndex));
 }
 
 /** Final list offset required to bring a selected row back into the resting

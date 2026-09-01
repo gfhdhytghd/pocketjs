@@ -16,7 +16,7 @@ import {
   CONTACT_SPRING_DAMPING,
   CONTACT_SPRING_OVERSHOOT,
   CONTACT_SPRING_STIFFNESS,
-  boundedVisualContactIndex,
+  contactSelectionY,
   contactScrollTarget,
   wheelMultiplier,
 } from "./contact-motion.ts";
@@ -68,8 +68,8 @@ function SelectionFollower(props: { update: () => void }) {
 }
 
 export default function ContactsPage() {
-  const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [destinationIndex, setDestinationIndex] = createSignal(0);
+  const [selectionY, setSelectionY] = createSignal(0);
   const [detailIndex, setDetailIndex] = createSignal(0);
   const [detailOpen, setDetailOpen] = createSignal(false);
   let listPanel: NodeMirror | undefined;
@@ -81,6 +81,7 @@ export default function ContactsPage() {
     max: () => CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT,
     extent: () => CONTACT_LIST_HEIGHT,
   });
+  const selected = createMemo(() => contact(destinationIndex()));
   const detail = createMemo(() => contact(detailIndex()));
 
   const resetWheelAcceleration = () => {
@@ -93,6 +94,7 @@ export default function ContactsPage() {
     const next = Math.max(0, Math.min(CONTACT_COUNT - 1, destinationIndex() + delta));
     if (next === destinationIndex()) return;
     setDestinationIndex(next);
+    setSelectionY(contactSelectionY(next, listScroller.offset()));
     const maxOffset = CONTACT_COUNT * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT;
     const target = contactScrollTarget(next, listScroller.intent(), maxOffset);
     if (target !== null) {
@@ -105,10 +107,9 @@ export default function ContactsPage() {
   };
 
   const updateVisualSelection = () => {
-    setSelectedIndex(boundedVisualContactIndex(
+    setSelectionY(contactSelectionY(
       destinationIndex(),
       listScroller.offset(),
-      CONTACT_COUNT,
     ));
   };
 
@@ -175,26 +176,17 @@ export default function ContactsPage() {
 
   const row = (index: number) => {
     const item = contact(index);
-    const active = () => selectedIndex() === index;
     return (
-      <View class={active()
-        ? "relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-[#2378d4]"
-        : "relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-white"}>
-        <Text class={active() ? "text-sm text-white" : "text-sm text-[#1c222b]"}>{item.given}</Text>
-        <Text class={active()
-          ? "ml-[4] text-sm text-white font-bold"
-          : "ml-[4] text-sm text-[#1c222b] font-bold"}>
+      <View class="relative w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-white">
+        <Text class="text-sm text-[#1c222b]">{item.given}</Text>
+        <Text class="ml-[4] text-sm text-[#1c222b] font-bold">
           {item.surname}
         </Text>
         <View class="flex-1" />
-        <Text class={active()
-          ? "text-xs text-[#dbeafe]"
-          : "text-xs text-[#8b95a3]"}>
+        <Text class="text-xs text-[#8b95a3]">
           {item.ordinal}
         </Text>
-        <View class={active()
-          ? "absolute left-[10] right-0 bottom-0 h-[1] bg-[#155da8]"
-          : "absolute left-[10] right-0 bottom-0 h-[1] bg-[#d5d8dc]"} />
+        <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#d5d8dc]" />
       </View>
     );
   };
@@ -217,6 +209,16 @@ export default function ContactsPage() {
             renderRow={row}
             style={{ width: 320 }}
           />
+          <View
+            class="absolute left-0 top-0 w-[320] h-[30] flex-row items-center pl-[10] pr-[8] bg-[#2378d4]"
+            style={{ translateY: selectionY() }}
+          >
+            <Text class="text-sm text-white">{selected().given}</Text>
+            <Text class="ml-[4] text-sm text-white font-bold">{selected().surname}</Text>
+            <View class="flex-1" />
+            <Text class="text-xs text-[#dbeafe]">{selected().ordinal}</Text>
+            <View class="absolute left-[10] right-0 bottom-0 h-[1] bg-[#155da8]" />
+          </View>
         </View>
         <SelectionFollower update={updateVisualSelection} />
         <NavigationBar title="All Contacts" />
