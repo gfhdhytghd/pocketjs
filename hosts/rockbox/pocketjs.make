@@ -4,7 +4,6 @@ POCKETJS_BUILDDIR := $(BUILDDIR)/apps/plugins/pocketjs
 POCKETJS_SRC := \
   $(POCKETJS_SRCDIR)/main.c \
   $(POCKETJS_SRCDIR)/input.c \
-  $(POCKETJS_SRCDIR)/framebuffer.c \
   $(POCKETJS_SRCDIR)/compat.c \
   $(POCKETJS_SRCDIR)/runtime_port.c \
   $(POCKETJS_SRCDIR)/app_data.c \

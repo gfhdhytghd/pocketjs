@@ -78,11 +78,13 @@ int pocket_runtime_hit_test_bounds(float x, float y);
 const char *pocket_runtime_action_name(void);
 int pocket_runtime_action_value(void);
 unsigned long pocket_runtime_action_sequence(void);
-const uint8_t *pocket_runtime_render(void);
 /*
  * Rendered pixels are opaque top-left BGRA bytes (ARGB32 words). The pointer
  * remains valid only until the next render, viewport change, or shutdown.
  */
+const uint8_t *pocket_runtime_render(void);
+/* Render directly into a persistent, tightly packed host-owned RGB565 buffer. */
+int pocket_runtime_render_rgb565(uint16_t *framebuffer, size_t pixel_count);
 
 /*
  * Damage statistics for the software raster path, and the most recent plan's

@@ -1,7 +1,6 @@
 #include "plugin.h"
 #include <tlsf.h>
 
-#include "framebuffer.h"
 #include "input.h"
 #include "pocket_runtime.h"
 #include "pocket_spec.h"
@@ -77,7 +76,9 @@ static void pocketjs_runtime_thread(void) {
   while (true) {
     const long event = rb->button_get_w_tmo(1);
     uint32_t buttons;
-    const uint8_t *pixels;
+    int damage[4];
+    int damage_width;
+    int damage_height;
 
     if (event != BUTTON_NONE) {
       if (rockbox_input_exit_requested((int)event, &input_codes)) break;
@@ -101,16 +102,41 @@ static void pocketjs_runtime_thread(void) {
       break;
     }
 
-    pixels = pocket_runtime_render();
-    if (pixels == 0 || pocket_runtime_width() != LCD_WIDTH ||
+    if (!pocket_runtime_render_rgb565(
+          (uint16_t *)display,
+          LCD_WIDTH * LCD_HEIGHT
+        ) || pocket_runtime_width() != LCD_WIDTH ||
         pocket_runtime_height() != LCD_HEIGHT) {
       rb->splash(HZ * 3, "PocketJS: invalid framebuffer");
       status = PLUGIN_ERROR;
       break;
     }
-    rockbox_bgra_to_rgb565((uint16_t *)display, pixels, LCD_WIDTH * LCD_HEIGHT);
-    rb->lcd_bitmap(display, 0, 0, LCD_WIDTH, LCD_HEIGHT);
-    rb->lcd_update();
+    if (!pocket_runtime_damage_bounds(damage)) continue;
+
+    if (damage[0] < 0) damage[0] = 0;
+    if (damage[1] < 0) damage[1] = 0;
+    if (damage[2] > LCD_WIDTH) damage[2] = LCD_WIDTH;
+    if (damage[3] > LCD_HEIGHT) damage[3] = LCD_HEIGHT;
+    damage_width = damage[2] - damage[0];
+    damage_height = damage[3] - damage[1];
+    if (damage_width <= 0 || damage_height <= 0) continue;
+
+    rb->lcd_bitmap_part(
+      display,
+      damage[0],
+      damage[1],
+      LCD_WIDTH,
+      damage[0],
+      damage[1],
+      damage_width,
+      damage_height
+    );
+    rb->lcd_update_rect(
+      damage[0],
+      damage[1],
+      damage_width,
+      damage_height
+    );
   }
 
 cleanup:

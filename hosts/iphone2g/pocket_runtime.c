@@ -824,6 +824,11 @@ const uint8_t *pocket_runtime_render(void) {
   return ui_render_incremental();
 }
 
+int pocket_runtime_render_rgb565(uint16_t *framebuffer, size_t pixel_count) {
+  if (runtime == 0 || context == 0 || runtime_failed) return 0;
+  return ui_render_rgb565_incremental(framebuffer, pixel_count) != 0;
+}
+
 unsigned long pocket_runtime_damage_attempts(void) {
   if (runtime == 0 || context == 0 || runtime_failed) return 0;
   return (unsigned long)ui_damage_attempts();

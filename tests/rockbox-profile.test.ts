@@ -62,6 +62,15 @@ describe("Rockbox iPod classic development profile", () => {
     );
   });
 
+  test("renders native RGB565 and presents only the damaged LCD region", () => {
+    expect(nativeHost).toContain("pocket_runtime_render_rgb565(");
+    expect(nativeHost).toContain("pocket_runtime_damage_bounds(damage)");
+    expect(nativeHost).toContain("rb->lcd_bitmap_part(");
+    expect(nativeHost).toContain("rb->lcd_update_rect(");
+    expect(nativeHost).not.toContain("rockbox_bgra_to_rgb565(");
+    expect(nativeHost).not.toContain("rb->lcd_update();");
+  });
+
   test("ships three hardware-switchable acceptance pages", () => {
     expect(demoMain).toContain("const PAGE_COUNT = 3");
     expect(demoMain).toContain("buttons & BTN.CIRCLE");
