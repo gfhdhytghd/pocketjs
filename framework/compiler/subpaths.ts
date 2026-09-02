@@ -121,6 +121,7 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
     npmFile: "framework/src/renderer.ts",
     aliases: ALL,
   },
+  services: { file: "framework/src/services.ts" },
   "virtual-list": { file: { solid: "framework/src/virtual-list.ts" } },
 };
 
