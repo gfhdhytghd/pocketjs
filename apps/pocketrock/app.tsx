@@ -189,6 +189,8 @@ function Shell() {
   const [eqPreset, setEqPreset] = createSignal<string>(DEFAULT_EQ_PRESETS[0]);
   const [eqBands, setEqBands] = createSignal<EqBand[]>(DEFAULT_EQ_BANDS.map((band) => ({ ...band })));
   const [transitionSnapshot, setTransitionSnapshot] = createSignal<ScreenSnapshot | null>(null);
+  const [playbackState, setPlaybackState] = createSignal<PlaybackSnapshot | null>(null);
+  const [systemState, setSystemState] = createSignal<SystemSnapshot | null>(null);
   let activePanel: NodeMirror | undefined;
   let transitionPanel: NodeMirror | undefined;
   let wheelDirection = 0;
@@ -196,20 +198,31 @@ function Shell() {
   let wheelTargetIndex = 0;
   let wheelIdleFrames = WHEEL_IDLE_FRAMES;
   let transitionFrames = 0;
+  let servicePollFrames = 0;
 
   const route = createMemo(() => stack()[stack().length - 1]);
   const page = createMemo(() => route().page);
   const serviceActive = () => typeof getOps().pocketrockCall === "function";
+  const usbSurfaceVisible = () => {
+    const usb = systemState()?.usb;
+    return usb !== undefined && usb !== "disconnected";
+  };
 
-  const safePlayback = (): PlaybackSnapshot | null => {
+  const readPlayback = (): PlaybackSnapshot | null => {
     if (!serviceActive()) return null;
     try { return playback.snapshot(); } catch { return null; }
   };
 
-  const safeSystem = (): SystemSnapshot | null => {
+  const readSystem = (): SystemSnapshot | null => {
     if (!serviceActive()) return null;
     try { return system.snapshot(); } catch { return null; }
   };
+
+  const refreshServiceState = (): void => {
+    setPlaybackState(readPlayback());
+    setSystemState(readSystem());
+  };
+  refreshServiceState();
 
   const allApps = (): AppsPageEntry[] => (appTable()?.apps ?? []).map((app) => ({
     title: app.title,
@@ -221,8 +234,8 @@ function Shell() {
   const rows = createMemo<Row[]>(() => {
     switch (page()) {
     case "Home": {
-      const now = safePlayback();
-      const device = safeSystem();
+      const now = playbackState();
+      const device = systemState();
       const values: Record<(typeof POCKETROCK_HOME_DESTINATIONS)[number], string> = {
         "Now Playing": now?.title || "暂无播放",
         Music: "艺术家、专辑与歌曲",
@@ -261,8 +274,8 @@ function Shell() {
         : app.id ? launchPackage(app.id) : undefined,
     }));
     case "Settings": {
-      const now = safePlayback();
-      const device = safeSystem();
+      const now = playbackState();
+      const device = systemState();
       const values: Record<(typeof POCKETROCK_SETTINGS_DESTINATIONS)[number], string> = {
         Sound: now ? `${now.volume} dB` : "音量与音色",
         Playback: now?.shuffle ? "随机播放已开启" : "重复与恢复",
@@ -295,7 +308,7 @@ function Shell() {
       })),
     ];
     case "Playback": {
-      const now = safePlayback();
+      const now = playbackState();
       return DEFAULT_PLAYBACK_SETTINGS.map((row, index) => ({
         title: row.label,
         subtitle: index === 0
@@ -305,7 +318,7 @@ function Shell() {
     }
     case "Display": return DEFAULT_DISPLAY_SETTINGS.map((row) => ({ title: row.label, subtitle: row.value }));
     case "Power": {
-      const device = safeSystem();
+      const device = systemState();
       return [
       { title: "电池", subtitle: device ? `${device.batteryPercent}%` : "不可用" },
       { title: "休眠", subtitle: "停止播放并休眠" },
@@ -314,7 +327,7 @@ function Shell() {
       ];
     }
     case "Storage": {
-      const device = safeSystem();
+      const device = systemState();
       if (!device) return [{ title: "存储不可用", subtitle: "系统服务离线" }];
       const used = Math.max(0, device.totalBytes - device.freeBytes);
       return [
@@ -521,7 +534,7 @@ function Shell() {
       return;
     }
     if (page() === "Playback" && serviceActive()) {
-      const now = safePlayback();
+      const now = playbackState();
       if (selected() === 0) {
         const values = ["off", "all", "one"];
         const current = Math.max(0, values.indexOf(now?.repeat ?? "off"));
@@ -531,26 +544,38 @@ function Shell() {
   }
 
   function CurrentPage() {
-    const now = safePlayback();
-    const device = safeSystem();
-    if (device && device.usb !== "disconnected") {
-      return <UsbScreen mode={device.usb === "mass-storage" ? "mass-storage" : "charging"} />;
-    }
-    if (page() === "Now Playing") {
-      return <NowPlayingScreen
-        title={now?.title || "暂无播放"}
-        artist={now?.artist || "请选择一首歌曲"}
-        album={now?.album}
-        elapsedSeconds={(now?.elapsedMs ?? 0) / 1000}
-        durationSeconds={(now?.durationMs ?? 0) / 1000}
-        playing={now?.status === "playing"}
-        back
-      />;
-    }
-    return <PageSurface {...activeSnapshot()} />;
+    return (
+      <Show
+        when={usbSurfaceVisible()}
+        fallback={
+          <Show when={page() === "Now Playing"} fallback={<PageSurface {...activeSnapshot()} />}>
+            <NowPlayingScreen
+              title={playbackState()?.title || "暂无播放"}
+              artist={playbackState()?.artist || "请选择一首歌曲"}
+              album={playbackState()?.album}
+              elapsedSeconds={(playbackState()?.elapsedMs ?? 0) / 1000}
+              durationSeconds={(playbackState()?.durationMs ?? 0) / 1000}
+              playing={playbackState()?.status === "playing"}
+              back
+            />
+          </Show>
+        }
+      >
+        <UsbScreen mode={systemState()?.usb === "mass-storage" ? "mass-storage" : "charging"} />
+      </Show>
+    );
   }
 
   onFrame((buttons) => {
+    if (++servicePollFrames >= 10) {
+      servicePollFrames = 0;
+      refreshServiceState();
+    }
+    if (usbSurfaceVisible()) {
+      listScroller.stop();
+      resetWheel(selected());
+      return;
+    }
     if (transitionFrames > 0) {
       transitionFrames -= 1;
       if (transitionFrames === 0) {
@@ -571,14 +596,16 @@ function Shell() {
   });
 
   onButtonPress(BTN.CIRCLE, () => {
-    if (transitionFrames !== 0) return;
+    if (usbSurfaceVisible() || transitionFrames !== 0) return;
     if (page() === "Equalizer" && selected() < 2) adjustCurrent(1);
     else rows()[selected()]?.action?.();
   }, { latched: true });
-  onButtonPress(BTN.TRIANGLE, pop, { latched: true });
-  onButtonPress(BTN.START, () => { if (serviceActive()) playback.toggle(); }, { latched: true });
-  onButtonPress(BTN.LEFT, () => adjustCurrent(-1), { latched: true });
-  onButtonPress(BTN.RIGHT, () => adjustCurrent(1), { latched: true });
+  onButtonPress(BTN.TRIANGLE, () => { if (!usbSurfaceVisible()) pop(); }, { latched: true });
+  onButtonPress(BTN.START, () => {
+    if (!usbSurfaceVisible() && serviceActive()) playback.toggle();
+  }, { latched: true });
+  onButtonPress(BTN.LEFT, () => { if (!usbSurfaceVisible()) adjustCurrent(-1); }, { latched: true });
+  onButtonPress(BTN.RIGHT, () => { if (!usbSurfaceVisible()) adjustCurrent(1); }, { latched: true });
 
   return (
     <View class="relative w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">

@@ -202,6 +202,9 @@ describe("Rockbox iPod classic development profile", () => {
     expect(pocketRockShell).toContain("<ShellListScreen");
     expect(pocketRockShell).toContain("<NowPlayingScreen");
     expect(pocketRockShell).toContain("<UsbScreen");
+    expect(pocketRockShell).toContain("servicePollFrames >= 10");
+    expect(pocketRockShell).toContain('usb !== undefined && usb !== "disconnected"');
+    expect(pocketRockShell).toContain("if (usbSurfaceVisible()) {");
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", -64');
     expect(pocketRockShell).toContain('animate(activePanel, "translateX", 0');
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", 320');

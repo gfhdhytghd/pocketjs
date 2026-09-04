@@ -258,11 +258,11 @@ export function UsbScreen(props: UsbScreenProps) {
           <View class="absolute left-[34] bottom-[18] w-[24] h-[24] rounded-[4] bg-[#17212b]" />
         </View>
         <View class="absolute left-[128] top-[28] w-[172] h-[112] overflow-hidden">
-          <Text class="text-xs text-[#687584] font-bold">USB 连接</Text>
-          <Text class="mt-[7] w-[172] text-lg text-[#17212b] font-bold">{connected() ? "已连接" : "未连接"}</Text>
-          <View class="mt-[9] w-[172] h-[1] bg-[#d1d8df]" />
-          <Text class="mt-[8] text-xs text-[#687584]">模式</Text>
-          <Text class="mt-[3] text-sm text-[#176fce] font-bold">{modeLabel()}</Text>
+          <Text class="absolute left-0 top-0 w-[172] h-[16] text-xs text-[#687584] font-bold">设备状态</Text>
+          <Text class="absolute left-0 top-[22] w-[172] h-[24] text-lg text-[#17212b] font-bold overflow-hidden">{connected() ? "已连接" : "未连接"}</Text>
+          <View class="absolute left-0 top-[54] w-[172] h-[1] bg-[#d1d8df]" />
+          <Text class="absolute left-0 top-[66] w-[172] h-[16] text-xs text-[#687584]">连接模式</Text>
+          <Text class="absolute left-0 top-[86] w-[172] h-[20] text-sm text-[#176fce] font-bold overflow-hidden">{modeLabel()}</Text>
         </View>
         <View class="absolute left-[20] bottom-[18] w-[280] h-[32] rounded-[5] flex-row items-center justify-center bg-[#e7edf3] border border-[#c0cad4]">
           <Text class="text-xs text-[#526274] font-bold">{props.mode === "mass-storage" ? "拔线前请先在电脑上安全弹出" : "充电时请保持线缆连接"}</Text>
