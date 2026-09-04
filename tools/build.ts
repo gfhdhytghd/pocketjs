@@ -21,6 +21,8 @@
 //   --density=<integer>          low-level target sampling density (default 1)
 //   --font-regular=<path>        override the regular font source
 //   --font-bold=<path>           override the bold font source
+//   --font-mono=<path>           override the monospace font source
+//   --font-fallback=<path>       append a proportional-font fallback
 //   --outdir=<path>              write <app>.js/.pak here instead of dist/
 //                                (external repos build their apps against a
 //                                vendored PocketJS and keep outputs local)
@@ -80,6 +82,8 @@ const args = process.argv.slice(2);
 let extraChars = "";
 let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
+let monoFontPath: string | undefined;
+const fallbackFontPaths: string[] = [];
 let appArg = "";
 let frameworkFlag: string | undefined;
 let configPath = join(ROOT, "pocket.config.ts");
@@ -93,6 +97,8 @@ for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
+  else if (a.startsWith("--font-mono=")) monoFontPath = resolvePath(a.slice("--font-mono=".length));
+  else if (a.startsWith("--font-fallback=")) fallbackFontPaths.push(resolvePath(a.slice("--font-fallback=".length)));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
   else if (a.startsWith("--config=")) { configPath = resolvePath(ROOT, a.slice("--config=".length)); configFlagged = true; }
   else if (a === "--no-config") useConfig = false;
@@ -182,6 +188,11 @@ const framework: PocketFramework = frameworkFlag
     ? parseFramework(buildPlan.app.framework, "ResolvedBuildPlan")
   : parseFramework(config.framework, "pocket.config.ts");
 const frameworkConfig = FRAMEWORKS[framework];
+const configuredFontPath = (path: string | undefined): string | undefined =>
+  path === undefined ? undefined : resolvePath(dirname(configPath), path);
+const configuredFallbacks = config.fonts?.fallbacks?.map(
+  (path) => resolvePath(dirname(configPath), path),
+) ?? [];
 const entry = frameworkVariantPath(requestedEntry, framework);
 function outputName(file: string): string {
   const normalizedFile = file.replace(/\\/g, "/");
@@ -313,8 +324,10 @@ const atlases = await bakeAtlases({
   slots: styles.usedFontSlots,
   extraChars,
   rasterDensity,
-  regularTtf: regularFontPath,
-  boldTtf: boldFontPath,
+  regularTtf: regularFontPath ?? configuredFontPath(config.fonts?.regular),
+  boldTtf: boldFontPath ?? configuredFontPath(config.fonts?.bold),
+  monoTtf: monoFontPath ?? configuredFontPath(config.fonts?.mono),
+  fallbackTtfs: fallbackFontPaths.length > 0 ? fallbackFontPaths : configuredFallbacks,
 });
 for (const a of atlases) {
   console.log(

@@ -104,6 +104,59 @@ describe("open contours", () => {
   });
 });
 
+describe("font fallback", () => {
+  const face = (coverage: Record<string, { advance: number; left: number }>): typeof font => ({
+    unitsPerEm: 1000,
+    ascender: 800,
+    descender: -200,
+    tables: { hhea: { lineGap: 0 } },
+    charToGlyphIndex: (ch: string) => coverage[ch] ? ch.codePointAt(0)! : 0,
+    glyphs: {
+      get: (gid: number) => {
+        const glyph = coverage[String.fromCodePoint(gid)]!;
+        return {
+          advanceWidth: glyph.advance,
+          getPath: () => ({
+            commands: [
+              { type: "M", x: glyph.left, y: 2 },
+              { type: "L", x: glyph.left + 6, y: 2 },
+              { type: "L", x: glyph.left + 6, y: 12 },
+              { type: "L", x: glyph.left, y: 12 },
+            ],
+          }),
+        };
+      },
+    },
+  } as unknown as typeof font);
+
+  test("keeps primary glyphs and fills only missing codepoints from the fallback", () => {
+    const primary = face({ A: { advance: 500, left: 1 }, "中": { advance: 400, left: 1 } });
+    const fallback = face({ A: { advance: 900, left: 3 }, "中": { advance: 1000, left: 3 } });
+    const atlas = bakeSlot([primary, fallback], 0, 16, false, [0x41, 0x4e2d]);
+    const view = new DataView(atlas.bytes.buffer, atlas.bytes.byteOffset, atlas.bytes.byteLength);
+    const advances = new Map<number, number>();
+    for (let i = 0; i < atlas.glyphCount; i++) {
+      const at = FONT_HEADER_SIZE + i * FONT_CMAP_ENTRY_SIZE;
+      advances.set(view.getUint32(at, true), view.getUint8(at + 6));
+    }
+
+    // Primary wins when both faces cover a codepoint.
+    expect(advances.get(0x41)).toBe(8);
+    expect(advances.get(0x4e2d)).toBe(6);
+
+    const primaryWithoutChinese = face({ A: { advance: 500, left: 1 } });
+    const mixed = bakeSlot([primaryWithoutChinese, fallback], 0, 16, false, [0x41, 0x4e2d]);
+    const mixedView = new DataView(mixed.bytes.buffer, mixed.bytes.byteOffset, mixed.bytes.byteLength);
+    const mixedAdvances = new Map<number, number>();
+    for (let i = 0; i < mixed.glyphCount; i++) {
+      const at = FONT_HEADER_SIZE + i * FONT_CMAP_ENTRY_SIZE;
+      mixedAdvances.set(mixedView.getUint32(at, true), mixedView.getUint8(at + 6));
+    }
+    expect(mixedAdvances.get(0x41)).toBe(8);
+    expect(mixedAdvances.get(0x4e2d)).toBe(16);
+  });
+});
+
 describe("monospace slots", () => {
   test("font-mono resolves to the mono slot family and bakes uniform advances", async () => {
     const { fontSlotFor, fontSlotInfo } = await import("../framework/compiler/tailwind.ts");

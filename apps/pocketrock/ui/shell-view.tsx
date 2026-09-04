@@ -171,7 +171,7 @@ export function ShellListScreen(props: ShellListScreenProps) {
       <View class="absolute left-0 top-[36] w-[320] h-[204] overflow-hidden">
         <Show when={props.rows.length > 0} fallback={
           <EmptyList
-            title={props.emptyTitle ?? "Nothing here"}
+            title={props.emptyTitle ?? "这里没有内容"}
             detail={props.emptyDetail}
           />
         }>
@@ -231,11 +231,11 @@ export function NowPlayingScreen(props: NowPlayingScreenProps) {
 
         <View class="absolute left-[12] bottom-[13] w-[296] h-[31] rounded-[5] flex-row items-center justify-between px-[12] bg-[#1c2a39] border border-[#394a5b]">
           <Text class="text-sm text-[#9ec9f1] font-bold">‹‹</Text>
-          <Text class="text-xs text-white font-bold">{props.playing ? "MENU  PAUSE" : "MENU  PLAY"}</Text>
+          <Text class="text-xs text-white font-bold">{props.playing ? "播放键：暂停" : "播放键：播放"}</Text>
           <Text class="text-sm text-[#9ec9f1] font-bold">››</Text>
         </View>
       </View>
-      <ShellChrome title="Now Playing" back={props.back} />
+      <ShellChrome title="正在播放" back={props.back} />
     </View>
   );
 }
@@ -247,7 +247,7 @@ export interface UsbScreenProps {
 /** USB owns the screen while connected and intentionally has no perpetual animation. */
 export function UsbScreen(props: UsbScreenProps) {
   const connected = () => props.mode !== "idle";
-  const modeLabel = () => props.mode === "mass-storage" ? "MASS STORAGE" : props.mode === "charging" ? "CHARGING" : "DISCONNECTED";
+  const modeLabel = () => props.mode === "mass-storage" ? "磁盘模式" : props.mode === "charging" ? "正在充电" : "未连接";
   return (
     <View class="relative w-[320] h-[240] bg-[#f4f6f8] overflow-hidden">
       <View class="absolute left-0 top-[36] w-[320] h-[204] bg-[#f4f6f8] overflow-hidden">
@@ -258,17 +258,17 @@ export function UsbScreen(props: UsbScreenProps) {
           <View class="absolute left-[34] bottom-[18] w-[24] h-[24] rounded-[4] bg-[#17212b]" />
         </View>
         <View class="absolute left-[128] top-[28] w-[172] h-[112] overflow-hidden">
-          <Text class="text-xs text-[#687584] font-bold">USB CONNECTION</Text>
-          <Text class="mt-[7] w-[172] text-lg text-[#17212b] font-bold">{connected() ? "Connected" : "Not connected"}</Text>
+          <Text class="text-xs text-[#687584] font-bold">USB 连接</Text>
+          <Text class="mt-[7] w-[172] text-lg text-[#17212b] font-bold">{connected() ? "已连接" : "未连接"}</Text>
           <View class="mt-[9] w-[172] h-[1] bg-[#d1d8df]" />
-          <Text class="mt-[8] text-xs text-[#687584]">MODE</Text>
+          <Text class="mt-[8] text-xs text-[#687584]">模式</Text>
           <Text class="mt-[3] text-sm text-[#176fce] font-bold">{modeLabel()}</Text>
         </View>
         <View class="absolute left-[20] bottom-[18] w-[280] h-[32] rounded-[5] flex-row items-center justify-center bg-[#e7edf3] border border-[#c0cad4]">
-          <Text class="text-xs text-[#526274] font-bold">{props.mode === "mass-storage" ? "Eject on the computer before unplugging" : "Keep the cable connected while charging"}</Text>
+          <Text class="text-xs text-[#526274] font-bold">{props.mode === "mass-storage" ? "拔线前请先在电脑上安全弹出" : "充电时请保持线缆连接"}</Text>
         </View>
       </View>
-      <ShellChrome title="USB" />
+      <ShellChrome title="USB 连接" />
     </View>
   );
 }

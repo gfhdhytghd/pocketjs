@@ -1,6 +1,6 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { Show, createMemo, createSignal } from "solid-js";
 import { animate, jump } from "@pocketjs/framework/animation";
-import { Text, View, type NodeMirror } from "@pocketjs/framework/components";
+import { View, type NodeMirror } from "@pocketjs/framework/components";
 import { getOps } from "@pocketjs/framework/host";
 import { BTN } from "@pocketjs/framework/input";
 import { createScroller } from "@pocketjs/framework/kinetics";
@@ -16,30 +16,17 @@ import {
   type PlaybackSnapshot,
   type SystemSnapshot,
 } from "@pocketjs/framework/rockbox";
-import AppsPage, { type AppsPageEntry } from "./pages/apps-page.tsx";
-import { DisplaySettingsPage, DEFAULT_DISPLAY_SETTINGS } from "./pages/display-settings-page.tsx";
-import { EqPage, DEFAULT_EQ_BANDS, DEFAULT_EQ_PRESETS, type EqBand } from "./pages/eq-page.tsx";
-import FilesPage from "./pages/files-page.tsx";
 import {
-  PocketRockHomePage,
-  PocketRockSettingsPage,
-  POCKETROCK_HOME_DESTINATIONS,
-  POCKETROCK_SETTINGS_DESTINATIONS,
-} from "./pages/home-settings-pages.tsx";
-import LibraryPage from "./pages/library-page.tsx";
-import NowPlayingPage from "./pages/now-playing-page.tsx";
-import PlaybackSettingsPage, { DEFAULT_PLAYBACK_SETTINGS } from "./pages/playback-settings-page.tsx";
-import QueuePage from "./pages/queue-page.tsx";
-import SoundSettingsPage, { type SoundSettingsModel } from "./pages/sound-settings-page.tsx";
-import { PowerPage, StoragePage, SystemInformationPage } from "./pages/system-pages.tsx";
-import UsbPage from "./pages/usb-page.tsx";
+  NowPlayingScreen,
+  ShellListScreen,
+  UsbScreen,
+} from "./ui/shell-view.tsx";
 import {
   CONTACT_LIST_HEIGHT,
   CONTACT_ROW_HEIGHT,
   CONTACT_SPRING_DAMPING,
   CONTACT_SPRING_OVERSHOOT,
   CONTACT_SPRING_STIFFNESS,
-  contactSelectionY,
   contactScrollTarget,
   contactVisibleIndex,
   wheelMultiplier,
@@ -70,105 +57,119 @@ interface ScreenSnapshot {
   selected: number;
   offset: number;
   back: boolean;
-  now: PlaybackSnapshot | null;
   notice: string;
 }
 
 const MUSIC: readonly LibraryKind[] = ["artists", "albums", "tracks", "playlists"];
-const LIST_WINDOW_ROWS = Math.ceil(CONTACT_LIST_HEIGHT / CONTACT_ROW_HEIGHT) + 2;
+const POCKETROCK_HOME_DESTINATIONS = [
+  "Now Playing", "Music", "Queue", "Files", "Apps", "Settings",
+] as const;
+const POCKETROCK_SETTINGS_DESTINATIONS = [
+  "Sound", "Playback", "Display", "Power", "Storage", "System Information",
+] as const;
+const DEFAULT_EQ_PRESETS = ["Flat", "Rock", "Acoustic", "Bass Boost"] as const;
+const DEFAULT_EQ_BANDS: readonly EqBand[] = [
+  { frequency: "60 Hz", gain: 0 },
+  { frequency: "250 Hz", gain: 0 },
+  { frequency: "1 kHz", gain: 0 },
+  { frequency: "4 kHz", gain: 0 },
+  { frequency: "12 kHz", gain: 0 },
+];
+const DEFAULT_PLAYBACK_SETTINGS = [
+  { label: "重复播放", value: "关闭" },
+  { label: "随机播放", value: "关闭" },
+  { label: "恢复播放", value: "开启" },
+  { label: "交叉淡入淡出", value: "关闭" },
+  { label: "ReplayGain", value: "Track" },
+  { label: "跳过长度", value: "整首" },
+  { label: "自动切换目录", value: "关闭" },
+] as const;
+const DEFAULT_DISPLAY_SETTINGS = [
+  { label: "亮度", value: "68%" },
+  { label: "背光超时", value: "10 秒" },
+  { label: "充电时背光", value: "开启" },
+  { label: "淡入淡出", value: "开启" },
+  { label: "滚动速度", value: "快速" },
+  { label: "屏幕休眠", value: "5 分钟" },
+] as const;
 const WHEEL_IDLE_FRAMES = 6;
 const TRANSITION_FRAMES = 8;
 const TRANSITION_MS = 110;
 
-function titleCase(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
+interface AppsPageEntry {
+  title?: string;
+  id?: string;
+  kind?: "pocket" | "rockbox";
+  path?: string;
 }
 
-function TopBar(props: { title: string; back: boolean }) {
-  return (
-    <View class="absolute left-0 top-0 w-[320] h-[36] flex-row items-center justify-center bg-gradient-to-b from-[#aebbcf] via-[#7d8ea8] to-[#62738b]">
-      <Show when={!props.back}>
-        <Text class="text-base text-white font-bold">{props.title}</Text>
-      </Show>
-      <Show when={props.back}>
-        <View class="absolute left-[5] top-[6] h-[24] px-[8] flex-row items-center rounded-[4] bg-[#71839e] border border-[#40516a]">
-          <Text class="text-xs text-white font-bold">MENU: Back</Text>
-        </View>
-        <Text class="text-base text-white font-bold">{props.title}</Text>
-      </Show>
-      <View class="absolute left-0 right-0 bottom-0 h-[1] bg-[#3d4d64]" />
-    </View>
-  );
+interface EqBand {
+  frequency: string;
+  gain: number;
 }
 
-function ListSurface(props: { rows: Row[]; selected: number; offset: number }) {
-  const first = createMemo(() => Math.max(
-    0,
-    Math.min(
-      Math.max(0, props.rows.length - LIST_WINDOW_ROWS),
-      Math.floor(props.offset / CONTACT_ROW_HEIGHT) - 1,
-    ),
-  ));
-  const visible = createMemo(() => props.rows.slice(first(), first() + LIST_WINDOW_ROWS));
-  const translateY = createMemo(() => first() * CONTACT_ROW_HEIGHT - props.offset);
-
-  return (
-    <View class="absolute left-0 top-[36] w-[320] h-[204] bg-[#f5f6f8] overflow-hidden">
-      <View class="absolute left-0 top-0 w-[320] flex-col" style={{ translateY: translateY() }}>
-        <For each={visible()}>{(_, index) => {
-          const rowIndex = () => first() + index();
-          return (
-            <View class="relative w-[320] h-[30]">
-              <Show when={
-                rowIndex() + 1 < props.rows.length &&
-                rowIndex() !== props.selected &&
-                rowIndex() + 1 !== props.selected
-              }>
-                <View class="absolute left-[12] right-0 bottom-0 h-[1] bg-[#d5d9df]" />
-              </Show>
-            </View>
-          );
-        }}</For>
-      </View>
-
-      <Show when={props.rows.length > 0}>
-        <View
-          class="absolute left-0 top-0 w-[320] h-[30] bg-[#2378d4]"
-          style={{ translateY: contactSelectionY(props.selected, props.offset) }}
-        />
-      </Show>
-
-      <View class="absolute left-0 top-0 w-[320] flex-col" style={{ translateY: translateY() }}>
-        <For each={visible()}>{(row) =>
-          <View class="relative w-[320] h-[30] flex-col justify-center pl-[12] pr-[9]">
-            <Text class="text-sm text-[#18202a] font-bold">{row.title}</Text>
-            <Show when={row.subtitle}>
-              <Text class="absolute right-[9] top-[9] text-xs text-[#687484]">{row.subtitle}</Text>
-            </Show>
-          </View>
-        }</For>
-      </View>
-    </View>
-  );
+interface SoundSettingsModel {
+  volume: number;
+  balance: number;
+  bass: number;
+  treble: number;
+  channelMode: "Stereo" | "Mono" | "Custom";
+  crossfeed: boolean;
 }
+
+const PAGE_TITLE: Record<Page, string> = {
+  Home: "PocketRock",
+  "Now Playing": "正在播放",
+  Music: "音乐",
+  Queue: "播放队列",
+  Files: "文件",
+  Apps: "应用",
+  Settings: "设置",
+  Library: "音乐资料库",
+  Sound: "声音",
+  Equalizer: "均衡器",
+  Playback: "播放设置",
+  Display: "显示",
+  Power: "电源",
+  Storage: "存储",
+  "System Information": "系统信息",
+};
+
+const HOME_LABEL: Record<(typeof POCKETROCK_HOME_DESTINATIONS)[number], string> = {
+  "Now Playing": "正在播放",
+  Music: "音乐",
+  Queue: "播放队列",
+  Files: "文件",
+  Apps: "应用",
+  Settings: "设置",
+};
+
+const SETTINGS_LABEL: Record<(typeof POCKETROCK_SETTINGS_DESTINATIONS)[number], string> = {
+  Sound: "声音",
+  Playback: "播放设置",
+  Display: "显示",
+  Power: "电源",
+  Storage: "存储",
+  "System Information": "系统信息",
+};
+
+const LIBRARY_LABEL: Record<LibraryKind, string> = {
+  artists: "艺术家",
+  albums: "专辑",
+  tracks: "歌曲",
+  playlists: "播放列表",
+};
 
 function PageSurface(props: ScreenSnapshot) {
   return (
-    <View class="absolute left-0 top-0 w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
-      <Show when={props.page === "Now Playing"} fallback={
-        <ListSurface rows={props.rows} selected={props.selected} offset={props.offset} />
-      }>
-        <View class="absolute left-0 top-[36] w-[320] h-[204] flex-col items-center pt-[20] bg-[#18212e]">
-          <View class="w-[112] h-[112] rounded-[8] bg-gradient-to-b from-[#3a4658] to-[#202938] border border-[#586579]" />
-          <Text class="mt-[9] text-base text-white font-bold">{props.now?.title ?? "Nothing Playing"}</Text>
-          <Text class="text-xs text-[#aeb9c8]">{props.now?.artist ?? "SELECT a track"}</Text>
-        </View>
-      </Show>
-      <TopBar title={props.title} back={props.back} />
-      <Show when={props.notice}>
-        <Text class="absolute left-[8] bottom-[5] text-xs text-[#697586]">{props.notice}</Text>
-      </Show>
-    </View>
+    <ShellListScreen
+      title={props.title}
+      back={props.back}
+      rows={props.rows.map((row) => ({ title: row.title, value: row.subtitle }))}
+      selected={props.selected}
+      offset={props.offset}
+      emptyTitle={props.notice || "这里没有内容"}
+    />
   );
 }
 
@@ -215,49 +216,125 @@ function Shell() {
     id: app.id,
     kind: app.kind ?? "pocket",
     path: app.path,
-    builtIn: app.id?.startsWith("dev.pocket-stack."),
-    valid: app.kind === "rockbox" ? Boolean(app.path) : Boolean(app.id),
   }));
 
   const rows = createMemo<Row[]>(() => {
     switch (page()) {
-    case "Home": return POCKETROCK_HOME_DESTINATIONS.map((title) => ({ title, action: () => push({ page: title }) }));
-    case "Music": return MUSIC.map((kind) => ({ title: titleCase(kind), action: () => openLibrary(kind) }));
+    case "Home": {
+      const now = safePlayback();
+      const device = safeSystem();
+      const values: Record<(typeof POCKETROCK_HOME_DESTINATIONS)[number], string> = {
+        "Now Playing": now?.title || "暂无播放",
+        Music: "艺术家、专辑与歌曲",
+        Queue: "当前播放列表",
+        Files: "iPod 存储",
+        Apps: `${allApps().length} 个应用`,
+        Settings: device ? `电量 ${device.batteryPercent}%` : "声音、显示与系统",
+      };
+      return POCKETROCK_HOME_DESTINATIONS.map((title) => ({
+        title: HOME_LABEL[title],
+        subtitle: values[title],
+        action: () => push({ page: title }),
+      }));
+    }
+    case "Music": return MUSIC.map((kind) => ({
+      title: LIBRARY_LABEL[kind],
+      subtitle: kind === "artists" ? "按表演者浏览" : kind === "albums" ? "按发行专辑浏览" : kind === "tracks" ? "全部歌曲" : "已保存的播放列表",
+      action: () => openLibrary(kind),
+    }));
     case "Library": return route().libraryRows ?? [];
     case "Queue": {
-      if (!serviceActive()) return [{ title: "Queue unavailable", subtitle: "Host ABI 10 required" }];
+      if (!serviceActive()) return [{ title: "播放队列不可用", subtitle: "需要 Host ABI 10" }];
       try {
         return queue.page(0, 64).items.map((item) => ({
           title: item.title || item.path,
           subtitle: item.artist,
           action: () => queue.play(item.index),
         }));
-      } catch (error) { return [{ title: "Queue unavailable", subtitle: String(error) }]; }
+      } catch (error) { return [{ title: "播放队列不可用", subtitle: String(error) }]; }
     }
     case "Apps": return allApps().map((app) => ({
-      title: app.title ?? "Untitled package",
+      title: app.title ?? "未命名应用",
       subtitle: app.path ?? app.id,
       action: () => app.kind === "rockbox" && app.path
         ? launchNativePlugin(app.path)
         : app.id ? launchPackage(app.id) : undefined,
     }));
-    case "Settings": return POCKETROCK_SETTINGS_DESTINATIONS.map((title) => ({
-      title,
-      action: () => push({ page: title }),
-    }));
-    case "Sound": return ["Volume", "Balance", "Bass", "Treble", "Channel Mode", "Crossfeed", "Equalizer"].map((title) => ({
-      title,
-      action: title === "Equalizer" ? () => push({ page: "Equalizer" }) : undefined,
-    }));
-    case "Equalizer": return ["Enabled", "Preset", ...eqBands().map((band) => band.frequency)].map((title) => ({ title }));
-    case "Playback": return DEFAULT_PLAYBACK_SETTINGS.map((row) => ({ title: row.label, subtitle: row.value }));
-    case "Display": return DEFAULT_DISPLAY_SETTINGS.map((row) => ({ title: row.label }));
-    case "Power": return [
-      { title: "Sleep" },
-      { title: "Power off", action: () => { if (serviceActive()) system.powerOff(); } },
-      { title: "Restart", action: () => { if (serviceActive()) system.reboot(); } },
+    case "Settings": {
+      const now = safePlayback();
+      const device = safeSystem();
+      const values: Record<(typeof POCKETROCK_SETTINGS_DESTINATIONS)[number], string> = {
+        Sound: now ? `${now.volume} dB` : "音量与音色",
+        Playback: now?.shuffle ? "随机播放已开启" : "重复与恢复",
+        Display: device?.backlight ? "背光已开启" : "背光已关闭",
+        Power: device ? `电量 ${device.batteryPercent}%` : "休眠与关机",
+        Storage: device ? `剩余 ${Math.floor(device.freeBytes / 1048576)} MiB` : "磁盘用量",
+        "System Information": "PocketRock 0.1",
+      };
+      return POCKETROCK_SETTINGS_DESTINATIONS.map((title) => ({
+        title: SETTINGS_LABEL[title],
+        subtitle: values[title],
+        action: () => push({ page: title }),
+      }));
+    }
+    case "Sound": return [
+      { title: "音量", subtitle: `${(soundModel().volume / 100).toFixed(1)} dB` },
+      { title: "平衡", subtitle: `${soundModel().balance}` },
+      { title: "低音", subtitle: `${soundModel().bass > 0 ? "+" : ""}${soundModel().bass} dB` },
+      { title: "高音", subtitle: `${soundModel().treble > 0 ? "+" : ""}${soundModel().treble} dB` },
+      { title: "声道", subtitle: soundModel().channelMode },
+      { title: "交叉馈送", subtitle: soundModel().crossfeed ? "开启" : "关闭" },
+      { title: "均衡器", subtitle: eqEnabled() ? eqPreset() : "关闭", action: () => push({ page: "Equalizer" }) },
     ];
-    case "Files": return [{ title: "/", subtitle: "Full-volume browser" }, { title: ".rockbox" }, { title: "Music" }];
+    case "Equalizer": return [
+      { title: "启用", subtitle: eqEnabled() ? "开启" : "关闭" },
+      { title: "预设", subtitle: eqPreset() },
+      ...eqBands().map((band) => ({
+        title: band.frequency,
+        subtitle: `${band.gain > 0 ? "+" : ""}${band.gain} dB`,
+      })),
+    ];
+    case "Playback": {
+      const now = safePlayback();
+      return DEFAULT_PLAYBACK_SETTINGS.map((row, index) => ({
+        title: row.label,
+        subtitle: index === 0
+          ? now?.repeat === "one" ? "单曲" : now?.repeat === "all" ? "全部" : "关闭"
+          : index === 1 ? now?.shuffle ? "开启" : "关闭" : row.value,
+      }));
+    }
+    case "Display": return DEFAULT_DISPLAY_SETTINGS.map((row) => ({ title: row.label, subtitle: row.value }));
+    case "Power": {
+      const device = safeSystem();
+      return [
+      { title: "电池", subtitle: device ? `${device.batteryPercent}%` : "不可用" },
+      { title: "休眠", subtitle: "停止播放并休眠" },
+      { title: "关机", action: () => { if (serviceActive()) system.powerOff(); } },
+      { title: "重新启动", action: () => { if (serviceActive()) system.reboot(); } },
+      ];
+    }
+    case "Storage": {
+      const device = safeSystem();
+      if (!device) return [{ title: "存储不可用", subtitle: "系统服务离线" }];
+      const used = Math.max(0, device.totalBytes - device.freeBytes);
+      return [
+        { title: "已使用", subtitle: `${Math.floor(used / 1048576)} MiB` },
+        { title: "剩余", subtitle: `${Math.floor(device.freeBytes / 1048576)} MiB` },
+        { title: "总计", subtitle: `${Math.floor(device.totalBytes / 1048576)} MiB` },
+      ];
+    }
+    case "System Information": return [
+      { title: "PocketRock", subtitle: "0.1.0" },
+      { title: "Host ABI", subtitle: "10" },
+      { title: "设备", subtitle: "iPod Classic 6/7G" },
+      { title: "显示", subtitle: "320 x 240 RGB565" },
+      { title: "运行时", subtitle: "QuickJS" },
+    ];
+    case "Files": return [
+      { title: ".rockbox", subtitle: "系统文件" },
+      { title: "Music", subtitle: "音频文件" },
+      { title: "Playlists", subtitle: "保存的播放列表" },
+    ];
     default: return [];
     }
   });
@@ -265,8 +342,8 @@ function Shell() {
   const maxOffset = () => Math.max(0, rows().length * CONTACT_ROW_HEIGHT - CONTACT_LIST_HEIGHT);
   const listScroller = createScroller({ max: maxOffset, extent: () => CONTACT_LIST_HEIGHT });
   const title = () => page() === "Library"
-    ? titleCase(route().libraryKind ?? "artists")
-    : page();
+    ? LIBRARY_LABEL[route().libraryKind ?? "artists"]
+    : PAGE_TITLE[page()];
 
   const activeSnapshot = (): ScreenSnapshot => ({
     page: page(),
@@ -275,7 +352,6 @@ function Shell() {
     selected: selected(),
     offset: listScroller.offset(),
     back: stack().length > 1,
-    now: safePlayback(),
     notice: notice(),
   });
   const saveCurrentRoute = (): Route => ({
@@ -345,14 +421,14 @@ function Shell() {
   function openLibrary(kind: LibraryKind): void {
     let libraryRows: Row[];
     if (!serviceActive()) {
-      libraryRows = [{ title: "Library unavailable", subtitle: "Tagcache service is offline" }];
+      libraryRows = [{ title: "音乐资料库不可用", subtitle: "Tagcache 服务离线" }];
     } else {
       try {
         const result = library.page(kind, 0, 64);
         libraryRows = result.items.map((item) => ({ title: item.title, subtitle: item.subtitle }));
-        if (result.scanning) setNotice("Tagcache scanning");
+        if (result.scanning) setNotice("正在扫描音乐资料库");
       } catch (error) {
-        libraryRows = [{ title: "Library unavailable", subtitle: String(error) }];
+        libraryRows = [{ title: "音乐资料库不可用", subtitle: String(error) }];
       }
     }
     push({ page: "Library", libraryKind: kind, libraryRows });
@@ -458,109 +534,19 @@ function Shell() {
     const now = safePlayback();
     const device = safeSystem();
     if (device && device.usb !== "disconnected") {
-      return <UsbPage connected mode={device.usb === "mass-storage" ? "mass-storage" : "charging"} />;
-    }
-    if (page() === "Home") {
-      return <PocketRockHomePage
-        selected={selected()}
-        nowPlaying={now ? { title: now.title, artist: now.artist, album: now.album, playing: now.status === "playing" } : null}
-        subtitles={{
-          Music: "Artists · Albums · Tracks",
-          Queue: "Current playlist",
-          Files: "iPod storage",
-          Apps: `${allApps().length} installed`,
-          Settings: "Sound · Display · System",
-        }}
-      />;
+      return <UsbScreen mode={device.usb === "mass-storage" ? "mass-storage" : "charging"} />;
     }
     if (page() === "Now Playing") {
-      const rawVolume = now?.volume ?? -74;
-      const volume = Math.max(0, Math.min(100, Math.round((rawVolume + 74) * 100 / 74)));
-      const repeat = now?.repeat === "one" ? "one" : now?.repeat === "off" ? "off" : "all";
-      return <NowPlayingPage
-        title={now?.title || "Nothing Playing"}
-        artist={now?.artist || "Select a track"}
+      return <NowPlayingScreen
+        title={now?.title || "暂无播放"}
+        artist={now?.artist || "请选择一首歌曲"}
         album={now?.album}
-        positionSeconds={(now?.elapsedMs ?? 0) / 1000}
+        elapsedSeconds={(now?.elapsedMs ?? 0) / 1000}
         durationSeconds={(now?.durationMs ?? 0) / 1000}
         playing={now?.status === "playing"}
-        volume={volume}
-        shuffle={now?.shuffle ?? false}
-        repeat={repeat}
         back
       />;
     }
-    if (page() === "Music") {
-      return <LibraryPage view="categories" selected={selected()} offset={listScroller.offset()} back />;
-    }
-    if (page() === "Library") {
-      return <LibraryPage
-        view="results"
-        kind={route().libraryKind}
-        items={(route().libraryRows ?? []).map((row, id) => ({ id, title: row.title, subtitle: row.subtitle }))}
-        selected={selected()}
-        offset={listScroller.offset()}
-        state={notice() === "Tagcache scanning" ? "scanning" : "ready"}
-        back
-      />;
-    }
-    if (page() === "Queue") {
-      const items = rows().map((row, index) => ({ index, title: row.title, artist: row.subtitle }));
-      return <QueuePage items={items} selected={selected()} offset={listScroller.offset()} playingIndex={now?.index} back />;
-    }
-    if (page() === "Files") {
-      return <FilesPage
-        path="/"
-        showParent={false}
-        selected={selected()}
-        offset={listScroller.offset()}
-        usbState="normal"
-        entries={[
-          { id: ".rockbox", name: ".rockbox", kind: "directory", subtitle: "Rockbox system" },
-          { id: "Music", name: "Music", kind: "directory", subtitle: "Audio files" },
-          { id: "Playlists", name: "Playlists", kind: "directory", subtitle: "Saved queues" },
-        ]}
-      />;
-    }
-    if (page() === "Apps") {
-      return <AppsPage apps={allApps()} selected={selected()} offset={listScroller.offset()} appTableAvailable={appTable() !== null} />;
-    }
-    if (page() === "Settings") {
-      return <PocketRockSettingsPage selected={selected()} values={{
-        Sound: now ? `${now.volume} dB` : "Audio",
-        Playback: now?.shuffle ? "Shuffle on" : "Repeat / Resume",
-        Display: device?.backlight ? "Backlight on" : "Backlight off",
-        Power: device ? `${device.batteryPercent}%` : "Battery",
-        Storage: device ? `${Math.floor(device.freeBytes / 1048576)} MiB free` : "Storage",
-        "System Information": "PocketRock 0.1",
-      }} />;
-    }
-    if (page() === "Sound") return <SoundSettingsPage model={soundModel()} selected={selected()} adjusting />;
-    if (page() === "Equalizer") return <EqPage
-      enabled={eqEnabled()}
-      preset={eqPreset()}
-      bands={eqBands()}
-      selectedControl={selected() === 0 ? "enabled" : selected() === 1 ? "preset" : "bands"}
-      selectedBand={Math.max(0, selected() - 2)}
-      adjusting={selected() >= 2}
-    />;
-    if (page() === "Playback") {
-      const settings = DEFAULT_PLAYBACK_SETTINGS.map((row, index) => index === 0
-        ? { ...row, value: now?.repeat ?? row.value }
-        : index === 1 ? { ...row, value: now?.shuffle ? "On" : "Off" } : row);
-      return <PlaybackSettingsPage rows={settings} selected={selected()} offset={listScroller.offset()} back />;
-    }
-    if (page() === "Display") return <DisplaySettingsPage rows={DEFAULT_DISPLAY_SETTINGS} selected={selected()} offset={listScroller.offset()} back />;
-    if (page() === "Power") return <PowerPage snapshot={device ?? undefined} selectedAction={selected()} onPowerOff={() => serviceActive() && system.powerOff()} onReboot={() => serviceActive() && system.reboot()} onBack={pop} />;
-    if (page() === "Storage") return <StoragePage snapshot={device ?? undefined} onBack={pop} />;
-    if (page() === "System Information") return <SystemInformationPage info={{
-      pocketRockVersion: "0.1.0",
-      rockboxVersion: "PocketRock",
-      quickJsVersion: "2025-09-13",
-      abiVersion: 10,
-      deviceModel: "iPod Classic 6/7G",
-      deviceName: "PocketRock",
-    }} onBack={pop} />;
     return <PageSurface {...activeSnapshot()} />;
   }
 

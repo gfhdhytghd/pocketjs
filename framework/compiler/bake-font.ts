@@ -66,6 +66,8 @@ export interface BakeOptions {
   regularTtf?: string;
   boldTtf?: string;
   monoTtf?: string;
+  /** Ordered fallback faces for non-monospace slots. */
+  fallbackTtfs?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +261,16 @@ async function loadFont(path: string): Promise<Font> {
   return parseFont(buf);
 }
 
+function selectVariableWeight(font: Font, bold: boolean): void {
+  const variable = font as Font & {
+    variation?: { set(coordinates: Record<string, number>): unknown };
+  };
+  const axes = ((font.tables as Record<string, any>).fvar?.axes ?? []) as Array<{ tag?: string }>;
+  if (variable.variation && axes.some((axis) => axis.tag === "wght")) {
+    variable.variation.set({ wght: bold ? 700 : 400 });
+  }
+}
+
 const TOFU_CODEPOINT = 0xfffd; // U+FFFD replacement char maps to gid 0
 
 function checkedRasterDensity(value: number): number {
@@ -270,7 +282,7 @@ function checkedRasterDensity(value: number): number {
 
 /** Bake one slot's atlas blob (see spec.ts FONT ATLAS format). */
 export function bakeSlot(
-  font: Font,
+  font: Font | readonly Font[],
   slot: number,
   px: number,
   bold: boolean,
@@ -278,15 +290,28 @@ export function bakeSlot(
   rasterDensity = 1,
 ): BakedAtlas {
   rasterDensity = checkedRasterDensity(rasterDensity);
-  const upm = font.unitsPerEm;
-  const scale = px / upm;
-  const ascent = font.ascender * scale;
-  const descent = -font.descender * scale; // positive px below baseline
-  const baseline = Math.round(ascent);
-  const cellH = Math.min(255, Math.max(1, baseline + Math.ceil(descent)));
-  const hhea = (font.tables as Record<string, any>).hhea;
-  const lineGap: number = (hhea?.lineGap ?? 0) * scale;
-  const lineHeight = Math.min(255, Math.round(ascent + descent + lineGap));
+  const fonts = Array.isArray(font) ? font : [font];
+  if (fonts.length === 0) throw new Error("PocketJS bake-font: at least one font face is required");
+  for (const face of fonts) selectVariableWeight(face, bold);
+  const metrics = fonts.map((face) => {
+    const scale = px / face.unitsPerEm;
+    const ascent = face.ascender * scale;
+    const descent = -face.descender * scale; // positive px below baseline
+    const hhea = (face.tables as Record<string, any>).hhea;
+    const lineGap: number = (hhea?.lineGap ?? 0) * scale;
+    return { ascent, descent, lineGap };
+  });
+  // A shared baseline lets glyphs selected from different faces coexist in
+  // the same atlas without top/bottom clipping. The single-face path remains
+  // byte-compatible with the original baker.
+  const baseline = Math.max(...metrics.map((metric) => Math.round(metric.ascent)));
+  const cellH = Math.min(255, Math.max(
+    1,
+    baseline + Math.max(...metrics.map((metric) => Math.ceil(metric.descent))),
+  ));
+  const lineHeight = Math.min(255, Math.max(...metrics.map(
+    (metric) => Math.round(metric.ascent + metric.descent + metric.lineGap),
+  )));
 
   // resolve glyphs first (skips codepoints the font doesn't map)
   interface G {
@@ -304,9 +329,18 @@ export function bakeSlot(
   for (const cp of chars) {
     if (cp === TOFU_CODEPOINT) continue; // reserved for gid 0
     const ch = String.fromCodePoint(cp);
-    const gi = font.charToGlyphIndex(ch);
-    if (gi <= 0) continue;
-    const glyph = font.glyphs.get(gi);
+    let face: Font | undefined;
+    let gi = 0;
+    for (const candidate of fonts) {
+      gi = candidate.charToGlyphIndex(ch);
+      if (gi > 0) {
+        face = candidate;
+        break;
+      }
+    }
+    if (!face) continue;
+    const scale = px / face.unitsPerEm;
+    const glyph = face.glyphs.get(gi);
     const advance = Math.max(0, Math.min(255, Math.round((glyph.advanceWidth ?? 0) * scale)));
     const path = glyph.getPath(0, baseline, px);
     // Keep every metric byte-for-byte equivalent to the density-1 bake. The
@@ -426,6 +460,7 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
     bold: null,
     mono: null,
   };
+  const fallbackFonts = await Promise.all((opts.fallbackTtfs ?? []).map(loadFont));
   const results: BakedAtlas[] = [];
   for (const slot of [...opts.slots].sort((a, b) => a - b)) {
     if (slot < 0 || slot >= MAX_FONT_SLOTS) {
@@ -440,7 +475,10 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
           ? (opts.boldTtf ?? DEFAULT_BOLD)
           : (opts.regularTtf ?? DEFAULT_REGULAR),
     );
-    results.push(bakeSlot(fonts[key]!, slot, px, bold, chars, rasterDensity));
+    // Monospace slots deliberately do not inherit proportional fallbacks: a
+    // face with different advances would break the slot's alignment contract.
+    const faces = mono ? fonts[key]! : [fonts[key]!, ...fallbackFonts];
+    results.push(bakeSlot(faces, slot, px, bold, chars, rasterDensity));
   }
   return results;
 }

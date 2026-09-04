@@ -37,6 +37,10 @@ const pocketRockShell = readFileSync(
   join(root, "apps/pocketrock/app.tsx"),
   "utf8",
 );
+const pocketRockShellView = readFileSync(
+  join(root, "apps/pocketrock/ui/shell-view.tsx"),
+  "utf8",
+);
 const heroManifest = JSON.parse(
   readFileSync(join(root, "apps/hero-rockbox/pocket.json"), "utf8"),
 );
@@ -182,15 +186,22 @@ describe("Rockbox iPod classic development profile", () => {
     expect(pocketRockShell).toContain('from "../../framework/src/ipod-list-motion.ts"');
     expect(pocketRockShell).toContain("wheelMultiplier(wheelBurst)");
     expect(pocketRockShell).toContain("contactVisibleIndex(");
-    expect(pocketRockShell).toContain("contactSelectionY(");
+    expect(pocketRockShellView).toContain("contactSelectionY(");
     expect(pocketRockShell).toContain("listScroller.stop()");
     expect(pocketRockShell).toContain("wheelIdleFrames === 1");
-    const separators = pocketRockShell.indexOf('bg-[#d5d9df]');
-    const selection = pocketRockShell.indexOf('bg-[#2378d4]');
-    const text = pocketRockShell.indexOf("{row.title}");
+    const shellList = pocketRockShellView.slice(
+      pocketRockShellView.indexOf("export function ShellList("),
+      pocketRockShellView.indexOf("export function ShellListScreen("),
+    );
+    const separators = shellList.indexOf('bg-[#d7dde4]');
+    const selection = shellList.indexOf('bg-[#176fce]');
+    const text = shellList.indexOf("{row.title}");
     expect(separators).toBeGreaterThan(-1);
     expect(separators).toBeLessThan(selection);
     expect(selection).toBeLessThan(text);
+    expect(pocketRockShell).toContain("<ShellListScreen");
+    expect(pocketRockShell).toContain("<NowPlayingScreen");
+    expect(pocketRockShell).toContain("<UsbScreen");
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", -64');
     expect(pocketRockShell).toContain('animate(activePanel, "translateX", 0');
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", 320');
@@ -225,5 +236,7 @@ describe("Rockbox iPod classic development profile", () => {
     expect(releaseTool).toContain('join(rbdir, "themes/PocketRock.cfg")');
     expect(releaseTool).toContain('join(rbdir, "wps/pocketrock.sbs")');
     expect(releaseTool).toContain('join(rbdir, "wps/pocketrock.wps")');
+    expect(releaseTool).toContain('join(rbdir, "pocketrock/LICENSE-HarmonyOS-Sans.txt")');
+    expect(releaseTool).toContain("PocketRock uses HarmonyOS Sans SC for Chinese glyphs");
   });
 });

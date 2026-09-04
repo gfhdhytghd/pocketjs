@@ -287,6 +287,10 @@ function release(source: string, buildDirectory: string): void {
     join(repository, "release/rockbox/wps/pocketrock.wps"),
     join(rbdir, "wps/pocketrock.wps"),
   );
+  copyFileSync(
+    join(repository, "apps/pocketrock/assets/fonts/LICENSE-HarmonyOS-Sans.txt"),
+    join(rbdir, "pocketrock/LICENSE-HarmonyOS-Sans.txt"),
+  );
   writeFileSync(join(pocketApps, "README.txt"),
     "Copy trusted rockbox-ip6g .pocket packages into this directory.\n");
   writeFileSync(join(rbdir, "pocketrock/NOTICE.txt"), [
@@ -294,6 +298,8 @@ function release(source: string, buildDirectory: string): void {
     `Rockbox baseline: ${process.env.POCKETROCK_ROCKBOX_REVISION ?? "420537c8643cc6ffc844115d2fca9e6129f7ce71"}`,
     `PocketJS revision: ${process.env.POCKETROCK_POCKETJS_REVISION ?? "working tree"}`,
     `QuickJS revision: ${POCKETROCK_QUICKJS_REVISION}`,
+    "PocketRock uses HarmonyOS Sans SC for Chinese glyphs (Copyright 2021 Huawei Device Co., Ltd.).",
+    "The HarmonyOS Sans Fonts License Agreement is shipped beside this notice and in the PocketJS source archive.",
     "Corresponding source archives are shipped beside this ZIP.",
     "Third-party .pocket applications are trusted and can access the iPod volume.",
     "",
