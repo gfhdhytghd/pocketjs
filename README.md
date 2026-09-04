@@ -260,6 +260,7 @@ hardware bootable is its own work, tracked in Pocket Museum.
 | --- | --- | --- |
 | PSP system software | MIPS, 32 MB | [Introducing PocketJS](https://pocketjs.dev/blog/introducing-pocketjs/) |
 | PS Vita system software | ARM, GXM | [Twice the pixels, zero forks](https://pocketjs.dev/blog/pocketjs-on-ps-vita/) |
+| Rockbox / PocketRock | ARM926EJ-S, RGB565 | [PocketRock v0.1](./docs/POCKETROCK.md) |
 | iPhone OS 3.1.3 | ARMv6, GL ES 1.1 | [The first iPhone](https://pocketjs.dev/blog/pocketjs-on-the-first-iphone/) |
 | iOS 6.1.3 | ARMv7 | [`hosts/iphone4s`](./hosts/iphone4s) |
 | iOS 12.5.8 | arm64 | [#278](https://github.com/pocket-stack/pocketjs/pull/278) |
@@ -274,7 +275,8 @@ hardware bootable is its own work, tracked in Pocket Museum.
 | The browser | WebAssembly core | [Playground](https://pocketjs.dev/playground/) |
 
 Devices verified so far: **Sony PSP** (2004), **PS Vita** (2011),
-**iPhone** (2007), **iPhone 4S** (2011), **iPod touch 6** (2015),
+**iPhone** (2007), **iPhone 4S** (2011), **iPod classic 6/7** (2007),
+**iPod touch 6** (2015),
 **Nokia E7** (2011), **Meizu M8** (2009), **BlackBerry Classic** (2014),
 **PocketBook reader** (e-ink), **ESP32-P4 devkit** (microcontroller), and
 **Mac** (Apple silicon).
@@ -299,6 +301,7 @@ links to how it was built.
 | [**Pocket YouTube**](https://pocketjs.dev/blog/pocket-youtube/) | Search, thumbnails, playback and seeking on a console that predates streaming, where the network is a USB cable and a Mac companion performs the fetching |
 | [**Pocket DevTools**](https://pocketjs.dev/blog/time-travel-devtools/) | Time-travel debugging over a USB cable at 2 bytes per frame. The inspector highlight is emitted by the core into the draw list, so it renders on the device, on every backend |
 | [**Pocket Launcher**](./docs/LAUNCHER.md) | Whole-application lifecycle, target admission, frozen shots, and guest switching on PSP and Vita |
+| [**PocketRock**](./docs/POCKETROCK.md) | A production iPod classic system shell over Rockbox, with Host ABI 10 services for media, storage, native applications, USB, power, and recovery |
 | [**Pocket Pi**](https://github.com/pocket-stack/pocket-pi) | A coding agent running inside the QuickJS guest environment, with no Node underneath |
 
 <p align="center">
@@ -388,7 +391,7 @@ bun run site:build            # docs, playground, Stage, and landing build
 | First application | [Getting started](https://pocketjs.dev/docs/getting-started/) |
 | Frameworks, components, styling | [Frameworks](https://pocketjs.dev/docs/frameworks/) · [Components](https://pocketjs.dev/docs/components/) · [Styling](https://pocketjs.dev/docs/styling/) |
 | Runtime internals | [Architecture](https://pocketjs.dev/docs/architecture/) · [Core concepts](https://pocketjs.dev/docs/concepts/) · [Native contract](https://pocketjs.dev/docs/native-contract/) |
-| Targets and packaging | [Platform contracts](https://pocketjs.dev/docs/platform-contracts/) · [The `.pocket` platform](./docs/PLATFORM.md) |
+| Targets and packaging | [Platform contracts](https://pocketjs.dev/docs/platform-contracts/) · [The `.pocket` platform](./docs/PLATFORM.md) · [PocketRock v0.1](./docs/POCKETROCK.md) |
 | Debugging and verification | [DevTools](./docs/DEVTOOLS.md) · [Determinism](./docs/DETERMINISM.md) |
 | Runtimes beyond 2D UI | [The runtime family](./docs/RUNTIMES.md) · [Pocket3D](./engine/pocket3d/README.md) |
 | Complete examples | [`apps/`](./apps/) · [Blog](https://pocketjs.dev/blog/) |

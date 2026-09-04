@@ -1,10 +1,16 @@
-# PocketJS for Rockbox iPod classic
+# PocketJS on Rockbox iPod classic
 
-This host embeds a PocketJS application in a Rockbox plugin for the 6th/7th
-generation iPod classic (`ipod6g`). It targets the native 320x240 RGB565 LCD
-and ARM926EJ-S/ARMv5TE CPU. The current profile is development-only and uses
-the software rasterizer, QuickJS, and Rockbox's remaining plugin buffer as a
-TLSF heap.
+This directory contains two iPod classic 6/7 generation (`ipod6g`) integration
+paths for the native 320x240 RGB565 LCD and ARM926EJ-S/ARMv5TE CPU:
+
+- `rockbox-ipod-classic-dev` builds one PocketJS application as a conventional
+  `.rock` plugin. It remains useful for isolated host development and tests.
+- `rockbox-ip6g` is the production PocketRock firmware target. Host ABI 10
+  boots the PocketRock Shell as the normal system interface and provides
+  bounded Rockbox-backed media, filesystem, launcher, and device services.
+
+The production compatibility contract, application layout, recovery behavior,
+and release process are documented in [PocketRock v0.1](../../docs/POCKETROCK.md).
 
 ## Controls
 
@@ -15,9 +21,9 @@ TLSF heap.
 | Left, Right | Left, Right |
 | Play/Pause | Start |
 | Wheel clockwise, counter-clockwise | Down, Up |
-| Hold Menu | Exit plugin |
+| Hold Menu | Exit a conventional development plugin |
 
-## Build
+## Development plugin
 
 Rockbox recommends building its ARM cross compiler with `tools/rockboxdev.sh`.
 For an existing Rockbox source checkout and toolchain:
@@ -35,7 +41,7 @@ The hardware artifact is written to:
 dist/rockbox/pocketjs-ipod6g.rock
 ```
 
-To package a different app, pass its manifest:
+To package a different application for the development host, pass its manifest:
 
 ```sh
 ROCKBOX_SOURCE=/path/to/rockbox \
@@ -45,9 +51,34 @@ ROCKBOX_SOURCE=/path/to/rockbox \
 Copy the resulting file to `.rockbox/rocks/apps/pocketjs.rock` on the mounted
 iPod, eject it cleanly, then launch it from **Plugins > Applications**.
 
-## Current boundary
+## Production PocketRock firmware
 
-This first host exposes baked text, software rendering, and click-wheel/button
-input. Audio, networking, filesystem APIs, and arbitrary logical viewport
-scaling are not advertised by the target profile. A successful cross-build or
-USB copy does not replace an on-device launch/input test.
+PocketRock uses the separate `rockbox-ip6g` target, a fixed 320x240 logical
+surface, and one releasable 12 MiB guest arena. Build a firmware image with:
+
+```sh
+export ROCKBOX_SOURCE=/path/to/gfhdhytghd-rockbox
+export ROCKBOX_BUILD=/path/to/build-ipod6g
+bun tools/rockbox.ts bootstrap
+make -C dist/rockbox/quickjs-rs/libquickjs-sys/embed/quickjs qjsc
+bun tools/rockbox.ts firmware
+```
+
+To assemble the complete release ZIP from a standard Rockbox iPod 6G package:
+
+```sh
+export POCKETROCK_BASE_ZIP=/path/to/rockbox-ipod6g.zip
+bun tools/rockbox.ts release
+```
+
+The release output includes `pocketrock-ipod6g-rockbox.zip`, `rockbox.ipod`,
+checksums, and source archives. PocketRock starts directly into its Shell; it is
+not launched from Rockbox's plugin menu.
+
+## Development-host boundary
+
+The conventional development host exposes baked text, software rendering, and
+click-wheel/button input. Audio, networking, filesystem APIs, and arbitrary
+logical viewport scaling are not advertised by that profile. Those limits do
+not describe the ABI 10 PocketRock production host. A successful cross-build or
+USB copy does not replace an on-device launch/input test for either path.
