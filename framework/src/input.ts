@@ -667,6 +667,34 @@ export function setAuxiliaryHitRoot(r: NodeMirror | null): void {
   auxiliaryHitRoot = r;
 }
 
+/** Deliver a host semantic action to its exact live primary-tree target.
+ * Recheck permissions at delivery: callbacks may mutate the tree during a batch.
+ * Semantic actions never bubble to an unrelated ancestor's press handler. */
+export function dispatchAccessibilityAction(id: number, action: string): boolean {
+  if (!Number.isInteger(id) || id <= 0 || !["activate", "increment", "decrement"].includes(action)) return false;
+  const node = findMirror(hitRoot ?? root, id);
+  if (!node) return false;
+  const scope = focusScopeStack.at(-1);
+  if (scope && !isWithin(node, scope)) return false;
+  for (let cursor: NodeMirror | null = node; cursor; cursor = cursor.parent) {
+    const attrs = cursor.domAttrs;
+    if (attrs?.accessibilityHidden === true || (attrs?.accessibilityState as { disabled?: boolean } | undefined)?.disabled === true) return false;
+  }
+  const attrs = node.domAttrs;
+  const declared = attrs?.accessibilityActions as readonly string[] | undefined;
+  if (!declared?.includes(action) && !(action === "activate" && node.onPress)) return false;
+  const handler = attrs?.onAccessibilityAction;
+  if (typeof handler === "function") {
+    handler({ actionName: action });
+    return true;
+  }
+  if (action === "activate" && node.onPress) {
+    node.onPress();
+    return true;
+  }
+  return false;
+}
+
 /** The interaction target for a raw hit: the nearest focusable ancestor
  *  the active focus scope can see. Only an explicitly pushed scope
  *  restricts (modal backgrounds stay inert while a Modal's FocusScope is

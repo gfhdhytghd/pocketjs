@@ -16,8 +16,8 @@
 //!     checked > 0 first).
 //!
 //! Clipping: the core pre-clips every op to the screen AND to enclosing
-//! scissors, but per the documented core degradations GLYPH_RUN cells and
-//! (defensively) TEX_QUAD texels still rely on the backend scissor for
+//! scissors, but GLYPH_RUN/GLYPH_RUN_XFORM cells and (defensively) TEX_QUAD
+//! texels still rely on the backend scissor for
 //! partial overlap at clip edges — so we keep a scissor stack and pixel-clip
 //! EVERY op against the current rect (a no-op for the pre-clipped ones).
 //!
@@ -45,6 +45,7 @@ use crate::{TexView, Ui};
 
 pub const MAX_RENDER_SCALE: u32 = 4;
 const DAMAGE_SIGNATURE_RGBA8: u64 = u32::from_be_bytes(*b"RGBA") as u64;
+const DAMAGE_SIGNATURE_RGBA8_PREMULTIPLIED: u64 = u32::from_be_bytes(*b"PRGA") as u64;
 const DAMAGE_SIGNATURE_ARGB8: u64 = u32::from_be_bytes(*b"ARGB") as u64;
 const DAMAGE_SIGNATURE_RGB565: u64 = u32::from_be_bytes(*b"R565") as u64;
 
@@ -55,6 +56,86 @@ struct Clip {
     y0: i32,
     x1: i32,
     y1: i32,
+}
+
+#[derive(Clone, Copy)]
+struct RoundedClip {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    rx: f32,
+    ry: f32,
+}
+
+impl RoundedClip {
+    #[inline]
+    fn contains(&self, x: i32, y: i32) -> bool {
+        if x < self.x0 || x >= self.x1 || y < self.y0 || y >= self.y1 {
+            return false;
+        }
+        if self.rx <= 0.0 || self.ry <= 0.0 {
+            return true;
+        }
+        let px = x as f32 + 0.5;
+        let py = y as f32 + 0.5;
+        let cx = if px < self.x0 as f32 + self.rx {
+            self.x0 as f32 + self.rx
+        } else if px > self.x1 as f32 - self.rx {
+            self.x1 as f32 - self.rx
+        } else {
+            px
+        };
+        let cy = if py < self.y0 as f32 + self.ry {
+            self.y0 as f32 + self.ry
+        } else if py > self.y1 as f32 - self.ry {
+            self.y1 as f32 - self.ry
+        } else {
+            py
+        };
+        let dx = (px - cx) / self.rx;
+        let dy = (py - cy) / self.ry;
+        dx * dx + dy * dy <= 1.0
+    }
+}
+
+struct RoundedTarget<'a, T> {
+    inner: &'a mut T,
+    stride: i32,
+    clips: &'a [RoundedClip],
+}
+
+impl<T: RenderTarget> RoundedTarget<'_, T> {
+    #[inline]
+    fn visible(&self, offset: usize) -> bool {
+        let x = (offset % self.stride as usize) as i32;
+        let y = (offset / self.stride as usize) as i32;
+        self.clips.iter().all(|clip| clip.contains(x, y))
+    }
+}
+
+impl<T: RenderTarget> RenderTarget for RoundedTarget<'_, T> {
+    fn pixel_len(&self) -> usize {
+        self.inner.pixel_len()
+    }
+
+    fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
+        if self.visible(offset) {
+            self.inner.blend(offset, r, g, b, a);
+        }
+    }
+
+    fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
+        if self.clips.is_empty() {
+            self.inner.fill_opaque(start, len, r, g, b);
+            return;
+        }
+        for offset in start..start + len {
+            if self.visible(offset) {
+                self.inner.fill_opaque(offset, 1, r, g, b);
+            }
+        }
+    }
 }
 
 impl Clip {
@@ -136,9 +217,14 @@ trait RenderTarget {
     fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32);
 
     #[inline]
-    fn clear_black(&mut self) {
+    fn clear_span(&mut self, start: usize, len: usize) {
+        self.fill_opaque(start, len, 0, 0, 0);
+    }
+
+    #[inline]
+    fn clear(&mut self) {
         let len = self.pixel_len();
-        self.fill_opaque(0, len, 0, 0, 0);
+        self.clear_span(0, len);
     }
 }
 
@@ -183,6 +269,59 @@ impl<const ARGB: bool> RenderTarget for RgbaTarget<'_, ARGB> {
     fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
         let byte_start = start * 4;
         fill_opaque_span::<ARGB>(&mut self.bytes[byte_start..byte_start + len * 4], r, g, b);
+    }
+}
+
+/// Premultiplied RGBA8 target for native alpha-composited surfaces. DrawList
+/// colors remain straight alpha; this target performs integer src-over and
+/// stores premultiplied RGB plus accumulated coverage alpha.
+struct PremultipliedRgbaTarget<'a> {
+    bytes: &'a mut [u8],
+}
+
+impl RenderTarget for PremultipliedRgbaTarget<'_> {
+    #[inline]
+    fn pixel_len(&self) -> usize {
+        assert_eq!(
+            self.bytes.len() & 3,
+            0,
+            "scaled framebuffer byte length must be a multiple of four"
+        );
+        self.bytes.len() / 4
+    }
+
+    #[inline]
+    fn blend(&mut self, offset: usize, r: u32, g: u32, b: u32, a: u32) {
+        if a == 0 {
+            return;
+        }
+        let o = offset * 4;
+        if a >= 255 {
+            self.bytes[o] = r as u8;
+            self.bytes[o + 1] = g as u8;
+            self.bytes[o + 2] = b as u8;
+            self.bytes[o + 3] = 255;
+            return;
+        }
+        let inverse = 255 - a;
+        let blend_channel = |source: u32, destination: u8| {
+            ((source * a + destination as u32 * inverse + 127) / 255) as u8
+        };
+        self.bytes[o] = blend_channel(r, self.bytes[o]);
+        self.bytes[o + 1] = blend_channel(g, self.bytes[o + 1]);
+        self.bytes[o + 2] = blend_channel(b, self.bytes[o + 2]);
+        self.bytes[o + 3] = (a + (self.bytes[o + 3] as u32 * inverse + 127) / 255) as u8;
+    }
+
+    #[inline]
+    fn fill_opaque(&mut self, start: usize, len: usize, r: u32, g: u32, b: u32) {
+        let byte_start = start * 4;
+        fill_opaque_span::<false>(&mut self.bytes[byte_start..byte_start + len * 4], r, g, b);
+    }
+
+    #[inline]
+    fn clear_span(&mut self, start: usize, len: usize) {
+        self.bytes[start * 4..(start + len) * 4].fill(0);
     }
 }
 
@@ -354,6 +493,13 @@ pub fn render_scaled(ui: &Ui, words: &[u32], fb: &mut [u8], scale: u32) {
     render_scaled_impl(ui, words, &mut target, scale, true);
 }
 
+/// Render to premultiplied RGBA8 over a transparent clear color. This is an
+/// explicit opt-in for hosts whose native surface is alpha composited.
+pub fn render_scaled_transparent(ui: &Ui, words: &[u32], fb: &mut [u8], scale: u32) {
+    let mut target = PremultipliedRgbaTarget { bytes: fb };
+    render_scaled_impl(ui, words, &mut target, scale, true);
+}
+
 /// Same as [`render_scaled`] but emits B,G,R,A bytes per pixel — the
 /// little-endian in-memory layout of an ARGB8888 u32 word, for hosts that
 /// present ARGB8888 directly. Byte-identical to shuffling the RGBA output,
@@ -504,6 +650,27 @@ pub fn render_scaled_incremental<const MAX_REGIONS: usize>(
     )
 }
 
+/// Incrementally render premultiplied RGBA8 over transparent damaged regions.
+pub fn render_scaled_transparent_incremental<const MAX_REGIONS: usize>(
+    ui: &Ui,
+    words: &[u32],
+    fb: &mut [u8],
+    scale: u32,
+    tracker: &mut DamageTracker<MAX_REGIONS>,
+    policy: DamagePolicy,
+) -> Result<DamagePlan<MAX_REGIONS>, DamageError> {
+    let mut target = PremultipliedRgbaTarget { bytes: fb };
+    render_scaled_incremental_impl(
+        ui,
+        words,
+        &mut target,
+        scale,
+        tracker,
+        policy,
+        DAMAGE_SIGNATURE_RGBA8_PREMULTIPLIED,
+    )
+}
+
 /// Incrementally render ARGB/BGRA-memory pixels.
 pub fn render_scaled_argb_incremental<const MAX_REGIONS: usize>(
     ui: &Ui,
@@ -555,7 +722,7 @@ fn render_scaled_impl<T: RenderTarget>(
 ) {
     let (width, _height, screen) = target_geometry(ui, target, scale);
     if clear {
-        target.clear_black();
+        target.clear();
     }
     render_scaled_clipped(ui, words, target, width, scale as i32, screen);
 }
@@ -663,16 +830,16 @@ fn render_damage_regions<T: RenderTarget>(
         if physical.x0 >= physical.x1 || physical.y0 >= physical.y1 {
             continue;
         }
-        clear_black_rect(target, width, physical);
+        clear_rect(target, width, physical);
         render_scaled_clipped(ui, words, target, width, scale, physical);
     }
 }
 
-fn clear_black_rect<T: RenderTarget>(target: &mut T, stride: i32, rect: Clip) {
+fn clear_rect<T: RenderTarget>(target: &mut T, stride: i32, rect: Clip) {
     let row_pixels = (rect.x1 - rect.x0) as usize;
     for y in rect.y0..rect.y1 {
         let start = (y * stride + rect.x0) as usize;
-        target.fill_opaque(start, row_pixels, 0, 0, 0);
+        target.clear_span(start, row_pixels);
     }
 }
 
@@ -685,11 +852,26 @@ fn render_scaled_clipped<T: RenderTarget>(
     screen: Clip,
 ) {
     let mut stack: [Clip; 32] = [screen; 32];
+    let mut rounded_depth_stack: [usize; 32] = [0; 32];
+    let mut rounded: [RoundedClip; 32] = [RoundedClip {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+        rx: 0.0,
+        ry: 0.0,
+    }; 32];
+    let mut rounded_depth = 0usize;
     let mut depth: usize = 0;
     let mut clip = screen;
 
     let mut i = 0usize;
     while i < words.len() {
+        let mut masked = RoundedTarget {
+            inner: target,
+            stride: width,
+            clips: &rounded[..rounded_depth],
+        };
         match words[i] {
             draw_op::RECT => {
                 if i + 4 > words.len() {
@@ -704,7 +886,7 @@ fn render_scaled_clipped<T: RenderTarget>(
                     y1: y + h,
                 });
                 if c.x0 < c.x1 && c.y0 < c.y1 {
-                    fill_rect(target, width, c, words[i + 3]);
+                    fill_rect(&mut masked, width, c, words[i + 3]);
                 }
                 i += 4;
             }
@@ -715,7 +897,7 @@ fn render_scaled_clipped<T: RenderTarget>(
                 let (x, y) = xy(words[i + 1], scale);
                 let (w, h) = wh(words[i + 2], scale);
                 grad_rect(
-                    target,
+                    &mut masked,
                     width,
                     clip,
                     x,
@@ -740,7 +922,7 @@ fn render_scaled_clipped<T: RenderTarget>(
                 }
                 glyph_run(
                     ui,
-                    target,
+                    &mut masked,
                     width,
                     scale,
                     clip,
@@ -750,11 +932,35 @@ fn render_scaled_clipped<T: RenderTarget>(
                 );
                 i += 3 + 2 * n;
             }
+            draw_op::GLYPH_RUN_XFORM => {
+                if i + 5 > words.len() {
+                    return;
+                }
+                let slot = (words[i + 1] & 0xff) as u8;
+                let n = (words[i + 1] >> 16) as usize;
+                let color = words[i + 2];
+                if i + 5 + 2 * n > words.len() {
+                    return;
+                }
+                glyph_run_xform(
+                    ui,
+                    &mut masked,
+                    width,
+                    scale,
+                    clip,
+                    slot,
+                    color,
+                    words[i + 3],
+                    words[i + 4],
+                    &words[i + 5..i + 5 + 2 * n],
+                );
+                i += 5 + 2 * n;
+            }
             draw_op::TEX_QUAD => {
                 if i + 9 > words.len() {
                     return;
                 }
-                tex_quad(ui, target, width, scale, clip, &words[i + 1..i + 9]);
+                tex_quad(ui, &mut masked, width, scale, clip, &words[i + 1..i + 9]);
                 i += 9;
             }
             // Native compositor instruction: software surfaces have no
@@ -770,6 +976,7 @@ fn render_scaled_clipped<T: RenderTarget>(
                     return;
                 }
                 stack[depth] = clip;
+                rounded_depth_stack[depth] = rounded_depth;
                 depth += 1;
                 let (x, y) = xy(words[i + 1], scale);
                 let (w, h) = wh(words[i + 2], scale);
@@ -783,10 +990,43 @@ fn render_scaled_clipped<T: RenderTarget>(
                 });
                 i += 3;
             }
+            draw_op::ROUNDED_CLIP => {
+                if i + 5 > words.len() || depth >= stack.len() || rounded_depth >= rounded.len() {
+                    return;
+                }
+                stack[depth] = clip;
+                rounded_depth_stack[depth] = rounded_depth;
+                depth += 1;
+                let (x, y) = xy(words[i + 1], scale);
+                let (w, h) = wh(words[i + 2], scale);
+                let rx = f32::from_bits(words[i + 3]) * scale as f32;
+                let ry = f32::from_bits(words[i + 4]) * scale as f32;
+                if !rx.is_finite() || !ry.is_finite() || rx < 0.0 || ry < 0.0 {
+                    return;
+                }
+                let shape = RoundedClip {
+                    x0: x,
+                    y0: y,
+                    x1: x + w,
+                    y1: y + h,
+                    rx,
+                    ry,
+                };
+                rounded[rounded_depth] = shape;
+                rounded_depth += 1;
+                clip = clip.intersect(Clip {
+                    x0: x,
+                    y0: y,
+                    x1: x + w,
+                    y1: y + h,
+                });
+                i += 5;
+            }
             draw_op::SCISSOR_POP => {
                 if depth > 0 {
                     depth -= 1;
                     clip = stack[depth];
+                    rounded_depth = rounded_depth_stack[depth];
                 } else {
                     clip = screen;
                 }
@@ -796,14 +1036,14 @@ fn render_scaled_clipped<T: RenderTarget>(
                 if i + 7 > words.len() {
                     return;
                 }
-                tri(target, width, scale, clip, &words[i + 1..i + 7]);
+                tri(&mut masked, width, scale, clip, &words[i + 1..i + 7]);
                 i += 7;
             }
             draw_op::TEX_TRI => {
                 if i + 12 > words.len() {
                     return;
                 }
-                tex_tri(ui, target, width, scale, clip, &words[i + 1..i + 12]);
+                tex_tri(ui, &mut masked, width, scale, clip, &words[i + 1..i + 12]);
                 i += 12;
             }
             draw_op::TEXT_RUN => {
@@ -931,6 +1171,52 @@ fn tri<T: RenderTarget>(target: &mut T, stride: i32, scale: i32, clip: Clip, p: 
     let flat = c0 == c1 && c1 == c2;
     let flat_opaque = flat && a0 >= 255;
     let half = area / 2;
+    if flat_opaque {
+        // Edge functions are affine in screen space. Step their values across
+        // each scanline instead of recomputing three 64-bit cross products at
+        // every pixel. This is byte-identical to the reference test below:
+        // the same doubled pixel-center coordinates and >= 0 edge rule are
+        // used, only the arithmetic is rearranged.
+        let e0x = -(cy - by) * 2;
+        let e1x = -(ay - cy) * 2;
+        let e2x = -(by - ay) * 2;
+        for py in min_y..max_y {
+            let sy = 2 * py as i64 + 1;
+            let sx = 2 * min_x as i64 + 1;
+            let mut w0 = orient(bx, by, cx, cy, sx, sy);
+            let mut w1 = orient(cx, cy, ax, ay, sx, sy);
+            let mut w2 = orient(ax, ay, bx, by, sx, sy);
+            let mut run_start: Option<i32> = None;
+            for px in min_x..max_x {
+                if w0 >= 0 && w1 >= 0 && w2 >= 0 {
+                    if run_start.is_none() {
+                        run_start = Some(px);
+                    }
+                } else if let Some(start) = run_start.take() {
+                    target.fill_opaque(
+                        (py * stride + start) as usize,
+                        (px - start) as usize,
+                        r0,
+                        g0,
+                        b0,
+                    );
+                }
+                w0 += e0x;
+                w1 += e1x;
+                w2 += e2x;
+            }
+            if let Some(start) = run_start {
+                target.fill_opaque(
+                    (py * stride + start) as usize,
+                    (max_x - start) as usize,
+                    r0,
+                    g0,
+                    b0,
+                );
+            }
+        }
+        return;
+    }
     for py in min_y..max_y {
         let sy = 2 * py as i64 + 1;
         for px in min_x..max_x {
@@ -951,13 +1237,31 @@ fn tri<T: RenderTarget>(target: &mut T, stride: i32, scale: i32, clip: Clip, p: 
                 let mix = |v0: u32, v1: u32, v2: u32| {
                     ((v0 as i64 * w0 + v1 as i64 * w1 + v2 as i64 * w2 + half) / area) as u32
                 };
-                target.blend(
-                    (py * stride + px) as usize,
-                    mix(r0, r1, r2),
-                    mix(g0, g1, g2),
-                    mix(b0, b1, b2),
-                    mix(a0, a1, a2),
-                );
+                // Rounded cards commonly use identical RGB vertices with
+                // only alpha varying. Keep the exact integer interpolation
+                // for varying channels, but avoid a 64-bit multiply/divide
+                // when a channel is constant across the triangle.
+                let rr = if r0 == r1 && r1 == r2 {
+                    r0
+                } else {
+                    mix(r0, r1, r2)
+                };
+                let gg = if g0 == g1 && g1 == g2 {
+                    g0
+                } else {
+                    mix(g0, g1, g2)
+                };
+                let bb = if b0 == b1 && b1 == b2 {
+                    b0
+                } else {
+                    mix(b0, b1, b2)
+                };
+                let aa = if a0 == a1 && a1 == a2 {
+                    a0
+                } else {
+                    mix(a0, a1, a2)
+                };
+                target.blend((py * stride + px) as usize, rr, gg, bb, aa);
             }
         }
     }
@@ -1022,13 +1326,106 @@ fn glyph_run<T: RenderTarget>(
         }
         let rows = atlas.glyph_rows(gid);
         for py in y0..y1 {
-            let sy = coverage_index(py - gy, output_scale, atlas_density, coverage_h);
+            // Density-2 Android rendering is the common case: the atlas and
+            // output use the same integer scale. Avoid two integer divisions
+            // per glyph pixel in that case; the centre-sample mapping reduces
+            // exactly to the local pixel coordinate.
+            let sy = if output_scale == atlas_density {
+                (py - gy).clamp(0, coverage_h - 1) as usize
+            } else {
+                coverage_index(py - gy, output_scale, atlas_density, coverage_h)
+            };
             let row = &rows[sy * bpr..];
+            if output_scale == atlas_density {
+                for px in x0..x1 {
+                    let cov = row[(px - gx).clamp(0, coverage_w - 1) as usize] as u32;
+                    if cov != 0 {
+                        let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
+                        target.blend((py * stride + px) as usize, r, g, b, alpha);
+                    }
+                }
+            } else {
+                for px in x0..x1 {
+                    let cx = coverage_index(px - gx, output_scale, atlas_density, coverage_w);
+                    let cov = row[cx] as u32;
+                    if cov != 0 {
+                        let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
+                        target.blend((py * stride + px) as usize, r, g, b, alpha);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Rasterize an affine glyph cell by mapping physical pixel centers through
+/// the inverse of its two encoded cell axes. The half-open local cell matches
+/// Vulkan's triangle coverage without double blending the shared diagonal.
+#[allow(clippy::too_many_arguments)]
+fn glyph_run_xform<T: RenderTarget>(
+    ui: &Ui,
+    target: &mut T,
+    stride: i32,
+    output_scale: i32,
+    clip: Clip,
+    slot: u8,
+    color: u32,
+    axis_x_word: u32,
+    axis_y_word: u32,
+    glyphs: &[u32],
+) {
+    let Some(atlas) = ui.font_atlas(slot) else {
+        return;
+    };
+    let (r, g, b, a) = channels(color);
+    if a == 0 {
+        return;
+    }
+    let (ux, uy) = xy(axis_x_word, output_scale);
+    let (vx, vy) = xy(axis_y_word, output_scale);
+    let det = ux as i64 * vy as i64 - uy as i64 * vx as i64;
+    if det == 0 {
+        return;
+    }
+    let coverage_w = atlas.coverage_width() as i32;
+    let coverage_h = atlas.coverage_height() as i32;
+    let bpr = atlas.bytes_per_row();
+    let inv_det = 1.0f32 / det as f32;
+    for pair in glyphs.chunks_exact(2) {
+        let gid = (pair[1] & 0xffff) as u16;
+        if gid >= atlas.glyph_count {
+            continue;
+        }
+        let (gx, gy) = xy(pair[0], output_scale);
+        let corners = [
+            (gx, gy),
+            (gx + ux, gy + uy),
+            (gx + vx, gy + vy),
+            (gx + ux + vx, gy + uy + vy),
+        ];
+        let x0 = corners.iter().map(|p| p.0).min().unwrap().max(clip.x0);
+        let x1 = corners.iter().map(|p| p.0).max().unwrap().min(clip.x1);
+        let y0 = corners.iter().map(|p| p.1).min().unwrap().max(clip.y0);
+        let y1 = corners.iter().map(|p| p.1).max().unwrap().min(clip.y1);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        let rows = atlas.glyph_rows(gid);
+        for py in y0..y1 {
             for px in x0..x1 {
-                let cx = coverage_index(px - gx, output_scale, atlas_density, coverage_w);
-                let cov = row[cx] as u32;
+                let dx = px as f32 + 0.5 - gx as f32;
+                let dy = py as f32 + 0.5 - gy as f32;
+                let u = (dx * vy as f32 - dy * vx as f32) * inv_det;
+                let v = (ux as f32 * dy - uy as f32 * dx) * inv_det;
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let sx = ((u * coverage_w as f32) as i32).clamp(0, coverage_w - 1);
+                let sy = ((v * coverage_h as f32) as i32).clamp(0, coverage_h - 1);
+                let cov = rows[sy as usize * bpr + sx as usize] as u32;
                 if cov != 0 {
-                    target.blend((py * stride + px) as usize, r, g, b, (a * cov + 127) / 255);
+                    let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
+                    target.blend((py * stride + px) as usize, r, g, b, alpha);
                 }
             }
         }
@@ -1336,6 +1733,179 @@ mod tests {
     }
 
     #[test]
+    fn flat_opaque_triangle_edge_step_matches_reference_randomized() {
+        fn reference(fb: &mut [u8], width: i32, scale: i32, clip: Clip, p: &[u32]) {
+            let (x0, y0) = xy(p[0], scale);
+            let (x1, y1) = xy(p[1], scale);
+            let (x2, y2) = xy(p[2], scale);
+            let (mut bx, mut by, mut cx, mut cy) =
+                (2 * x1 as i64, 2 * y1 as i64, 2 * x2 as i64, 2 * y2 as i64);
+            let (ax, ay) = (2 * x0 as i64, 2 * y0 as i64);
+            let mut area = orient(ax, ay, bx, by, cx, cy);
+            if area == 0 {
+                return;
+            }
+            if area < 0 {
+                core::mem::swap(&mut bx, &mut cx);
+                core::mem::swap(&mut by, &mut cy);
+                area = -area;
+            }
+            let min_x = x0.min(x1).min(x2).max(clip.x0);
+            let max_x = x0.max(x1).max(x2).min(clip.x1);
+            let min_y = y0.min(y1).min(y2).max(clip.y0);
+            let max_y = y0.max(y1).max(y2).min(clip.y1);
+            let (r, g, b, _) = channels(p[3]);
+            for py in min_y..max_y {
+                for px in min_x..max_x {
+                    let sx = 2 * px as i64 + 1;
+                    let sy = 2 * py as i64 + 1;
+                    if orient(bx, by, cx, cy, sx, sy) >= 0
+                        && orient(cx, cy, ax, ay, sx, sy) >= 0
+                        && orient(ax, ay, bx, by, sx, sy) >= 0
+                    {
+                        let o = ((py * width + px) * 4) as usize;
+                        fb[o..o + 4].copy_from_slice(&[r as u8, g as u8, b as u8, 255]);
+                    }
+                }
+            }
+            let _ = area;
+        }
+        let mut seed = 0x9e37_79b9u32;
+        for scale in [1i32, 2] {
+            for _ in 0..1000 {
+                let next = |s: &mut u32| {
+                    *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (*s >> 16) as i32 % 76 - 12
+                };
+                let mut p = [0u32; 6];
+                for i in 0..3 {
+                    p[i] = xy_word(next(&mut seed) as i16, next(&mut seed) as i16);
+                }
+                p[3] = 0xff66_33cc;
+                p[4] = p[3];
+                p[5] = p[3];
+                let mut actual = vec![0u8; (64 * scale * 64 * scale * 4) as usize];
+                let mut expected = actual.clone();
+                let clip = Clip {
+                    x0: 3,
+                    y0: 5,
+                    x1: 60 * scale,
+                    y1: 58 * scale,
+                };
+                let mut target = RgbaTarget::<false> { bytes: &mut actual };
+                tri(&mut target, 64 * scale, scale, clip, &p);
+                reference(&mut expected, 64 * scale, scale, clip, &p);
+                assert_eq!(actual, expected, "triangle mismatch scale={scale} p={p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn matched_density_coverage_mapping_is_direct_and_clamped() {
+        for density in 1..=4 {
+            for limit in [1, 3, 17, 64] {
+                for local in -3..(limit + 3) {
+                    assert_eq!(
+                        coverage_index(local, density, density, limit),
+                        local.clamp(0, limit - 1) as usize
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gouraud_triangle_channels_match_independent_reference_randomized() {
+        fn reference(fb: &mut [u8], width: i32, scale: i32, clip: Clip, p: &[u32; 6]) {
+            let (x0, y0) = xy(p[0], scale);
+            let (x1, y1) = xy(p[1], scale);
+            let (x2, y2) = xy(p[2], scale);
+            let (ax, ay) = (2 * x0 as i64, 2 * y0 as i64);
+            let (mut bx, mut by) = (2 * x1 as i64, 2 * y1 as i64);
+            let (mut cx, mut cy) = (2 * x2 as i64, 2 * y2 as i64);
+            let (mut c1, mut c2) = (p[4], p[5]);
+            let mut area = orient(ax, ay, bx, by, cx, cy);
+            if area == 0 {
+                return;
+            }
+            if area < 0 {
+                core::mem::swap(&mut bx, &mut cx);
+                core::mem::swap(&mut by, &mut cy);
+                core::mem::swap(&mut c1, &mut c2);
+                area = -area;
+            }
+            let min_x = x0.min(x1).min(x2).max(clip.x0);
+            let max_x = x0.max(x1).max(x2).min(clip.x1);
+            let min_y = y0.min(y1).min(y2).max(clip.y0);
+            let max_y = y0.max(y1).max(y2).min(clip.y1);
+            let (r0, g0, b0, a0) = channels(p[3]);
+            let (r1, g1, b1, a1) = channels(c1);
+            let (r2, g2, b2, a2) = channels(c2);
+            let half = area / 2;
+            for py in min_y..max_y {
+                for px in min_x..max_x {
+                    let sx = 2 * px as i64 + 1;
+                    let sy = 2 * py as i64 + 1;
+                    let w0 = orient(bx, by, cx, cy, sx, sy);
+                    let w1 = orient(cx, cy, ax, ay, sx, sy);
+                    let w2 = orient(ax, ay, bx, by, sx, sy);
+                    if w0 < 0 || w1 < 0 || w2 < 0 {
+                        continue;
+                    }
+                    let mix = |v0: u32, v1: u32, v2: u32| {
+                        ((v0 as i64 * w0 + v1 as i64 * w1 + v2 as i64 * w2 + half) / area) as u8
+                    };
+                    let sr = mix(r0, r1, r2);
+                    let sg = mix(g0, g1, g2);
+                    let sb = mix(b0, b1, b2);
+                    let sa = mix(a0, a1, a2) as u32;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let o = ((py * width + px) * 4) as usize;
+                    fb[o..o + 4].copy_from_slice(&[
+                        ((sr as u32 * sa + 127) / 255) as u8,
+                        ((sg as u32 * sa + 127) / 255) as u8,
+                        ((sb as u32 * sa + 127) / 255) as u8,
+                        255,
+                    ]);
+                }
+            }
+        }
+        let mut seed = 0x1234_5678u32;
+        let next = |s: &mut u32| {
+            *s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (*s >> 16) as i32 % 76 - 12
+        };
+        for scale in [1i32, 2, 3] {
+            for _ in 0..1000 {
+                let mut p = [0u32; 6];
+                for i in 0..3 {
+                    p[i] = xy_word(next(&mut seed) as i16, next(&mut seed) as i16);
+                }
+                for i in 3..6 {
+                    p[i] = (next(&mut seed) as u32 & 0xff)
+                        | ((next(&mut seed) as u32 & 0xff) << 8)
+                        | ((next(&mut seed) as u32 & 0xff) << 16)
+                        | ((next(&mut seed) as u32 & 0xff) << 24);
+                }
+                let mut actual = vec![0u8; (64 * scale * 64 * scale * 4) as usize];
+                let mut expected = actual.clone();
+                let clip = Clip {
+                    x0: 3,
+                    y0: 5,
+                    x1: 60 * scale,
+                    y1: 58 * scale,
+                };
+                let mut target = RgbaTarget::<false> { bytes: &mut actual };
+                tri(&mut target, 64 * scale, scale, clip, &p);
+                reference(&mut expected, 64 * scale, scale, clip, &p);
+                assert_eq!(actual, expected, "gouraud mismatch scale={scale} p={p:?}");
+            }
+        }
+    }
+
+    #[test]
     fn render_scaled_over_composites_without_clearing() {
         // The OVER variant must leave untouched pixels exactly as supplied
         // (a transparent scratch stays transparent outside the ops — the
@@ -1352,12 +1922,20 @@ mod tests {
         over.fill(7); // sentinel: pre-existing content
         render_scaled_over(&ui, &words, &mut over, 1);
         assert_eq!(rgba(&over, 1, 15, 15), [255, 0, 0, 255], "op painted");
-        assert_eq!(rgba(&over, 1, 5, 5), [7, 7, 7, 7], "untouched pixel preserved");
+        assert_eq!(
+            rgba(&over, 1, 5, 5),
+            [7, 7, 7, 7],
+            "untouched pixel preserved"
+        );
 
         let mut cleared = framebuffer(1);
         cleared.fill(7);
         render_scaled(&ui, &words, &mut cleared, 1);
-        assert_eq!(rgba(&cleared, 1, 5, 5), [0, 0, 0, 255], "clearing variant blacks out");
+        assert_eq!(
+            rgba(&cleared, 1, 5, 5),
+            [0, 0, 0, 255],
+            "clearing variant blacks out"
+        );
     }
 
     #[test]
@@ -1677,12 +2255,7 @@ mod tests {
         let mut ui = Ui::new();
         ui.set_viewport(96.0, 8.0);
         let frame = |color: u32| {
-            let mut words = vec![
-                draw_op::RECT,
-                xy_word(0, 0),
-                wh_word(96, 8),
-                0xff10_0804,
-            ];
+            let mut words = vec![draw_op::RECT, xy_word(0, 0), wh_word(96, 8), 0xff10_0804];
             for index in 0..9 {
                 words.extend_from_slice(&[
                     draw_op::RECT,
@@ -1750,9 +2323,46 @@ mod tests {
         )
         .unwrap();
         assert!(argb.is_full_redraw());
-        assert!(bytes
-            .chunks_exact(4)
-            .all(|pixel| pixel == [0x33, 0x22, 0x11, 0xff]));
+        assert!(
+            bytes
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0x33, 0x22, 0x11, 0xff])
+        );
+    }
+
+    #[test]
+    fn rounded_clip_preserves_offscreen_circle_and_intersects_nested_scissor() {
+        let mut ui = Ui::new();
+        ui.set_viewport(8.0, 8.0);
+        let words = [
+            draw_op::ROUNDED_CLIP,
+            xy_word(-4, 0),
+            wh_word(8, 8),
+            4.0f32.to_bits(),
+            4.0f32.to_bits(),
+            draw_op::SCISSOR,
+            xy_word(0, 0),
+            wh_word(3, 8),
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(8, 8),
+            0xff00_00ff,
+            draw_op::SCISSOR_POP,
+            draw_op::SCISSOR_POP,
+        ];
+        let mut pixels = vec![0u8; 8 * 8 * 4];
+        render_scaled(&ui, &words, &mut pixels, 1);
+        let red = |x: usize, y: usize| pixels[(y * 8 + x) * 4] == 255;
+        assert!(
+            red(0, 0),
+            "original offscreen circle centre must be retained"
+        );
+        assert!(red(2, 3), "pixel inside both nested clips must render");
+        assert!(!red(3, 3), "nested rectangular clip must still apply");
+        assert!(
+            !red(2, 0),
+            "pixel outside the original circle must be rejected"
+        );
     }
 
     #[test]
@@ -1881,6 +2491,72 @@ mod tests {
     }
 
     #[test]
+    fn transparent_target_uses_premultiplied_source_over_and_preserves_clear() {
+        let mut ui = Ui::new();
+        ui.set_viewport(2.0, 1.0);
+        let words = [draw_op::RECT, xy_word(0, 0), wh_word(1, 1), 0x8040_2010];
+
+        let mut transparent = vec![0xff; 2 * 4];
+        render_scaled_transparent(&ui, &words, &mut transparent, 1);
+        assert_eq!(&transparent[0..4], &[8, 16, 32, 128]);
+        assert_eq!(&transparent[4..8], &[0, 0, 0, 0]);
+
+        let overlaid = [
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(1, 1),
+            0x8040_2010,
+            draw_op::RECT,
+            xy_word(0, 0),
+            wh_word(1, 1),
+            0x8000_00ff,
+        ];
+        render_scaled_transparent(&ui, &overlaid, &mut transparent, 1);
+        assert_eq!(&transparent[0..4], &[132, 8, 16, 192]);
+        assert_eq!(&transparent[4..8], &[0, 0, 0, 0]);
+
+        let mut opaque = vec![0; 2 * 4];
+        render_scaled(&ui, &words, &mut opaque, 1);
+        assert_eq!(&opaque[0..4], &[8, 16, 32, 255]);
+        assert_eq!(&opaque[4..8], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn transparent_incremental_clears_old_damage_to_transparent() {
+        let mut ui = Ui::new();
+        ui.set_viewport(2.0, 1.0);
+        let frame = |x| vec![draw_op::RECT, xy_word(x, 0), wh_word(1, 1), 0x8040_2010];
+        let previous = frame(0);
+        let current = frame(1);
+        let mut incremental = vec![0xff; 2 * 4];
+        let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
+        render_scaled_transparent_incremental(
+            &ui,
+            &previous,
+            &mut incremental,
+            1,
+            &mut tracker,
+            DamagePolicy::default(),
+        )
+        .unwrap();
+        render_scaled_transparent_incremental(
+            &ui,
+            &current,
+            &mut incremental,
+            1,
+            &mut tracker,
+            DamagePolicy::default(),
+        )
+        .unwrap();
+
+        let mut full = vec![0xff; 2 * 4];
+        render_scaled_transparent(&ui, &current, &mut full, 1);
+        assert_eq!(incremental, full);
+        assert_eq!(&incremental[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&incremental[4..8], &[8, 16, 32, 128]);
+    }
+
+    #[test]
     fn geometry_gradients_triangles_and_scissors_use_physical_samples() {
         let ui = Ui::new();
         let words = vec![
@@ -1977,5 +2653,41 @@ mod tests {
                 assert_eq!(rgba(&fb, 2, 6 + x, y)[0], coverage[y * 4 + x]);
             }
         }
+    }
+
+    #[test]
+    fn transformed_glyph_run_rotates_coverage_and_preserves_source_alpha() {
+        let mut ui = Ui::new();
+        assert!(ui.load_font_atlas(&density_two_font()));
+        let words = [
+            draw_op::GLYPH_RUN_XFORM,
+            1 << 16,
+            0x80ff_ffff,
+            xy_word(0, 2),
+            xy_word(-2, 0),
+            xy_word(4, 1),
+            0,
+        ];
+        let mut fb = framebuffer(1);
+        render_scaled(&ui, &words, &mut fb, 1);
+
+        // Source coverage rows [0..48] and [64..112] are rotated clockwise:
+        // the destination top row samples source rows 3 then 1. The text
+        // color's half alpha continues to modulate glyph coverage.
+        let alpha = |coverage: u32| ((coverage * 128 + 127) / 255) as u8;
+        assert_eq!(
+            rgba(&fb, 1, 2, 1),
+            [alpha(208), alpha(208), alpha(208), 255]
+        );
+        assert_eq!(rgba(&fb, 1, 3, 1), [alpha(80), alpha(80), alpha(80), 255]);
+        assert_eq!(
+            rgba(&fb, 1, 2, 2),
+            [alpha(255), alpha(255), alpha(255), 255]
+        );
+        assert_eq!(
+            rgba(&fb, 1, 3, 2),
+            [alpha(112), alpha(112), alpha(112), 255]
+        );
+        assert_eq!(rgba(&fb, 1, 4, 1), [0, 0, 0, 255]);
     }
 }

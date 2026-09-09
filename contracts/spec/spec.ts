@@ -900,7 +900,7 @@ export const WIRE_MARK_FLAG_ENDED = 1 << 0;
 
 // 0..6 regular / 7..13 bold (FONT_PX sizes), 14/15 the 54 px display pair,
 // 16..18 monospace regular (12/14/16 px — `font-mono`, code spans).
-export const MAX_FONT_SLOTS = 24;
+export const MAX_FONT_SLOTS = 29;
 
 // ---------------------------------------------------------------------------
 // STYLE TABLE binary format — styles.bin  (version 2)
@@ -1381,6 +1381,18 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           word2: color,
 //                           then n x { xy (glyph cell top-left),
 //                                      word: bits 0-15 gid, bits 16-31 reserved(0) }
+//   GLYPH_RUN_XFORM (5 + 2n): op,
+//                           word1/word2 match GLYPH_RUN,
+//                           word3: signed i16 xy vector from cell top-left to
+//                                  its transformed top-right,
+//                           word4: signed i16 xy vector from cell top-left to
+//                                  its transformed bottom-left,
+//                           then n x { signed i16 xy transformed cell top-left,
+//                                      word: bits 0-15 gid, bits 16-31 reserved(0) }.
+//                           This additive command is emitted only for hosts
+//                           which opt into extended DrawList geometry. Its
+//                           signed anchors and corners remain i16-safe and are
+//                           clipped by the current clip stack.
 //   TEX_QUAD    (9 words):  op, texHandle, xy, wh, u0, v0, u1, v1 (f32 bits,
 //                           normalized 0..1), color (modulate; 0xFFFFFFFF = none)
 //   SCISSOR     (3 words):  op, xy, wh — push clip rect. The core emits rects
@@ -1389,7 +1401,19 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           not a rect stack, still needs the pop's restore —
 //                           backends keep a stack of the received rects).
 //   SCISSOR_POP (1 word):   op — restore the previous scissor (screen if empty).
-//                           Core guarantees balanced SCISSOR/SCISSOR_POP.
+//                           Pops either SCISSOR or ROUNDED_CLIP. Core guarantees
+//                           a balanced shared clip stack.
+//   ROUNDED_CLIP (5 words): op, xy, wh, radiusX, radiusY — push an
+//                           axis-aligned rounded-rectangle clip. xy/wh are the
+//                           ORIGINAL transformed border box, never trimmed by
+//                           an ancestor or viewport, so its corner
+//                           centres stay stable while partially off-screen.
+//                           Its xy metadata is exempt from the non-negative
+//                           coordinate guarantee (but remains i16-safe).
+//                           radii are finite non-negative f32 logical pixels,
+//                           clamped to half the box dimensions. Coverage is the
+//                           intersection of every rectangular and rounded entry
+//                           on the shared stack; SCISSOR_POP restores either.
 //   TRI         (7 words):  op, xy0, xy1, xy2, color0, color1, color2 — one
 //                           CPU-clipped screen-space triangle (gouraud when the
 //                           corner colors differ, flat otherwise). The core
@@ -1455,6 +1479,8 @@ export const DRAW_OP = {
   texTri: 8,
   textRun: 9,
   surfaceQuad: 10,
+  roundedClip: 11,
+  glyphRunXform: 12,
 } as const;
 
 // ---------------------------------------------------------------------------

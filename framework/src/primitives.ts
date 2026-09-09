@@ -6,6 +6,8 @@
 // tests can import the public entry without a Solid transform step.
 
 import type { JSX as SolidJSX } from "solid-js";
+import type { AccessibilityProps } from "./accessibility.ts";
+export type { AccessibilityProps, AccessibilityRole, AccessibilityState, AccessibilityAction } from "./accessibility.ts";
 import { createElement, spread } from "./renderer.ts";
 import type { NodeMirror } from "./renderer.ts";
 
@@ -16,7 +18,7 @@ type RefProp =
   | NodeMirror
   | undefined;
 
-export interface ViewProps {
+export interface ViewProps extends AccessibilityProps {
   class?: string;
   style?: StyleObject;
   onPress?: () => void;
@@ -28,7 +30,7 @@ export interface ViewProps {
   children?: SolidJSX.Element;
 }
 
-export interface TextProps {
+export interface TextProps extends AccessibilityProps {
   class?: string;
   style?: StyleObject;
   /** DevTools semantic name shown in the component tree (docs/DEVTOOLS.md). */
@@ -38,7 +40,7 @@ export interface TextProps {
   children?: SolidJSX.Element;
 }
 
-export interface ImageProps {
+export interface ImageProps extends AccessibilityProps {
   class?: string;
   src?: string;
   style?: StyleObject;
@@ -54,7 +56,7 @@ function callRef(ref: RefProp, node: NodeMirror): void {
   else if ("current" in ref) ref.current = node;
 }
 
-export interface SpriteProps {
+export interface SpriteProps extends AccessibilityProps {
   class?: string;
   /** DevTools semantic name shown in the component tree (docs/DEVTOOLS.md). */
   debugName?: string;
@@ -64,7 +66,7 @@ export interface SpriteProps {
   ref?: RefProp;
 }
 
-export interface CompositorSurfaceProps {
+export interface CompositorSurfaceProps extends AccessibilityProps {
   class?: string;
   style?: StyleObject;
   /** Stable package id from the resolved Pocket System installation model. */

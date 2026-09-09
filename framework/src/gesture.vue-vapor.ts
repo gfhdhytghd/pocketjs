@@ -15,7 +15,7 @@ export type {
   GesturePinch,
   GestureRegion,
 } from "./gesture-core.ts";
-export { __runGestures, attachGesture, pushTouchBlock, resetGestures } from "./gesture-core.ts";
+export { __runGestures, attachGesture, pushTouchBlock, cancelActiveTouches, resetGestures } from "./gesture-core.ts";
 
 /** attachGesture + onScopeDispose(dispose) for Vue component scopes. */
 export function createGesture(opts: GestureOptions): GestureHandle {

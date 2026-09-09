@@ -8,6 +8,8 @@ import {
   watchEffect,
 } from "vue";
 import type { JSX as SolidJSX } from "solid-js";
+import type { AccessibilityProps } from "./accessibility.ts";
+export type { AccessibilityProps, AccessibilityRole, AccessibilityState, AccessibilityAction } from "./accessibility.ts";
 import { ENUMS, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
 import { animate, type EasingName } from "./animation.ts";
 import { pushButtonHandlerBlock, onButtonPress, onFrame, type ButtonPressOptions } from "./frame-vue-vapor.ts";
@@ -47,7 +49,7 @@ const insertVaporBlock = vaporInsert as unknown as (
   parent: NodeMirror,
   anchor?: NodeMirror | null,
 ) => void;
-export interface ViewProps {
+export interface ViewProps extends AccessibilityProps {
   class?: string;
   className?: string;
   style?: StyleObject;
@@ -57,7 +59,7 @@ export interface ViewProps {
   children?: VNodeChild;
 }
 
-export interface TextProps {
+export interface TextProps extends AccessibilityProps {
   class?: string;
   className?: string;
   style?: StyleObject;
@@ -65,7 +67,7 @@ export interface TextProps {
   children?: VNodeChild;
 }
 
-export interface ImageProps {
+export interface ImageProps extends AccessibilityProps {
   class?: string;
   className?: string;
   src?: string;
@@ -73,7 +75,7 @@ export interface ImageProps {
   nodeRef?: NodeRef;
 }
 
-export interface SpriteProps {
+export interface SpriteProps extends AccessibilityProps {
   class?: string;
   className?: string;
   sprite?: string;
@@ -81,7 +83,7 @@ export interface SpriteProps {
   nodeRef?: NodeRef;
 }
 
-export interface CompositorSurfaceProps {
+export interface CompositorSurfaceProps extends AccessibilityProps {
   class?: string;
   className?: string;
   style?: StyleObject;
@@ -210,16 +212,19 @@ function cleanProps(props: Record<string, unknown>, omit: Set<string>): HostProp
       ? "debugName"
       : rawKey === "node-ref"
         ? "nodeRef"
-        : rawKey;
+        : rawKey.startsWith("accessibility-")
+          ? rawKey.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())
+          : rawKey;
     if (omit.has(rawKey) || omit.has(key)) continue;
     const rawValue = props[rawKey];
     if (key === "class" || key === "className") out[key] = normalizeClassValue(rawValue);
     else if (key === "style") out[key] = normalizeStyleValue(rawValue);
     else if (key === "onPress" || key === "on:press") out[key] = callbackOf<() => void>(rawValue);
+    else if (key === "onAccessibilityAction") out[key] = callbackOf<NonNullable<AccessibilityProps["onAccessibilityAction"]>>(rawValue);
     // Primitive host components intentionally keep props in attrs instead of
     // declaring runtime prop tables. Vue therefore leaves a bare boolean
     // attribute as ""; on native components it still means true.
-    else if (key === "focusable") {
+    else if (key === "focusable" || key === "accessibilityHidden") {
       const resolved = valueOf(rawValue);
       out[key] = resolved === "" ? true : resolved;
     } else out[key] = valueOf(rawValue);

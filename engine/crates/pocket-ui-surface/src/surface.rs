@@ -14,7 +14,7 @@
 //! host omits it and the framework defaults to 480x272).
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -66,9 +66,9 @@ struct SpriteReg {
 
 struct Inner {
     ui: Ui,
-    /// The fed pak, kept whole: `loadTileTexture` decodes TILESET entries
-    /// out of it on demand (tile bytes never transit the JS heap).
-    pak: Vec<u8>,
+    /// Lazy entries remain here after `feed_pak`; styles, fonts, images, and
+    /// sprites have already been ingested by the core.
+    tile_paks: HashMap<String, Vec<u8>>,
     /// pak image name → core texture handle (`ui.__textures`).
     textures: Vec<(String, i32)>,
     sprites: Vec<SpriteReg>,
@@ -89,6 +89,14 @@ struct Inner {
     /// not match their target (framework/src/host.ts assertNativeHostContract).
     host_id: String,
     host_abi: Option<u32>,
+}
+
+fn should_retain_lazy_entry(key: &str) -> bool {
+    key.starts_with("ui:tile.")
+        || !(key == "ui:styles"
+            || key.starts_with("ui:font.")
+            || key.starts_with("ui:img.")
+            || key.starts_with("ui:sprite."))
 }
 
 /// The `ui` surface. Clone-cheap handle; single-threaded like the guest.
@@ -115,7 +123,7 @@ impl UiSurface {
         UiSurface {
             inner: Rc::new(RefCell::new(Inner {
                 ui,
-                pak: Vec::new(),
+                tile_paks: HashMap::new(),
                 textures: Vec::new(),
                 sprites: Vec::new(),
                 surfaces: Vec::new(),
@@ -181,9 +189,11 @@ impl UiSurface {
     /// images/sprites upload as core textures. Call before `mount`.
     pub fn feed_pak(&self, pak: &[u8]) {
         let mut inner = self.inner.borrow_mut();
-        inner.pak = pak.to_vec();
+        inner.tile_paks.clear();
         for entry in walk_pak(pak) {
-            if entry.key == "ui:styles" {
+            if should_retain_lazy_entry(entry.key) {
+                inner.tile_paks.insert(entry.key.to_string(), entry.blob.to_vec());
+            } else if entry.key == "ui:styles" {
                 if !inner.ui.load_styles(entry.blob) {
                     log::warn!("pocket-ui: bad styles.bin in pak");
                 }
@@ -238,7 +248,8 @@ impl UiSurface {
                     log::warn!("pocket-ui: sprite {} rejected", entry.key);
                 }
             }
-            // unknown keys: ignored (forward compatible)
+            // Unknown keys are retained for the loadTileTexture compatibility
+            // path; custom TILESET names need not use the ui:tile prefix.
         }
     }
 
@@ -345,6 +356,13 @@ impl UiSurface {
             let ui = self.inner.clone();
             op!("replaceText", move |id: i32, s: LossyString| {
                 ui.borrow_mut().ui.replace_text(id, &s.0)
+            });
+
+            let ui = self.inner.clone();
+            op!("setAccessibility", move |id:i32,label:Option<LossyString>,role:i32,value:Option<LossyString>,hint:Option<LossyString>,flags:i32,actions:i32| {
+                use pocketjs_core::accessibility::{Properties,Role};
+                if !(-1..=9).contains(&role) || !(0..=1023).contains(&flags) || !(0..=7).contains(&actions) {return false;}
+                ui.borrow_mut().ui.set_accessibility(id,Properties{label:label.map(|v|v.0),role:Role::from_code(role),value:value.map(|v|v.0),hint:hint.map(|v|v.0),state:(flags & 511) as u16,actions:actions as u8,pressable:flags & 512 != 0})
             });
 
             let ui = self.inner.clone();
@@ -479,7 +497,7 @@ impl UiSurface {
                 }
                 let mut inner = ui.borrow_mut();
                 let inner = &mut *inner; // split borrow: pak read, core write
-                match crate::pak::find_pak(&inner.pak, &key.0) {
+                match inner.tile_paks.get(&key.0) {
                     Some(blob) => inner.ui.upload_tileset_tile(blob, index as u32),
                     None => -1,
                 }
@@ -637,6 +655,37 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_accessibility_metadata_is_retained_and_invalid_updates_are_atomic() {
+        let guest=Guest::new().unwrap();let surface=UiSurface::new((240.0,240.0));
+        surface.mount(&guest).unwrap();
+        guest.eval("semantics",r#"
+            globalThis.node=ui.createNode(0);
+            if(!ui.setAccessibility(node,"批准😀",1,"ready",null,514,1))throw Error("metadata rejected");
+            if(ui.setAccessibility(node,"bad",99,null,null,0,0))throw Error("invalid role accepted");
+        "#).unwrap();
+        let id:i32=guest.with(|ctx|ctx.globals().get("node").unwrap());
+        surface.with_ui(|ui|{
+            let metadata=ui.accessibility_of(id).unwrap();
+            assert_eq!(metadata.label.as_deref(),Some("批准😀"));
+            assert_eq!(metadata.role,Some(pocketjs_core::accessibility::Role::Button));
+            assert_eq!(metadata.state,2);assert!(metadata.pressable);assert_eq!(metadata.actions,1);
+        });
+        guest.eval("semantics",r#"ui.setAccessibility(node,"\ud800",-1,null,null,0,0);"#).unwrap();
+        // Match the shared LossyString decoder's replacement of invalid WTF-8 bytes.
+        surface.with_ui(|ui|assert_eq!(ui.accessibility_of(id).unwrap().label.as_deref(),Some("���")));
+    }
+
+    #[test]
+    fn pak_retention_keeps_tiles_and_custom_lazy_entries_only() {
+        assert!(should_retain_lazy_entry("ui:tile.map.0"));
+        assert!(should_retain_lazy_entry("custom:tileset"));
+        assert!(!should_retain_lazy_entry("ui:styles"));
+        assert!(!should_retain_lazy_entry("ui:font.body"));
+        assert!(!should_retain_lazy_entry("ui:img.logo"));
+        assert!(!should_retain_lazy_entry("ui:sprite.icons"));
+    }
 
     #[test]
     fn svc_open_denies_by_default() {

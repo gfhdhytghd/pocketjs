@@ -6,6 +6,7 @@ import {
   DEFAULT_FONT_SLOT,
   compileClasses,
   fontSlotFor,
+  fontSlotInfo,
   paletteColor,
   parseClassLiteral,
 } from "../framework/compiler/tailwind.ts";
@@ -198,6 +199,19 @@ describe("text", () => {
     expect(fontSlotFor(54, false)).toBe(14);
     expect(fontSlotFor(54, true)).toBe(15);
     expect(props(parseClassLiteral("text-5xl font-bold")).get(PROP.fontSlot)).toBe(15);
+  });
+  test("supports exact small and intermediate regular/bold sizes in appended slots", () => {
+    expect(fontSlotFor(9, false)).toBe(19);
+    expect(fontSlotFor(21, false)).toBe(23);
+    expect(fontSlotFor(9, true)).toBe(24);
+    expect(fontSlotFor(21, true)).toBe(28);
+    expect(fontSlotInfo(19)).toEqual({ px: 9, bold: false, mono: false });
+    expect(fontSlotInfo(28)).toEqual({ px: 21, bold: true, mono: false });
+    for (const [index, px] of [9, 11, 13, 17, 21].entries()) {
+      expect(fontSlotInfo(19 + index)).toEqual({ px, bold: false, mono: false });
+      expect(fontSlotInfo(24 + index)).toEqual({ px, bold: true, mono: false });
+    }
+    expect(props(parseClassLiteral("text-[13px] font-bold")).get(PROP.fontSlot)).toBe(26);
   });
   test("font-bold alone defaults to 16px bold", () => {
     const m = props(parseClassLiteral("font-bold"));

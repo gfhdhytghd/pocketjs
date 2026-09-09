@@ -759,6 +759,17 @@ export function pushTouchBlock(): () => void {
   };
 }
 
+/** Native input cancellation is not a release: no tap, fling or pan-end. */
+export function cancelActiveTouches(): void {
+  for (const t of tracks) {
+    if (!t.used) continue;
+    for (const rec of t.owners) {
+      if (rec.flags[t.slot] & OBSERVING) fireCancel(rec, t);
+    }
+    releaseTrack(t);
+  }
+}
+
 /** Fresh gesture state for a fresh mount (framework entry render()/dispose). */
 export function resetGestures(): void {
   recognizers.length = 0;

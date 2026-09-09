@@ -4,6 +4,7 @@
 import { NODE_TYPE, PROP, ROOT_ID, STYLE_ID_NONE, type PropName } from "../../contracts/spec/spec.ts";
 import { encodePropValue, getHost, getOps } from "./host.ts";
 import { __notifyTreeMutation, notifyDetached, registerFocusable, registerPress } from "./input.ts";
+import { ACCESSIBILITY_PROPS, encodeAccessibility } from "./accessibility.ts";
 
 export interface NodeMirror {
   /** Native generation-tagged node id. */
@@ -73,6 +74,7 @@ const DOM_ELEMENT = 1;
 const DOM_TEXT = 3;
 const DOM_COMMENT = 8;
 const NATIVE_ATTRIBUTE_NAMES = new Set([
+  ...ACCESSIBILITY_PROPS,
   "class",
   "className",
   "style",
@@ -692,6 +694,14 @@ function setStyleObject(node: NodeMirror, value: unknown, prev: unknown): void {
 
 export function setProp<T>(node: NodeMirror, name: string, value: T, prev?: T): T {
   if (value === prev && name !== "style") return value;
+  if (ACCESSIBILITY_PROPS.has(name)) {
+    const next = { ...node.domAttrs, [name]: value };
+    const encoded = encodeAccessibility(next, typeof node.onPress === "function");
+    if (getOps().setAccessibility?.(node.id, ...encoded) === false) throw new Error("Host rejected accessibility properties");
+    if (value == null) delete domAttrs(node)[name]; else domAttrs(node)[name] = value;
+    treeMutated();
+    return value;
+  }
   if (name === "className") name = "class";
   if (name !== "children" && name !== "key" && name !== "ref" && name !== "nodeRef") {
     if (value == null) delete domAttrs(node)[name];
@@ -704,6 +714,7 @@ export function setProp<T>(node: NodeMirror, name: string, value: T, prev?: T): 
     case "onPress":
     case "on:press":
       registerPress(node, value as (() => void) | undefined);
+      getOps().setAccessibility?.(node.id, ...encodeAccessibility(node.domAttrs ?? {}, typeof node.onPress === "function"));
       return value;
     case "src":
       setSrc(node, value);

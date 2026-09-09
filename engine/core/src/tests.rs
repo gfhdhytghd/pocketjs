@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{spec, style, Ui};
+use crate::{Ui, spec, style};
 
 // ---- binary blob builders (bytes hand-assembled per spec.ts formats) --------
 
@@ -171,7 +171,11 @@ fn encode_atlas_version_density(
     out.push(0); // flags
     out.push(raster_density);
     out.push(0); // reserved
-    assert_eq!(glyphs.len(), glyph_count as usize, "test blob: glyphCount == cmap entries");
+    assert_eq!(
+        glyphs.len(),
+        glyph_count as usize,
+        "test blob: glyphCount == cmap entries"
+    );
     for &(cp, gid, adv) in glyphs {
         out.extend_from_slice(&cp.to_le_bytes());
         out.extend_from_slice(&gid.to_le_bytes());
@@ -191,7 +195,10 @@ fn abgr(r: u8, g: u8, b: u8, a: u8) -> u32 {
 // ---- DrawList decoding helpers ------------------------------------------------
 
 fn decode_xy(word: u32) -> (i32, i32) {
-    ((word & 0xffff) as u16 as i16 as i32, (word >> 16) as u16 as i16 as i32)
+    (
+        (word & 0xffff) as u16 as i16 as i32,
+        (word >> 16) as u16 as i16 as i32,
+    )
 }
 
 fn decode_wh(word: u32) -> (i32, i32) {
@@ -201,24 +208,33 @@ fn decode_wh(word: u32) -> (i32, i32) {
 /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
 /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
 /// balanced, only known ops. Returns per-op counts (indexed by op code).
-fn validate_drawlist(words: &[u32]) -> [u32; 11] {
+fn validate_drawlist(words: &[u32]) -> [u32; 13] {
     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
     let xy_ok = |w: u32| {
         let (x, y) = decode_xy(w);
-        assert!((0..=sw).contains(&x) && (0..=sh).contains(&y), "coord out of range: ({x},{y})");
+        assert!(
+            (0..=sw).contains(&x) && (0..=sh).contains(&y),
+            "coord out of range: ({x},{y})"
+        );
     };
     let rect_ok = |xyw: u32, whw: u32| {
         xy_ok(xyw);
         let (x, y) = decode_xy(xyw);
         let (w, h) = decode_wh(whw);
-        assert!(x + w <= sw && y + h <= sh, "rect exceeds screen: {x},{y} {w}x{h}");
+        assert!(
+            x + w <= sw && y + h <= sh,
+            "rect exceeds screen: {x},{y} {w}x{h}"
+        );
     };
-    let mut counts = [0u32; 11];
+    let mut counts = [0u32; 13];
     let mut depth = 0i32;
     let mut i = 0usize;
     while i < words.len() {
         let op = words[i];
-        assert!((op as usize) < counts.len(), "unknown draw op {op} at word {i}");
+        assert!(
+            (op as usize) < counts.len(),
+            "unknown draw op {op} at word {i}"
+        );
         counts[op as usize] += 1;
         match op {
             spec::draw_op::RECT => {
@@ -237,6 +253,26 @@ fn validate_drawlist(words: &[u32]) -> [u32; 11] {
                     xy_ok(words[i + 3 + g * 2]);
                 }
                 i += 3 + 2 * n;
+            }
+            spec::draw_op::GLYPH_RUN_XFORM => {
+                let n = (words[i + 1] >> 16) as usize;
+                assert!(n > 0, "empty transformed glyph run emitted");
+                for g in 0..n {
+                    // Anchors are signed i16 and may sit outside the viewport;
+                    // the transformed cell AABB must still intersect it.
+                    let (x, y) = decode_xy(words[i + 5 + g * 2]);
+                    let (ux, uy) = decode_xy(words[i + 3]);
+                    let (vx, vy) = decode_xy(words[i + 4]);
+                    let xs = [x, x + ux, x + vx, x + ux + vx];
+                    let ys = [y, y + uy, y + vy, y + uy + vy];
+                    assert!(
+                        xs.into_iter().max().unwrap() > 0 && xs.into_iter().min().unwrap() < sw
+                    );
+                    assert!(
+                        ys.into_iter().max().unwrap() > 0 && ys.into_iter().min().unwrap() < sh
+                    );
+                }
+                i += 5 + 2 * n;
             }
             spec::draw_op::TEX_QUAD => {
                 rect_ok(words[i + 2], words[i + 3]);
@@ -258,6 +294,17 @@ fn validate_drawlist(words: &[u32]) -> [u32; 11] {
                 rect_ok(words[i + 1], words[i + 2]);
                 depth += 1;
                 i += 3;
+            }
+            spec::draw_op::ROUNDED_CLIP => {
+                // Unlike paint coordinates, clip metadata may start
+                // off-screen so a translated circle keeps its centre.
+                let (w, h) = ((words[i + 2] & 0xffff) as f32, (words[i + 2] >> 16) as f32);
+                let (rx, ry) = (f32::from_bits(words[i + 3]), f32::from_bits(words[i + 4]));
+                assert!(w > 0.0 && h > 0.0);
+                assert!(rx.is_finite() && ry.is_finite() && rx >= 0.0 && ry >= 0.0);
+                assert!(rx <= w * 0.5 && ry <= h * 0.5);
+                depth += 1;
+                i += 5;
             }
             spec::draw_op::SCISSOR_POP => {
                 depth -= 1;
@@ -288,7 +335,10 @@ fn validate_drawlist(words: &[u32]) -> [u32; 11] {
                     assert!(f.is_finite(), "TEXT_RUN origin not finite: {f}");
                 }
                 let box_w = f32::from_bits(words[i + 4]);
-                assert!(box_w.is_finite() && box_w >= 0.0, "bad TEXT_RUN boxW: {box_w}");
+                assert!(
+                    box_w.is_finite() && box_w >= 0.0,
+                    "bad TEXT_RUN boxW: {box_w}"
+                );
                 let (text, next) = decode_text_run_text(words, i);
                 assert!(!text.is_empty(), "TEXT_RUN with empty payload");
                 i = next;
@@ -318,17 +368,42 @@ fn tex_tri_runs(words: &[u32]) -> Vec<(u32, usize)> {
                 previous_was_tex_tri = true;
                 i += 12;
             }
-            spec::draw_op::RECT => { previous_was_tex_tri = false; i += 4; }
-            spec::draw_op::GRAD_RECT => { previous_was_tex_tri = false; i += 6; }
+            spec::draw_op::RECT => {
+                previous_was_tex_tri = false;
+                i += 4;
+            }
+            spec::draw_op::GRAD_RECT => {
+                previous_was_tex_tri = false;
+                i += 6;
+            }
             spec::draw_op::GLYPH_RUN => {
                 previous_was_tex_tri = false;
                 i += 3 + 2 * ((words[i + 1] >> 16) as usize);
             }
-            spec::draw_op::TEX_QUAD => { previous_was_tex_tri = false; i += 9; }
-            spec::draw_op::SURFACE_QUAD => { previous_was_tex_tri = false; i += 9; }
-            spec::draw_op::SCISSOR => { previous_was_tex_tri = false; i += 3; }
-            spec::draw_op::SCISSOR_POP => { previous_was_tex_tri = false; i += 1; }
-            spec::draw_op::TRI => { previous_was_tex_tri = false; i += 7; }
+            spec::draw_op::GLYPH_RUN_XFORM => {
+                previous_was_tex_tri = false;
+                i += 5 + 2 * ((words[i + 1] >> 16) as usize);
+            }
+            spec::draw_op::TEX_QUAD => {
+                previous_was_tex_tri = false;
+                i += 9;
+            }
+            spec::draw_op::SURFACE_QUAD => {
+                previous_was_tex_tri = false;
+                i += 9;
+            }
+            spec::draw_op::SCISSOR => {
+                previous_was_tex_tri = false;
+                i += 3;
+            }
+            spec::draw_op::SCISSOR_POP => {
+                previous_was_tex_tri = false;
+                i += 1;
+            }
+            spec::draw_op::TRI => {
+                previous_was_tex_tri = false;
+                i += 7;
+            }
             spec::draw_op::TEXT_RUN => {
                 previous_was_tex_tri = false;
                 i += 8 + (words[i + 7] as usize).div_ceil(4);
@@ -399,7 +474,11 @@ fn insert_before_dom_move_semantics() {
 fn clipped_compositor_surface_keeps_full_geometry_and_shell_z_order() {
     let mut ui = Ui::new();
     let absolute_box = |ui: &mut Ui, node: i32, x: f64, y: f64, w: f64, h: f64, z: f64| {
-        ui.set_prop(node, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(
+            node,
+            spec::prop::POS_TYPE,
+            spec::PosType::Absolute as u32 as f64,
+        );
         ui.set_prop(node, spec::prop::INSET_L, x);
         ui.set_prop(node, spec::prop::INSET_T, y);
         ui.set_prop(node, spec::prop::WIDTH, w);
@@ -462,7 +541,10 @@ fn style_resolution_with_focus_variant() {
     let red = abgr(255, 0, 0, 255);
     let green = abgr(0, 255, 0, 255);
     let mut s = StyleSpec::new();
-    s.base = alloc::vec![(spec::prop::BG_COLOR, red), (spec::prop::WIDTH, 100f32.to_bits())];
+    s.base = alloc::vec![
+        (spec::prop::BG_COLOR, red),
+        (spec::prop::WIDTH, 100f32.to_bits())
+    ];
     s.focus = alloc::vec![(spec::prop::BG_COLOR, green)];
     assert!(ui.load_styles(&encode_styles(&[s])));
     let n = ui.create_node(0);
@@ -561,9 +643,30 @@ fn fixed_dt_animation_is_deterministic() {
         ui.set_prop(n, spec::prop::HEIGHT, 40.0);
         ui.set_prop(n, spec::prop::BG_COLOR, abgr(200, 100, 50, 255) as f64);
         ui.insert_before(spec::ROOT_ID, n, 0);
-        ui.animate(n, spec::prop::TRANSLATE_X, 300.0, 500, spec::Easing::OutBack as u8, 32);
-        ui.animate(n, spec::prop::ROTATE, 65.0, 400, spec::Easing::Spring as u8, 0);
-        ui.animate(n, spec::prop::BG_COLOR, abgr(10, 220, 30, 255) as f64, 250, spec::Easing::EaseInOut as u8, 0);
+        ui.animate(
+            n,
+            spec::prop::TRANSLATE_X,
+            300.0,
+            500,
+            spec::Easing::OutBack as u8,
+            32,
+        );
+        ui.animate(
+            n,
+            spec::prop::ROTATE,
+            65.0,
+            400,
+            spec::Easing::Spring as u8,
+            0,
+        );
+        ui.animate(
+            n,
+            spec::prop::BG_COLOR,
+            abgr(10, 220, 30, 255) as f64,
+            250,
+            spec::Easing::EaseInOut as u8,
+            0,
+        );
         let mut frames = Vec::new();
         for _ in 0..70 {
             ui.tick();
@@ -600,7 +703,10 @@ fn gap_column_layout_matches_hand_computed() {
         kids.push(n);
     }
     ui.tick();
-    assert_eq!(ui.layout_of(spec::ROOT_ID).unwrap(), (0.0, 0.0, 480.0, 272.0));
+    assert_eq!(
+        ui.layout_of(spec::ROOT_ID).unwrap(),
+        (0.0, 0.0, 480.0, 272.0)
+    );
     // Column: y = paddingT + sum(prev heights + gaps), x = paddingL.
     assert_eq!(ui.layout_of(kids[0]).unwrap(), (7.0, 5.0, 100.0, 40.0));
     assert_eq!(ui.layout_of(kids[1]).unwrap(), (7.0, 55.0, 100.0, 50.0));
@@ -610,7 +716,11 @@ fn gap_column_layout_matches_hand_computed() {
 #[test]
 fn absolute_child_does_not_consume_flex_space() {
     let mut ui = Ui::new();
-    ui.set_prop(spec::ROOT_ID, spec::prop::FLEX_DIR, spec::FlexDir::Row as u32 as f64);
+    ui.set_prop(
+        spec::ROOT_ID,
+        spec::prop::FLEX_DIR,
+        spec::FlexDir::Row as u32 as f64,
+    );
 
     let app = ui.create_node(0);
     ui.set_prop(app, spec::prop::WIDTH, 480.0);
@@ -618,7 +728,11 @@ fn absolute_child_does_not_consume_flex_space() {
     ui.insert_before(spec::ROOT_ID, app, 0);
 
     let overlay = ui.create_node(0);
-    ui.set_prop(overlay, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        overlay,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(overlay, spec::prop::INSET_T, 0.0);
     ui.set_prop(overlay, spec::prop::INSET_R, 0.0);
     ui.set_prop(overlay, spec::prop::INSET_B, 0.0);
@@ -645,7 +759,11 @@ fn empty_text_nodes_are_excluded_from_layout() {
     ui.set_prop(spec::ROOT_ID, spec::prop::GAP, 10.0);
     // align-items start so the text node keeps its measured width instead of
     // stretching to the column's cross size.
-    ui.set_prop(spec::ROOT_ID, spec::prop::ALIGN, spec::Align::Start as u32 as f64);
+    ui.set_prop(
+        spec::ROOT_ID,
+        spec::prop::ALIGN,
+        spec::Align::Start as u32 as f64,
+    );
     let a = ui.create_node(0);
     ui.set_prop(a, spec::prop::HEIGHT, 20.0);
     ui.insert_before(spec::ROOT_ID, a, 0);
@@ -675,17 +793,21 @@ fn drawlist_clip_invariant_offscreen_rects() {
     let mut ui = Ui::new();
     // Partially off every edge + fully off + rotated partially off.
     let cases: [(f64, f64, f64); 5] = [
-        (450.0, 250.0, 0.0),   // off bottom-right
-        (-30.0, -20.0, 0.0),   // off top-left
-        (600.0, 10.0, 0.0),    // fully off right
-        (400.0, -30.0, 45.0),  // rotated, off top-right
-        (-40.0, 240.0, 30.0),  // rotated, off bottom-left
+        (450.0, 250.0, 0.0),  // off bottom-right
+        (-30.0, -20.0, 0.0),  // off top-left
+        (600.0, 10.0, 0.0),   // fully off right
+        (400.0, -30.0, 45.0), // rotated, off top-right
+        (-40.0, 240.0, 30.0), // rotated, off bottom-left
     ];
     for (tx, ty, rot) in cases {
         let n = ui.create_node(0);
         ui.set_prop(n, spec::prop::WIDTH, 100.0);
         ui.set_prop(n, spec::prop::HEIGHT, 60.0);
-        ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(
+            n,
+            spec::prop::POS_TYPE,
+            spec::PosType::Absolute as u32 as f64,
+        );
         ui.set_prop(n, spec::prop::INSET_T, 0.0);
         ui.set_prop(n, spec::prop::INSET_L, 0.0);
         ui.set_prop(n, spec::prop::BG_COLOR, abgr(255, 255, 255, 255) as f64);
@@ -700,19 +822,30 @@ fn drawlist_clip_invariant_offscreen_rects() {
     let g = ui.create_node(0);
     ui.set_prop(g, spec::prop::WIDTH, 200.0);
     ui.set_prop(g, spec::prop::HEIGHT, 40.0);
-    ui.set_prop(g, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        g,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(g, spec::prop::INSET_T, 0.0);
     ui.set_prop(g, spec::prop::INSET_L, 0.0);
     ui.set_prop(g, spec::prop::GRAD_FROM, abgr(0, 0, 0, 255) as f64);
     ui.set_prop(g, spec::prop::GRAD_TO, abgr(200, 200, 200, 255) as f64);
-    ui.set_prop(g, spec::prop::GRAD_DIR, spec::GradDir::ToRight as u32 as f64);
+    ui.set_prop(
+        g,
+        spec::prop::GRAD_DIR,
+        spec::GradDir::ToRight as u32 as f64,
+    );
     ui.set_prop(g, spec::prop::TRANSLATE_X, 380.0); // visible span = half
     ui.insert_before(spec::ROOT_ID, g, 0);
     ui.tick();
     let words = ui.draw().words.clone();
     let counts = validate_drawlist(&words);
     assert!(counts[spec::draw_op::RECT as usize] > 0);
-    assert!(counts[spec::draw_op::TRI as usize] > 0, "rotated offscreen boxes clip into TRIs");
+    assert!(
+        counts[spec::draw_op::TRI as usize] > 0,
+        "rotated offscreen boxes clip into TRIs"
+    );
     assert!(counts[spec::draw_op::GRAD_RECT as usize] > 0);
     // Find the gradient and check the endpoint re-interpolation: the rect
     // spans x 380..580, the clip keeps 380..480 = fractions 0.0..0.5, so the
@@ -727,8 +860,13 @@ fn drawlist_clip_invariant_offscreen_rects() {
                 let (w, _) = decode_wh(words[i + 2]);
                 assert_eq!((x, w), (380, 100));
                 assert_eq!(words[i + 3], abgr(0, 0, 0, 255)); // from untouched (clip starts at 0.0)
-                let expected = crate::anim::interp(abgr(0, 0, 0, 255), abgr(200, 200, 200, 255), 0.5, true);
-                assert_eq!(words[i + 4], expected, "gradient to-color re-interpolated over the clip");
+                let expected =
+                    crate::anim::interp(abgr(0, 0, 0, 255), abgr(200, 200, 200, 255), 0.5, true);
+                assert_eq!(
+                    words[i + 4],
+                    expected,
+                    "gradient to-color re-interpolated over the clip"
+                );
                 found = true;
                 i += 6;
             }
@@ -748,14 +886,22 @@ fn three_stop_gradient_splits_into_clipped_drawlist_segments() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 100.0);
     ui.set_prop(n, spec::prop::HEIGHT, 20.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 10.0);
     ui.set_prop(n, spec::prop::INSET_L, -25.0);
     ui.set_prop(n, spec::prop::GRAD_FROM, abgr(0, 0, 0, 255) as f64);
     ui.set_prop(n, spec::prop::GRAD_VIA, abgr(100, 100, 100, 255) as f64);
     ui.set_prop(n, spec::prop::GRAD_VIA_POS, 0.5);
     ui.set_prop(n, spec::prop::GRAD_TO, abgr(200, 200, 200, 255) as f64);
-    ui.set_prop(n, spec::prop::GRAD_DIR, spec::GradDir::ToRight as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::GRAD_DIR,
+        spec::GradDir::ToRight as u32 as f64,
+    );
     ui.insert_before(spec::ROOT_ID, n, 0);
     ui.tick();
 
@@ -779,10 +925,25 @@ fn three_stop_gradient_splits_into_clipped_drawlist_segments() {
             _ => i += 1,
         }
     }
-    assert_eq!(segments, vec![
-        (0, 25, abgr(50, 50, 50, 255), abgr(100, 100, 100, 255), spec::GradDir::ToRight as u32),
-        (25, 50, abgr(100, 100, 100, 255), abgr(200, 200, 200, 255), spec::GradDir::ToRight as u32),
-    ]);
+    assert_eq!(
+        segments,
+        vec![
+            (
+                0,
+                25,
+                abgr(50, 50, 50, 255),
+                abgr(100, 100, 100, 255),
+                spec::GradDir::ToRight as u32
+            ),
+            (
+                25,
+                50,
+                abgr(100, 100, 100, 255),
+                abgr(200, 200, 200, 255),
+                spec::GradDir::ToRight as u32
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -791,7 +952,11 @@ fn rounded_boxes_emit_subpixel_edge_coverage() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 36.0);
     ui.set_prop(n, spec::prop::HEIGHT, 20.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 10.5);
     ui.set_prop(n, spec::prop::INSET_L, 10.5);
     ui.set_prop(n, spec::prop::RADIUS, 10.0);
@@ -833,7 +998,10 @@ fn rounded_boxes_emit_subpixel_edge_coverage() {
             break;
         }
     }
-    assert!(partial, "the baked disc must carry antialiased coverage alpha");
+    assert!(
+        partial,
+        "the baked disc must carry antialiased coverage alpha"
+    );
 }
 
 #[test]
@@ -842,7 +1010,11 @@ fn scaled_flat_rounded_box_has_no_gaps_between_fast_path_pieces() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 70.0);
     ui.set_prop(n, spec::prop::HEIGHT, 70.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 20.0);
     ui.set_prop(n, spec::prop::INSET_L, 12.0);
     ui.set_prop(n, spec::prop::RADIUS, 12.0);
@@ -873,7 +1045,11 @@ fn rounded_corner_masks_follow_raster_density_without_changing_layout() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 36.0);
     ui.set_prop(n, spec::prop::HEIGHT, 20.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 10.0);
     ui.set_prop(n, spec::prop::INSET_L, 10.0);
     ui.set_prop(n, spec::prop::RADIUS, 10.0);
@@ -882,11 +1058,28 @@ fn rounded_corner_masks_follow_raster_density_without_changing_layout() {
     ui.tick();
 
     let words = ui.draw().words.clone();
-    let i = words.iter().position(|&word| word == spec::draw_op::TEX_QUAD).unwrap();
-    let view = ui.texture(words[i + 1] as i32).expect("density-scaled disc texture");
-    assert_eq!((view.w, view.h), (64, 64), "20px disc at 2x is padded to 64px");
-    assert_eq!(decode_wh(words[i + 3]), (10, 10), "DrawList geometry stays logical");
-    assert_eq!(f32::from_bits(words[i + 6]), 20.0 / 64.0, "UV selects one 2x quadrant");
+    let i = words
+        .iter()
+        .position(|&word| word == spec::draw_op::TEX_QUAD)
+        .unwrap();
+    let view = ui
+        .texture(words[i + 1] as i32)
+        .expect("density-scaled disc texture");
+    assert_eq!(
+        (view.w, view.h),
+        (64, 64),
+        "20px disc at 2x is padded to 64px"
+    );
+    assert_eq!(
+        decode_wh(words[i + 3]),
+        (10, 10),
+        "DrawList geometry stays logical"
+    );
+    assert_eq!(
+        f32::from_bits(words[i + 6]),
+        20.0 / 64.0,
+        "UV selects one 2x quadrant"
+    );
 }
 
 #[test]
@@ -901,9 +1094,15 @@ fn tick_rate_is_fixed_once_the_realm_has_ticked() {
     assert_eq!(ui.tick_rate(), 60, "spec default");
     assert!(!ui.set_tick_rate(0), "0 Hz is not a rate");
     assert_eq!(ui.tick_rate(), 60);
-    assert!(!ui.set_tick_rate(crate::MAX_TICK_HZ + 1), "above the ceiling");
+    assert!(
+        !ui.set_tick_rate(crate::MAX_TICK_HZ + 1),
+        "above the ceiling"
+    );
     assert_eq!(ui.tick_rate(), 60);
-    assert!(ui.set_tick_rate(crate::MAX_TICK_HZ), "the ceiling itself is a rate");
+    assert!(
+        ui.set_tick_rate(crate::MAX_TICK_HZ),
+        "the ceiling itself is a rate"
+    );
     assert!(ui.set_tick_rate(120));
     assert_eq!(ui.tick_rate(), 120);
     ui.tick();
@@ -949,7 +1148,11 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 20.0);
     ui.set_prop(n, spec::prop::HEIGHT, 12.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 10.0);
     ui.set_prop(n, spec::prop::INSET_L, 10.0);
     ui.set_prop(n, spec::prop::RADIUS, 6.0);
@@ -992,8 +1195,14 @@ fn transparent_rounded_border_draws_an_outline_not_square_strips() {
     }
     assert!(covers_top_mid, "top edge should be present");
     assert!(covers_left_mid, "left edge should be present");
-    assert!(!covers_outer_corner, "rounded transparent border must not draw square outer corners");
-    assert!(!covers_center, "transparent border must not fill the center");
+    assert!(
+        !covers_outer_corner,
+        "rounded transparent border must not draw square outer corners"
+    );
+    assert!(
+        !covers_center,
+        "transparent border must not fill the center"
+    );
 }
 
 #[test]
@@ -1004,7 +1213,11 @@ fn rounded_gradients_emit_rect_coverage_spans() {
     let n = ui.create_node(0);
     ui.set_prop(n, spec::prop::WIDTH, 120.0);
     ui.set_prop(n, spec::prop::HEIGHT, 12.0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_T, 20.5);
     ui.set_prop(n, spec::prop::INSET_L, 20.0);
     ui.set_prop(n, spec::prop::RADIUS, 6.0);
@@ -1012,14 +1225,19 @@ fn rounded_gradients_emit_rect_coverage_spans() {
     ui.set_prop(n, spec::prop::GRAD_VIA, via as f64);
     ui.set_prop(n, spec::prop::GRAD_VIA_POS, 0.5);
     ui.set_prop(n, spec::prop::GRAD_TO, abgr(217, 119, 6, 255) as f64);
-    ui.set_prop(n, spec::prop::GRAD_DIR, spec::GradDir::ToBottom as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::GRAD_DIR,
+        spec::GradDir::ToBottom as u32 as f64,
+    );
     ui.insert_before(spec::ROOT_ID, n, 0);
     ui.tick();
     let words = ui.draw().words.clone();
     let counts = validate_drawlist(&words);
     assert!(counts[spec::draw_op::RECT as usize] > 0);
     assert_eq!(
-        counts[spec::draw_op::GRAD_RECT as usize], 0,
+        counts[spec::draw_op::GRAD_RECT as usize],
+        0,
         "rounded gradients must not rely on 1px-high GRAD_RECT triangle strips"
     );
     let (_, layout_y, _, layout_h) = ui.layout_of(n).unwrap();
@@ -1033,7 +1251,10 @@ fn rounded_gradients_emit_rect_coverage_spans() {
             spec::draw_op::RECT => {
                 let (x, y) = decode_xy(words[i + 1]);
                 let (w, h) = decode_wh(words[i + 2]);
-                via_segment |= x <= 80 && 80 < x + w && y <= target_y && target_y < y + h
+                via_segment |= x <= 80
+                    && 80 < x + w
+                    && y <= target_y
+                    && target_y < y + h
                     && words[i + 3] == expected;
                 i += 4;
             }
@@ -1044,7 +1265,10 @@ fn rounded_gradients_emit_rect_coverage_spans() {
             _ => i += 1,
         }
     }
-    assert!(via_segment, "the rounded span path must preserve the middle stop");
+    assert!(
+        via_segment,
+        "the rounded span path must preserve the middle stop"
+    );
 }
 
 #[test]
@@ -1053,12 +1277,20 @@ fn overflow_hidden_emits_balanced_intersected_scissors() {
     let outer = ui.create_node(0);
     ui.set_prop(outer, spec::prop::WIDTH, 100.0);
     ui.set_prop(outer, spec::prop::HEIGHT, 80.0);
-    ui.set_prop(outer, spec::prop::OVERFLOW, spec::Overflow::Hidden as u32 as f64);
+    ui.set_prop(
+        outer,
+        spec::prop::OVERFLOW,
+        spec::Overflow::Hidden as u32 as f64,
+    );
     ui.insert_before(spec::ROOT_ID, outer, 0);
     let inner = ui.create_node(0);
     ui.set_prop(inner, spec::prop::WIDTH, 300.0); // overflows outer
     ui.set_prop(inner, spec::prop::HEIGHT, 300.0);
-    ui.set_prop(inner, spec::prop::OVERFLOW, spec::Overflow::Hidden as u32 as f64);
+    ui.set_prop(
+        inner,
+        spec::prop::OVERFLOW,
+        spec::Overflow::Hidden as u32 as f64,
+    );
     ui.set_prop(inner, spec::prop::SHRINK, 0.0);
     ui.insert_before(outer, inner, 0);
     let leaf = ui.create_node(0);
@@ -1109,7 +1341,10 @@ fn overflow_hidden_emits_balanced_intersected_scissors() {
                 if depth == 2 {
                     let (x, y) = decode_xy(words[i + 1]);
                     let (w, h) = decode_wh(words[i + 2]);
-                    assert!(x + w <= 100 && y + h <= 80, "leaf rect not clipped to scissor");
+                    assert!(
+                        x + w <= 100 && y + h <= 80,
+                        "leaf rect not clipped to scissor"
+                    );
                 }
                 i += 4;
             }
@@ -1193,21 +1428,12 @@ fn text_measurement_against_synthetic_atlas() {
 fn font_atlas_v3_scales_coverage_without_scaling_layout_metrics() {
     let glyphs = &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)];
     let mut ui = Ui::new();
-    let mut hd = encode_atlas_version_density(
-        spec::font_atlas::VERSION,
-        2,
-        2,
-        8,
-        8,
-        7,
-        10,
-        3,
-        glyphs,
-    );
+    let mut hd =
+        encode_atlas_version_density(spec::font_atlas::VERSION, 2, 2, 8, 8, 7, 10, 3, glyphs);
     // gid 1, logical pixel (0,0): four density-2 samples reduce to their
     // rounded mean, not the top-left sample.
-    let bitmap_off = spec::font_atlas::HEADER_SIZE
-        + glyphs.len() * spec::font_atlas::CMAP_ENTRY_SIZE;
+    let bitmap_off =
+        spec::font_atlas::HEADER_SIZE + glyphs.len() * spec::font_atlas::CMAP_ENTRY_SIZE;
     let coverage_w = 16usize;
     let coverage_h = 16usize;
     let gid_1 = bitmap_off + coverage_w * coverage_h;
@@ -1223,7 +1449,11 @@ fn font_atlas_v3_scales_coverage_without_scaling_layout_metrics() {
     assert_eq!(atlas.bytes_per_row(), 16);
     assert_eq!(atlas.glyph_rows(1).len(), 16 * 16);
     assert_eq!(atlas.logical_coverage(1, 0, 0), 112);
-    assert_eq!(atlas.logical_coverage(1, 8, 0), 0, "out-of-range is transparent");
+    assert_eq!(
+        atlas.logical_coverage(1, 8, 0),
+        0,
+        "out-of-range is transparent"
+    );
     // Advances, line height, and therefore app layout stay in logical px.
     assert_eq!(ui.measure_text("AB", 2), 11.0);
 
@@ -1235,24 +1465,21 @@ fn font_atlas_v3_scales_coverage_without_scaling_layout_metrics() {
     assert!(ui.load_font_atlas(&legacy));
     let legacy_atlas = ui.font_atlas(3).unwrap();
     assert_eq!(legacy_atlas.raster_density, 1);
-    assert_eq!((legacy_atlas.coverage_width(), legacy_atlas.coverage_height()), (8, 8));
+    assert_eq!(
+        (
+            legacy_atlas.coverage_width(),
+            legacy_atlas.coverage_height()
+        ),
+        (8, 8)
+    );
     assert_eq!(legacy_atlas.glyph_rows(1).len(), 8 * 8);
     assert_eq!(legacy_atlas.logical_coverage(1, 0, 0), 173);
     assert_eq!(ui.measure_text("AB", 3), 11.0);
 
     // Density zero has no meaning in v3, and truncation is checked against
     // density-scaled coverage rather than only logical cell dimensions.
-    let invalid_density = encode_atlas_version_density(
-        spec::font_atlas::VERSION,
-        0,
-        4,
-        8,
-        8,
-        7,
-        10,
-        3,
-        glyphs,
-    );
+    let invalid_density =
+        encode_atlas_version_density(spec::font_atlas::VERSION, 0, 4, 8, 8, 7, 10, 3, glyphs);
     assert!(!ui.load_font_atlas(&invalid_density));
     assert!(!ui.load_font_atlas(&hd[..hd.len() - 1]));
 }
@@ -1273,7 +1500,11 @@ fn glyph_runs_render_with_alignment_and_color() {
     let t = ui.create_node(spec::NodeType::Text as u8);
     ui.set_prop(t, spec::prop::WIDTH, 51.0);
     ui.set_prop(t, spec::prop::TEXT_COLOR, color as f64);
-    ui.set_prop(t, spec::prop::TEXT_ALIGN, spec::TextAlign::Right as u32 as f64);
+    ui.set_prop(
+        t,
+        spec::prop::TEXT_ALIGN,
+        spec::TextAlign::Right as u32 as f64,
+    );
     // Mixed run: element text + text-node child concatenate.
     ui.set_text(t, "A");
     let child = ui.create_node(spec::NodeType::Text as u8);
@@ -1284,7 +1515,10 @@ fn glyph_runs_render_with_alignment_and_color() {
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
     // One run, 2 glyphs, right-aligned in 51px: line w = 11 -> x0 = 40.
-    let i = words.iter().position(|&w| w == spec::draw_op::GLYPH_RUN).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::GLYPH_RUN)
+        .unwrap();
     assert_eq!(words[i + 1], 2 << 16); // slot 0, n = 2
     assert_eq!(words[i + 2], color);
     assert_eq!(decode_xy(words[i + 3]), (40, 1)); // y: (10 - 8) / 2 = 1
@@ -1300,7 +1534,14 @@ fn explicit_animate_lifecycle() {
     ui.set_prop(n, spec::prop::WIDTH, 100.0);
     ui.insert_before(spec::ROOT_ID, n, 0);
     // 10 frames linear 100 -> 200 (layout-dirtying: width relayouts).
-    let aid = ui.animate(n, spec::prop::WIDTH, 200.0, 167, spec::Easing::Linear as u8, 0);
+    let aid = ui.animate(
+        n,
+        spec::prop::WIDTH,
+        200.0,
+        167,
+        spec::Easing::Linear as u8,
+        0,
+    );
     assert!(aid > 0);
     for _ in 0..5 {
         ui.tick();
@@ -1319,7 +1560,14 @@ fn explicit_animate_lifecycle() {
     // Stale anim id: no-op.
     ui.cancel_anim(aid);
     // Run one to completion: final value persists as an override.
-    let aid2 = ui.animate(n, spec::prop::WIDTH, 300.0, 100, spec::Easing::EaseOut as u8, 0);
+    let aid2 = ui.animate(
+        n,
+        spec::prop::WIDTH,
+        300.0,
+        100,
+        spec::Easing::EaseOut as u8,
+        0,
+    );
     assert!(aid2 > 0);
     for _ in 0..20 {
         ui.tick();
@@ -1337,7 +1585,14 @@ fn explicit_animate_retargets_same_prop_from_current_value() {
     ui.set_prop(n, spec::prop::WIDTH, 0.0);
     ui.insert_before(spec::ROOT_ID, n, 0);
 
-    let first = ui.animate(n, spec::prop::WIDTH, 100.0, 600, spec::Easing::Linear as u8, 0);
+    let first = ui.animate(
+        n,
+        spec::prop::WIDTH,
+        100.0,
+        600,
+        spec::Easing::Linear as u8,
+        0,
+    );
     assert!(first > 0);
     for _ in 0..9 {
         ui.tick();
@@ -1345,7 +1600,14 @@ fn explicit_animate_retargets_same_prop_from_current_value() {
     let mid = ui.resolved_style(n).unwrap().width;
     assert_eq!(mid, 25.0);
 
-    let second = ui.animate(n, spec::prop::WIDTH, 200.0, 600, spec::Easing::Linear as u8, 0);
+    let second = ui.animate(
+        n,
+        spec::prop::WIDTH,
+        200.0,
+        600,
+        spec::Easing::Linear as u8,
+        0,
+    );
     assert!(second > 0);
     assert_eq!(ui.resolved_style(n).unwrap().width, mid);
     ui.cancel_anim(first); // stale id: the second animation killed the first.
@@ -1399,7 +1661,10 @@ fn opacity_multiplies_down_the_subtree() {
     ui.tick();
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
-    let i = words.iter().position(|&w| w == spec::draw_op::RECT).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::RECT)
+        .unwrap();
     let a = words[i + 3] >> 24;
     // 255 * 0.5 * 0.5 ≈ 64 (rounding via +0.5 in scale_alpha).
     assert_eq!(a, 64);
@@ -1412,7 +1677,11 @@ fn zindex_orders_siblings_stably() {
         let n = ui.create_node(0);
         ui.set_prop(n, spec::prop::WIDTH, 10.0);
         ui.set_prop(n, spec::prop::HEIGHT, 10.0);
-        ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(
+            n,
+            spec::prop::POS_TYPE,
+            spec::PosType::Absolute as u32 as f64,
+        );
         ui.set_prop(n, spec::prop::INSET_T, 0.0);
         ui.set_prop(n, spec::prop::INSET_L, 0.0);
         ui.set_prop(n, spec::prop::Z_INDEX, z);
@@ -1452,8 +1721,14 @@ fn image_tex_quad_clips_with_uv_reinterpolation() {
     assert_eq!(tex, 0);
     // Validation failures.
     assert_eq!(ui.upload_texture(&pixels, 17, 16, spec::psm::PSM_8888), -1);
-    assert_eq!(ui.upload_texture(&pixels, 1024, 16, spec::psm::PSM_8888), -1);
-    assert_eq!(ui.upload_texture(&pixels[..8], 16, 16, spec::psm::PSM_8888), -1);
+    assert_eq!(
+        ui.upload_texture(&pixels, 1024, 16, spec::psm::PSM_8888),
+        -1
+    );
+    assert_eq!(
+        ui.upload_texture(&pixels[..8], 16, 16, spec::psm::PSM_8888),
+        -1
+    );
     assert_eq!(ui.upload_texture(&pixels, 16, 16, 99), -1);
     let view = ui.texture(tex).unwrap();
     assert_eq!(
@@ -1461,12 +1736,20 @@ fn image_tex_quad_clips_with_uv_reinterpolation() {
         (1024, 16, 16, spec::psm::PSM_8888)
     );
     assert!(view.palette.is_none() && !view.linear);
-    assert_eq!(view.pixels.as_ptr() as usize % 16, 0, "texture pixels must be 16-byte aligned");
+    assert_eq!(
+        view.pixels.as_ptr() as usize % 16,
+        0,
+        "texture pixels must be 16-byte aligned"
+    );
 
     let img = ui.create_node(spec::NodeType::Image as u8);
     ui.set_prop(img, spec::prop::WIDTH, 100.0);
     ui.set_prop(img, spec::prop::HEIGHT, 100.0);
-    ui.set_prop(img, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        img,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(img, spec::prop::INSET_T, 0.0);
     ui.set_prop(img, spec::prop::INSET_L, 0.0);
     ui.set_prop(img, spec::prop::TRANSLATE_X, 430.0); // half off right: u1 = 0.5
@@ -1475,7 +1758,10 @@ fn image_tex_quad_clips_with_uv_reinterpolation() {
     ui.tick();
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
-    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEX_QUAD)
+        .unwrap();
     assert_eq!(words[i + 1], tex as u32);
     assert_eq!(decode_xy(words[i + 2]), (430, 0));
     assert_eq!(decode_wh(words[i + 3]), (50, 100));
@@ -1488,7 +1774,10 @@ fn image_tex_quad_clips_with_uv_reinterpolation() {
 fn root_is_a_full_screen_flex_column() {
     let mut ui = Ui::new();
     ui.tick();
-    assert_eq!(ui.layout_of(spec::ROOT_ID).unwrap(), (0.0, 0.0, 480.0, 272.0));
+    assert_eq!(
+        ui.layout_of(spec::ROOT_ID).unwrap(),
+        (0.0, 0.0, 480.0, 272.0)
+    );
     let r = ui.resolved_style(spec::ROOT_ID).unwrap();
     assert_eq!(r.flex_dir, spec::FlexDir::Col as u8);
     // Root cannot be destroyed.
@@ -1522,7 +1811,11 @@ fn style_table_parse_rejects_garbage() {
     let r = ui.resolved_style(n).unwrap();
     let d = style::Resolved::default();
     for prop in 0u16..=255 {
-        assert_eq!(r.get_bits(prop as u8), d.get_bits(prop as u8), "prop {prop}");
+        assert_eq!(
+            r.get_bits(prop as u8),
+            d.get_bits(prop as u8),
+            "prop {prop}"
+        );
     }
 }
 
@@ -1539,7 +1832,10 @@ fn scale_only_transform_stays_axis_aligned() {
     let words = ui.draw().words.clone();
     let counts = validate_drawlist(&words);
     assert_eq!(counts[spec::draw_op::TRI as usize], 0);
-    let i = words.iter().position(|&w| w == spec::draw_op::RECT).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::RECT)
+        .unwrap();
     // Scaled 0.5 about center: 100x50 -> 50x25 at (25, 12.5->13 rounded).
     assert_eq!(decode_xy(words[i + 1]), (25, 13));
     assert_eq!(decode_wh(words[i + 2]), (50, 25));
@@ -1563,7 +1859,10 @@ fn scale_x_transform_is_paint_only_and_can_anchor_left() {
     let words = ui.draw().words.clone();
     let counts = validate_drawlist(&words);
     assert_eq!(counts[spec::draw_op::TRI as usize], 0);
-    let i = words.iter().position(|&w| w == spec::draw_op::RECT).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::RECT)
+        .unwrap();
     assert_eq!(decode_xy(words[i + 1]), (0, 0));
     assert_eq!(decode_wh(words[i + 2]), (50, 20));
 }
@@ -1587,7 +1886,10 @@ fn root_cannot_be_reparented_under_a_detached_node() {
     // Also via an ATTACHED parent (plain cycle guard case).
     ui.insert_before(n, spec::ROOT_ID, 0);
     ui.tick();
-    assert_eq!(ui.layout_of(spec::ROOT_ID).unwrap(), (0.0, 0.0, 480.0, 272.0));
+    assert_eq!(
+        ui.layout_of(spec::ROOT_ID).unwrap(),
+        (0.0, 0.0, 480.0, 272.0)
+    );
 }
 
 #[test]
@@ -1614,14 +1916,34 @@ fn size_full_sentinel_is_not_animatable() {
     ui.insert_before(spec::ROOT_ID, n, 0);
     ui.tick();
     // animate() TO the sentinel: no-op, returns -1, width stays put.
-    assert_eq!(ui.animate(n, spec::prop::WIDTH, -1.0, 500, spec::Easing::Linear as u8, 0), -1);
+    assert_eq!(
+        ui.animate(
+            n,
+            spec::prop::WIDTH,
+            -1.0,
+            500,
+            spec::Easing::Linear as u8,
+            0
+        ),
+        -1
+    );
     for _ in 0..5 {
         ui.tick();
     }
     assert_eq!(ui.layout_of(n).unwrap().2, 200.0);
     // animate() FROM the sentinel: also a no-op.
     ui.set_prop(n, spec::prop::WIDTH, -1.0);
-    assert_eq!(ui.animate(n, spec::prop::WIDTH, 100.0, 500, spec::Easing::Linear as u8, 0), -1);
+    assert_eq!(
+        ui.animate(
+            n,
+            spec::prop::WIDTH,
+            100.0,
+            500,
+            spec::Easing::Linear as u8,
+            0
+        ),
+        -1
+    );
     ui.tick();
     assert_eq!(ui.layout_of(n).unwrap().2, 480.0);
     // Style transitions between a pixel width and w-full spawn NO width
@@ -1639,7 +1961,11 @@ fn size_full_sentinel_is_not_animatable() {
     ui.tick();
     assert_eq!(ui.layout_of(m).unwrap().2, 160.0);
     ui.set_style(m, 1);
-    assert_eq!(ui.resolved_style(m).unwrap().width, -1.0, "snap, not a tween");
+    assert_eq!(
+        ui.resolved_style(m).unwrap().width,
+        -1.0,
+        "snap, not a tween"
+    );
     ui.tick();
     assert_eq!(ui.layout_of(m).unwrap().2, 480.0);
 }
@@ -1681,7 +2007,17 @@ fn auto_endpoints_snap_instead_of_tweening_nan() {
     // Explicit animate() from auto: no track, target written as an override.
     let m = ui.create_node(0);
     ui.insert_before(spec::ROOT_ID, m, 0);
-    assert_eq!(ui.animate(m, spec::prop::HEIGHT, 50.0, 300, spec::Easing::Linear as u8, 0), -1);
+    assert_eq!(
+        ui.animate(
+            m,
+            spec::prop::HEIGHT,
+            50.0,
+            300,
+            spec::Easing::Linear as u8,
+            0
+        ),
+        -1
+    );
     ui.tick();
     assert_eq!(ui.layout_of(m).unwrap().3, 50.0);
 }
@@ -1693,11 +2029,17 @@ fn insert_past_max_tree_depth_is_a_noop() {
     let mut parent = spec::ROOT_ID;
     for depth in 1..=spec::MAX_TREE_DEPTH {
         let n = t.alloc(0);
-        assert!(t.insert_before(parent, n, 0), "insert at depth {depth} must succeed");
+        assert!(
+            t.insert_before(parent, n, 0),
+            "insert at depth {depth} must succeed"
+        );
         parent = n;
     }
     let over = t.alloc(0);
-    assert!(!t.insert_before(parent, over, 0), "insert past MAX_TREE_DEPTH must no-op");
+    assert!(
+        !t.insert_before(parent, over, 0),
+        "insert past MAX_TREE_DEPTH must no-op"
+    );
     // Ui-level smoke: the capped chain still ticks/draws safely.
     let mut ui = Ui::new();
     let mut parent = spec::ROOT_ID;
@@ -1757,7 +2099,11 @@ fn cmap_xoff_shifts_glyph_cells_left() {
     blob[a_entry + 7] = 2;
     let mut ui = Ui::new();
     assert!(ui.load_font_atlas(&blob));
-    assert_eq!(ui.measure_text("AB", 0), 11.0, "xoff must not change advances");
+    assert_eq!(
+        ui.measure_text("AB", 0),
+        11.0,
+        "xoff must not change advances"
+    );
     ui.set_prop(spec::ROOT_ID, spec::prop::PADDING_L, 10.0);
     let t = ui.create_node(spec::NodeType::Text as u8);
     ui.set_prop(t, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 255) as f64);
@@ -1766,9 +2112,20 @@ fn cmap_xoff_shifts_glyph_cells_left() {
     ui.tick();
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
-    let i = words.iter().position(|&w| w == spec::draw_op::GLYPH_RUN).unwrap();
-    assert_eq!(decode_xy(words[i + 3]).0, 10 - 2, "'A' cell shifted left by its xoff");
-    assert_eq!(decode_xy(words[i + 5]).0, 10 + 6, "'B' (xoff 0) at the plain pen position");
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::GLYPH_RUN)
+        .unwrap();
+    assert_eq!(
+        decode_xy(words[i + 3]).0,
+        10 - 2,
+        "'A' cell shifted left by its xoff"
+    );
+    assert_eq!(
+        decode_xy(words[i + 5]).0,
+        10 + 6,
+        "'B' (xoff 0) at the plain pen position"
+    );
 }
 
 /// Two runs of a whole interaction script (styles, focus transitions,
@@ -1833,7 +2190,14 @@ fn slide_anim() -> AnimSpec {
         fill: spec::style_table::ANIM_FILL_BACKWARDS | spec::style_table::ANIM_FILL_FORWARDS,
         tracks: alloc::vec![(
             spec::prop::TRANSLATE_X,
-            alloc::vec![SegSpec(0, 60, 0f32.to_bits(), 60f32.to_bits(), spec::Easing::Linear as u8, None)],
+            alloc::vec![SegSpec(
+                0,
+                60,
+                0f32.to_bits(),
+                60f32.to_bits(),
+                spec::Easing::Linear as u8,
+                None
+            )],
         )],
     }
 }
@@ -1897,7 +2261,14 @@ fn timeline_list_precedence_matches_css() {
         fill: spec::style_table::ANIM_FILL_BACKWARDS | spec::style_table::ANIM_FILL_FORWARDS,
         tracks: alloc::vec![(
             spec::prop::OPACITY,
-            alloc::vec![SegSpec(0, 30, 0f32.to_bits(), 1f32.to_bits(), spec::Easing::Linear as u8, None)],
+            alloc::vec![SegSpec(
+                0,
+                30,
+                0f32.to_bits(),
+                1f32.to_bits(),
+                spec::Easing::Linear as u8,
+                None
+            )],
         )],
     };
     let fade_out = AnimSpec {
@@ -1907,7 +2278,14 @@ fn timeline_list_precedence_matches_css() {
         fill: spec::style_table::ANIM_FILL_FORWARDS,
         tracks: alloc::vec![(
             spec::prop::OPACITY,
-            alloc::vec![SegSpec(0, 30, 1f32.to_bits(), 0f32.to_bits(), spec::Easing::Linear as u8, None)],
+            alloc::vec![SegSpec(
+                0,
+                30,
+                1f32.to_bits(),
+                0f32.to_bits(),
+                spec::Easing::Linear as u8,
+                None
+            )],
         )],
     };
     let mut s = StyleSpec::new();
@@ -2087,7 +2465,11 @@ fn perspective_subdivided_images_form_one_texture_run_per_image() {
     assert_ne!(cover_tex, reflection_tex);
 
     let place = |ui: &mut Ui, node: i32, x: f64, y: f64, w: f64, h: f64| {
-        ui.set_prop(node, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(
+            node,
+            spec::prop::POS_TYPE,
+            spec::PosType::Absolute as u32 as f64,
+        );
         ui.set_prop(node, spec::prop::INSET_L, x);
         ui.set_prop(node, spec::prop::INSET_T, y);
         ui.set_prop(node, spec::prop::WIDTH, w);
@@ -2123,7 +2505,10 @@ fn perspective_subdivided_images_form_one_texture_run_per_image() {
     let runs = tex_tri_runs(&words);
     assert_eq!(
         runs,
-        alloc::vec![(cover_tex as u32, tri_count / 2), (reflection_tex as u32, tri_count / 2)],
+        alloc::vec![
+            (cover_tex as u32, tri_count / 2),
+            (reflection_tex as u32, tri_count / 2)
+        ],
         "each image must be one consecutive PSP texture batch",
     );
 }
@@ -2189,7 +2574,16 @@ fn debug_pause_freezes_and_step_advances_one_frame() {
     ui.set_style(n, 0);
     ui.tick();
     // 600 ms linear width anim: ~4.4 px per 1/60 frame — visible per tick.
-    assert!(ui.animate(n, spec::prop::WIDTH, 200.0, 600, spec::Easing::Linear as u8, 0) >= 0);
+    assert!(
+        ui.animate(
+            n,
+            spec::prop::WIDTH,
+            200.0,
+            600,
+            spec::Easing::Linear as u8,
+            0
+        ) >= 0
+    );
     ui.tick();
     ui.draw();
     let w1 = ui.layout_of(n).unwrap().2;
@@ -2240,7 +2634,11 @@ fn debug_inspect_overlays_and_reports_world_rect() {
     assert_eq!(ui.debug_rect_xy(), -1, "rect only captured by draw()");
     let overlaid = ui.draw().words.len();
     // Overlay = translucent fill + 4 edge rects = 5 RECT ops = 20 words.
-    assert_eq!(overlaid, baseline + 20, "highlight overlay must be appended");
+    assert_eq!(
+        overlaid,
+        baseline + 20,
+        "highlight overlay must be appended"
+    );
     assert_eq!(ui.debug_rect_xy(), 10 | (10 << 16));
     assert_eq!(ui.debug_rect_wh(), 40 | (40 << 16));
 
@@ -2284,18 +2682,29 @@ fn debug_inspect_glides_between_targets() {
     let baseline = ui.draw().words.len();
 
     ui.debug_inspect(a);
-    assert_eq!(overlay_x(&mut ui, baseline), 10, "first appearance is instant");
+    assert_eq!(
+        overlay_x(&mut ui, baseline),
+        10,
+        "first appearance is instant"
+    );
 
     ui.debug_inspect(b);
     let x1 = overlay_x(&mut ui, baseline);
-    assert!(x1 > 10 && x1 < 200, "glide starts between the boxes, got {x1}");
+    assert!(
+        x1 > 10 && x1 < 200,
+        "glide starts between the boxes, got {x1}"
+    );
     let x2 = overlay_x(&mut ui, baseline);
     assert!(x2 > x1, "glide advances every draw, got {x1} -> {x2}");
     for _ in 0..30 {
         ui.draw();
     }
     assert_eq!(overlay_x(&mut ui, baseline), 200, "glide converges exactly");
-    assert_eq!(ui.debug_rect_xy(), 200 | (10 << 16), "readback is the target, not the animation");
+    assert_eq!(
+        ui.debug_rect_xy(),
+        200 | (10 << 16),
+        "readback is the target, not the animation"
+    );
 
     ui.debug_inspect(0);
     assert_eq!(ui.draw().words.len(), baseline, "clear hides the overlay");
@@ -2341,7 +2750,10 @@ fn set_text_relayout_scope() {
     // …and paint still shows the new text (reads the tree, not the ctx).
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
-    let runs = words.iter().filter(|&&w| w == spec::draw_op::GLYPH_RUN).count();
+    let runs = words
+        .iter()
+        .filter(|&&w| w == spec::draw_op::GLYPH_RUN)
+        .count();
     assert_eq!(runs, 2, "both texts painted");
 
     // Empty <-> non-empty flips are structural (full rebuild).
@@ -2428,14 +2840,21 @@ fn packbits_round_trips_against_the_encoder_mirror() {
     while src.len() < 4096 {
         state = state.wrapping_mul(1664525).wrapping_add(1013904223);
         let b = (state >> 24) as u8;
-        let n = if state & 7 == 0 { (state >> 16 & 0xff) as usize + 1 } else { 1 };
+        let n = if state & 7 == 0 {
+            (state >> 16 & 0xff) as usize + 1
+        } else {
+            1
+        };
         for _ in 0..n {
             src.push(b);
         }
     }
     src.truncate(4096);
     // Sanity-check the mirror against one spec.ts hand vector.
-    assert_eq!(packbits_encode(&[1, 1, 1, 1, 2, 3]), alloc::vec![130, 1, 1, 2, 3]);
+    assert_eq!(
+        packbits_encode(&[1, 1, 1, 1, 2, 3]),
+        alloc::vec![130, 1, 1, 2, 3]
+    );
     let enc = packbits_encode(&src);
     assert!(enc.len() < src.len(), "the vector must actually compress");
     let mut dec = alloc::vec![0u8; src.len()];
@@ -2447,13 +2866,28 @@ fn packbits_round_trips_against_the_encoder_mirror() {
 fn packbits_rejects_malformed_streams_without_panicking() {
     use crate::codec::packbits_decode;
     let mut out = [0u8; 4];
-    assert!(!packbits_decode(&[3, 1, 2], &mut out), "truncated literal payload");
-    assert!(!packbits_decode(&[130], &mut out), "run without a value byte");
+    assert!(
+        !packbits_decode(&[3, 1, 2], &mut out),
+        "truncated literal payload"
+    );
+    assert!(
+        !packbits_decode(&[130], &mut out),
+        "run without a value byte"
+    );
     assert!(!packbits_decode(&[255, 1], &mut out), "run overruns dst");
-    assert!(!packbits_decode(&[5, 1, 2, 3, 4, 5, 6], &mut out), "literal overruns dst");
-    assert!(!packbits_decode(&[128, 1], &mut out), "src exhausted before dst full");
+    assert!(
+        !packbits_decode(&[5, 1, 2, 3, 4, 5, 6], &mut out),
+        "literal overruns dst"
+    );
+    assert!(
+        !packbits_decode(&[128, 1], &mut out),
+        "src exhausted before dst full"
+    );
     let mut two = [0u8; 2];
-    assert!(!packbits_decode(&[128, 5, 0, 1], &mut two), "trailing bytes after exact fit");
+    assert!(
+        !packbits_decode(&[128, 5, 0, 1], &mut two),
+        "trailing bytes after exact fit"
+    );
     assert!(packbits_decode(&[128, 5], &mut two));
     assert_eq!(two, [5, 5]);
 }
@@ -2473,16 +2907,33 @@ fn t8_upload_carries_an_aligned_palette_and_raw_indices() {
     let tex = ui.upload_texture(&data, 8, 8, spec::psm::PSM_T8);
     assert_eq!(tex, 0, "first slot at gen 0 is handle 0");
     let view = ui.texture(tex).unwrap();
-    assert_eq!((view.w, view.h, view.psm, view.linear), (8, 8, spec::psm::PSM_T8, false));
+    assert_eq!(
+        (view.w, view.h, view.psm, view.linear),
+        (8, 8, spec::psm::PSM_T8, false)
+    );
     assert_eq!(view.pixels, &indices[..]);
-    assert_eq!(view.pixels.as_ptr() as usize % 16, 0, "indices must be 16-byte aligned");
+    assert_eq!(
+        view.pixels.as_ptr() as usize % 16,
+        0,
+        "indices must be 16-byte aligned"
+    );
     let pal = view.palette.expect("T8 textures carry a palette");
     assert_eq!(pal.len(), 1024);
-    assert_eq!(pal.as_ptr() as usize % 16, 0, "palette must be 16-byte aligned");
+    assert_eq!(
+        pal.as_ptr() as usize % 16,
+        0,
+        "palette must be 16-byte aligned"
+    );
     assert_eq!((pal[4], pal[7]), (1, 255));
     // Undersized: palette alone, or palette + short index stream.
-    assert_eq!(ui.upload_texture(&data[..1023], 8, 8, spec::psm::PSM_T8), -1);
-    assert_eq!(ui.upload_texture(&data[..1024 + 63], 8, 8, spec::psm::PSM_T8), -1);
+    assert_eq!(
+        ui.upload_texture(&data[..1023], 8, 8, spec::psm::PSM_T8),
+        -1
+    );
+    assert_eq!(
+        ui.upload_texture(&data[..1024 + 63], 8, 8, spec::psm::PSM_T8),
+        -1
+    );
 }
 
 #[test]
@@ -2592,7 +3043,11 @@ fn tileset_tile_materializes_pixel_stream_tiles_only() {
     assert_eq!((view.w, view.h, view.psm), (4, 4, spec::psm::PSM_T8));
     assert!(view.linear, "tileset flags bit 1 maps to bilinear sampling");
     assert_eq!(view.pixels, &[5u8; 16][..]);
-    assert_eq!(view.palette.unwrap()[5 * 4], 0xaa, "shared entry palette rides along");
+    assert_eq!(
+        view.palette.unwrap()[5 * 4],
+        0xaa,
+        "shared entry palette rides along"
+    );
     // ABSENT and SOLID tiles are the host's job (drawn as background/RECTs).
     assert_eq!(ui.upload_tileset_tile(&blob, 1), -1);
     assert_eq!(ui.upload_tileset_tile(&blob, 2), -1);
@@ -2608,8 +3063,16 @@ fn tileset_tile_rejects_malformed_blobs_without_panicking() {
     let blob = tiny_tileset();
     assert_eq!(ui.upload_tileset_tile(&blob, 4), -1, "index out of range");
     assert_eq!(ui.upload_tileset_tile(&blob, u32::MAX), -1);
-    assert_eq!(ui.upload_tileset_tile(&blob[..blob.len() - 1], 3), -1, "truncated stream");
-    assert_eq!(ui.upload_tileset_tile(&blob[..ts::HEADER_SIZE], 0), -1, "header only");
+    assert_eq!(
+        ui.upload_tileset_tile(&blob[..blob.len() - 1], 3),
+        -1,
+        "truncated stream"
+    );
+    assert_eq!(
+        ui.upload_tileset_tile(&blob[..ts::HEADER_SIZE], 0),
+        -1,
+        "header only"
+    );
     assert_eq!(ui.upload_tileset_tile(&[], 0), -1);
     let mut bad_magic = blob.clone();
     bad_magic[0] ^= 0xff;
@@ -2635,7 +3098,11 @@ fn freed_handles_go_stale_and_slots_reuse_under_a_new_generation() {
     let px = alloc::vec![0xffu8; 8 * 8 * 4];
     let a = ui.upload_texture(&px, 8, 8, spec::psm::PSM_8888);
     let b = ui.upload_texture(&px, 8, 8, spec::psm::PSM_8888);
-    assert_eq!((a, b), (0, 1), "sequential uploads keep the old 0-based numbering");
+    assert_eq!(
+        (a, b),
+        (0, 1),
+        "sequential uploads keep the old 0-based numbering"
+    );
     ui.free_texture(a);
     assert!(ui.texture(a).is_none(), "freed handle resolves to None");
     ui.free_texture(a); // double free: silent no-op
@@ -2646,7 +3113,10 @@ fn freed_handles_go_stale_and_slots_reuse_under_a_new_generation() {
     assert!(c > 0, "handles stay positive (bit 31 clear)");
     assert_eq!(c as u32 & spec::TEX_SLOT_MASK, 0, "slot 0 reused LIFO");
     assert_eq!(c as u32 >> spec::TEX_SLOT_BITS, 1, "generation bumped");
-    assert!(ui.texture(a).is_none(), "the stale handle stays dead after reuse");
+    assert!(
+        ui.texture(a).is_none(),
+        "the stale handle stays dead after reuse"
+    );
     assert!(ui.texture(c).is_some());
     // set_image ignores the stale handle but honors the live one.
     let img = ui.create_node(spec::NodeType::Image as u8);
@@ -2659,7 +3129,10 @@ fn freed_handles_go_stale_and_slots_reuse_under_a_new_generation() {
     let (h1, _) = ui.texture_at(1).unwrap();
     assert_eq!(h1, b);
     ui.free_texture(c);
-    assert!(ui.texture_at(0).is_none(), "free slots are skipped by the walk");
+    assert!(
+        ui.texture_at(0).is_none(),
+        "free slots are skipped by the walk"
+    );
     assert_eq!(ui.texture_slot_count(), 2, "slot storage never shrinks");
     assert!(ui.texture_at(2).is_none());
 }
@@ -2675,7 +3148,10 @@ fn disc_cache_survives_js_freeing_its_texture() {
     ui.insert_before(spec::ROOT_ID, n, 0);
     ui.tick();
     let find_disc = |words: &[u32]| -> i32 {
-        let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+        let i = words
+            .iter()
+            .position(|&w| w == spec::draw_op::TEX_QUAD)
+            .unwrap();
         words[i + 1] as i32
     };
     let disc = find_disc(&ui.draw().words.clone());
@@ -2698,7 +3174,11 @@ fn disc_cache_survives_js_freeing_its_texture() {
 /// (hit tests only consider nodes that paint — see draw::claims_hit).
 fn abs_box(ui: &mut Ui, parent: i32, x: f64, y: f64, w: f64, h: f64) -> i32 {
     let n = ui.create_node(0);
-    ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        n,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(n, spec::prop::INSET_L, x);
     ui.set_prop(n, spec::prop::INSET_T, y);
     ui.set_prop(n, spec::prop::WIDTH, w);
@@ -2725,16 +3205,28 @@ fn hit_test_topmost_wins_and_containers_pass_through() {
     // A transparent full-screen wrapper OVER the panel does not occlude it,
     // but its own painted children do.
     let wrapper = ui.create_node(0);
-    ui.set_prop(wrapper, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        wrapper,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(wrapper, spec::prop::INSET_L, 0.0);
     ui.set_prop(wrapper, spec::prop::INSET_T, 0.0);
     ui.set_prop(wrapper, spec::prop::WIDTH, 480.0);
     ui.set_prop(wrapper, spec::prop::HEIGHT, 272.0);
     ui.insert_before(spec::ROOT_ID, wrapper, 0);
     ui.tick();
-    assert_eq!(ui.hit_test(90.0, 40.0), panel, "overlay layer passes hits through");
+    assert_eq!(
+        ui.hit_test(90.0, 40.0),
+        panel,
+        "overlay layer passes hits through"
+    );
     let toast = abs_box(&mut ui, wrapper, 80.0, 30.0, 40.0, 20.0);
-    assert_eq!(ui.hit_test(90.0, 40.0), toast, "painted overlay content claims");
+    assert_eq!(
+        ui.hit_test(90.0, 40.0),
+        toast,
+        "painted overlay content claims"
+    );
     // Outside the viewport (half-open edges): nothing.
     assert_eq!(ui.hit_test(480.0, 100.0), 0);
     assert_eq!(ui.hit_test(-1.0, 100.0), 0);
@@ -2750,30 +3242,58 @@ fn hit_test_paint_order_and_z_index() {
     let below = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 40.0, 40.0);
     let above = abs_box(&mut ui, spec::ROOT_ID, 30.0, 10.0, 40.0, 40.0);
     ui.tick();
-    assert_eq!(ui.hit_test(35.0, 20.0), above, "document order: later sibling on top");
-    assert_eq!(ui.hit_test(15.0, 20.0), below, "non-overlapped area still hits the first");
+    assert_eq!(
+        ui.hit_test(35.0, 20.0),
+        above,
+        "document order: later sibling on top"
+    );
+    assert_eq!(
+        ui.hit_test(15.0, 20.0),
+        below,
+        "non-overlapped area still hits the first"
+    );
     // z-index beats document order (mirrors the paint sort).
     ui.set_prop(below, spec::prop::Z_INDEX, 5.0);
-    assert_eq!(ui.hit_test(35.0, 20.0), below, "z-index raises the earlier sibling");
+    assert_eq!(
+        ui.hit_test(35.0, 20.0),
+        below,
+        "z-index raises the earlier sibling"
+    );
 }
 
 #[test]
 fn hit_test_display_none_overflow_and_transforms() {
     let mut ui = Ui::new();
     let clipper = abs_box(&mut ui, spec::ROOT_ID, 10.0, 10.0, 30.0, 30.0);
-    ui.set_prop(clipper, spec::prop::OVERFLOW, spec::Overflow::Hidden as u32 as f64);
+    ui.set_prop(
+        clipper,
+        spec::prop::OVERFLOW,
+        spec::Overflow::Hidden as u32 as f64,
+    );
     let wide = abs_box(&mut ui, clipper, 0.0, 0.0, 200.0, 20.0);
     ui.tick();
-    assert_eq!(ui.hit_test(20.0, 15.0), wide, "inside the clip the child hits");
+    assert_eq!(
+        ui.hit_test(20.0, 15.0),
+        wide,
+        "inside the clip the child hits"
+    );
     assert_eq!(
         ui.hit_test(100.0, 15.0),
         0,
         "outside the overflow-hidden box the child's box is clipped away"
     );
     // display:none removes the whole subtree from hit testing.
-    ui.set_prop(clipper, spec::prop::DISPLAY, spec::Display::None as u32 as f64);
+    ui.set_prop(
+        clipper,
+        spec::prop::DISPLAY,
+        spec::Display::None as u32 as f64,
+    );
     assert_eq!(ui.hit_test(20.0, 15.0), 0);
-    ui.set_prop(clipper, spec::prop::DISPLAY, spec::Display::Flex as u32 as f64);
+    ui.set_prop(
+        clipper,
+        spec::prop::DISPLAY,
+        spec::Display::Flex as u32 as f64,
+    );
     // Translate moves the hit box with the paint box.
     let mover = abs_box(&mut ui, spec::ROOT_ID, 100.0, 100.0, 20.0, 20.0);
     ui.set_prop(mover, spec::prop::TRANSLATE_X, 50.0);
@@ -2790,7 +3310,11 @@ fn hit_test_display_none_overflow_and_transforms() {
     let ghost_child = abs_box(&mut ui, ghost, 0.0, 0.0, 20.0, 20.0);
     ui.set_prop(ghost, spec::prop::OPACITY, 0.0);
     ui.tick();
-    assert_eq!(ui.hit_test(210.0, 210.0), 0, "invisible subtree hits nothing");
+    assert_eq!(
+        ui.hit_test(210.0, 210.0),
+        0,
+        "invisible subtree hits nothing"
+    );
     ui.set_prop(ghost, spec::prop::OPACITY, 0.5);
     assert_eq!(ui.hit_test(210.0, 210.0), ghost_child, "faded still claims");
 }
@@ -2806,7 +3330,11 @@ fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     plain_style.base = alloc::vec![(spec::prop::WIDTH, 10f32.to_bits())];
     assert!(ui.load_styles(&encode_styles(&[hotspot_style, plain_style])));
     let hotspot = ui.create_node(0);
-    ui.set_prop(hotspot, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        hotspot,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(hotspot, spec::prop::INSET_L, 30.0);
     ui.set_prop(hotspot, spec::prop::INSET_T, 30.0);
     ui.set_prop(hotspot, spec::prop::WIDTH, 40.0);
@@ -2814,11 +3342,19 @@ fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     ui.set_style(hotspot, 0);
     ui.insert_before(spec::ROOT_ID, hotspot, 0);
     ui.tick();
-    assert_eq!(ui.hit_test(40.0, 40.0), hotspot, "focus:-styled hotspot claims unfocused");
+    assert_eq!(
+        ui.hit_test(40.0, 40.0),
+        hotspot,
+        "focus:-styled hotspot claims unfocused"
+    );
     // A plain-styled unpainted box still passes through (record present, but
     // no paint in any variant).
     let wrapper = ui.create_node(0);
-    ui.set_prop(wrapper, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        wrapper,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(wrapper, spec::prop::INSET_L, 30.0);
     ui.set_prop(wrapper, spec::prop::INSET_T, 30.0);
     ui.set_prop(wrapper, spec::prop::WIDTH, 40.0);
@@ -2826,7 +3362,11 @@ fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     ui.set_style(wrapper, 1);
     ui.insert_before(spec::ROOT_ID, wrapper, 0);
     ui.tick();
-    assert_eq!(ui.hit_test(40.0, 40.0), hotspot, "styled-but-unpainted wrapper passes through");
+    assert_eq!(
+        ui.hit_test(40.0, 40.0),
+        hotspot,
+        "styled-but-unpainted wrapper passes through"
+    );
     // A perspective context root claims its own box: a click on visible 3D
     // content must never fall through to what is painted behind it.
     let stage = abs_box(&mut ui, spec::ROOT_ID, 100.0, 100.0, 60.0, 60.0);
@@ -2834,7 +3374,11 @@ fn hit_test_variant_styled_hotspots_and_perspective_roots_claim() {
     let card = abs_box(&mut ui, stage, 10.0, 10.0, 40.0, 40.0);
     ui.tick();
     let _ = card;
-    assert_eq!(ui.hit_test(130.0, 130.0), stage, "3D context root claims, children untestable");
+    assert_eq!(
+        ui.hit_test(130.0, 130.0),
+        stage,
+        "3D context root claims, children untestable"
+    );
 }
 
 #[test]
@@ -2848,42 +3392,75 @@ fn cursor_sprite_draws_last_hides_and_survives_free() {
 
     // No cursor bound: no TEX_QUAD at all.
     let words = ui.draw().words.clone();
-    assert_eq!(validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize], 0);
+    assert_eq!(
+        validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize],
+        0
+    );
 
     // Bound: exactly one TEX_QUAD, as the LAST op, offset by the hotspot.
     ui.set_cursor(tex, 2.0, 3.0, 0.0, 0.0);
     ui.set_cursor_pos(100.0, 50.0);
     let words = ui.draw().words.clone();
-    assert_eq!(validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize], 1);
-    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    assert_eq!(
+        validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize],
+        1
+    );
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEX_QUAD)
+        .unwrap();
     assert_eq!(i + 9, words.len(), "cursor is the final DrawList entry");
     assert_eq!(words[i + 1], tex as u32);
-    assert_eq!(decode_xy(words[i + 2]), (98, 47), "hotspot offsets the sprite");
-    assert_eq!(decode_wh(words[i + 3]), (8, 8), "size defaults to the texture");
+    assert_eq!(
+        decode_xy(words[i + 2]),
+        (98, 47),
+        "hotspot offsets the sprite"
+    );
+    assert_eq!(
+        decode_wh(words[i + 3]),
+        (8, 8),
+        "size defaults to the texture"
+    );
 
     // Explicit logical size overrides the texture dimensions.
     ui.set_cursor(tex, 0.0, 0.0, 16.0, 12.0);
     let words = ui.draw().words.clone();
-    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEX_QUAD)
+        .unwrap();
     assert_eq!(decode_wh(words[i + 3]), (16, 12));
 
     // The viewport edge clips the sprite instead of wrapping i16 coords.
     ui.set_cursor_pos(476.0, 268.0);
     let words = ui.draw().words.clone();
-    let i = words.iter().position(|&w| w == spec::draw_op::TEX_QUAD).unwrap();
-    assert_eq!(decode_wh(words[i + 3]), (4, 4), "clipped at the screen edge");
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEX_QUAD)
+        .unwrap();
+    assert_eq!(
+        decode_wh(words[i + 3]),
+        (4, 4),
+        "clipped at the screen edge"
+    );
 
     // Freeing the bound texture hides the cursor (stale handles draw nothing).
     ui.free_texture(tex);
     let words = ui.draw().words.clone();
-    assert_eq!(validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize], 0);
+    assert_eq!(
+        validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize],
+        0
+    );
 
     // Unbinding via tex < 0 also hides it.
     let tex2 = ui.upload_texture(&[0x80u8; 8 * 8 * 4], 8, 8, spec::psm::PSM_8888);
     ui.set_cursor(tex2, 0.0, 0.0, 0.0, 0.0);
     ui.set_cursor(-1, 0.0, 0.0, 0.0, 0.0);
     let words = ui.draw().words.clone();
-    assert_eq!(validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize], 0);
+    assert_eq!(
+        validate_drawlist(&words)[spec::draw_op::TEX_QUAD as usize],
+        0
+    );
 }
 
 #[test]
@@ -2895,7 +3472,11 @@ fn hit_test_never_sees_the_cursor_sprite() {
     ui.set_cursor_pos(60.0, 60.0);
     ui.tick();
     ui.draw();
-    assert_eq!(ui.hit_test(60.0, 60.0), under, "the sprite never occludes the tree");
+    assert_eq!(
+        ui.hit_test(60.0, 60.0),
+        under,
+        "the sprite never occludes the tree"
+    );
 }
 
 #[test]
@@ -2906,21 +3487,45 @@ fn hit_test_frame_edge_overlay_claims_only_its_band() {
     // edge band and nothing else.
     let row = abs_box(&mut ui, spec::ROOT_ID, 20.0, 20.0, 100.0, 20.0);
     let edge = ui.create_node(0);
-    ui.set_prop(edge, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        edge,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(edge, spec::prop::INSET_L, 0.0);
     ui.set_prop(edge, spec::prop::INSET_T, 0.0);
     ui.set_prop(edge, spec::prop::WIDTH, 480.0);
     ui.set_prop(edge, spec::prop::HEIGHT, 272.0);
-    ui.set_prop(edge, spec::prop::BEVEL_OUTER_LIGHT, abgr(255, 255, 255, 255) as f64);
-    ui.set_prop(edge, spec::prop::BEVEL_OUTER_DARK, abgr(0, 0, 0, 255) as f64);
+    ui.set_prop(
+        edge,
+        spec::prop::BEVEL_OUTER_LIGHT,
+        abgr(255, 255, 255, 255) as f64,
+    );
+    ui.set_prop(
+        edge,
+        spec::prop::BEVEL_OUTER_DARK,
+        abgr(0, 0, 0, 255) as f64,
+    );
     ui.insert_before(spec::ROOT_ID, edge, 0);
     ui.tick();
-    assert_eq!(ui.hit_test(50.0, 30.0), row, "the overlay's transparent center passes through");
-    assert_eq!(ui.hit_test(1.0, 100.0), edge, "the painted ring band claims");
+    assert_eq!(
+        ui.hit_test(50.0, 30.0),
+        row,
+        "the overlay's transparent center passes through"
+    );
+    assert_eq!(
+        ui.hit_test(1.0, 100.0),
+        edge,
+        "the painted ring band claims"
+    );
     assert_eq!(ui.hit_test(479.0, 100.0), edge, "right band too");
     // A border-only well behaves the same: band claims, interior passes.
     let well = ui.create_node(0);
-    ui.set_prop(well, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        well,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(well, spec::prop::INSET_L, 20.0);
     ui.set_prop(well, spec::prop::INSET_T, 15.0);
     ui.set_prop(well, spec::prop::WIDTH, 200.0);
@@ -2930,7 +3535,11 @@ fn hit_test_frame_edge_overlay_claims_only_its_band() {
     ui.insert_before(spec::ROOT_ID, well, 0);
     ui.tick();
     assert_eq!(ui.hit_test(21.0, 30.0), well, "border band claims");
-    assert_eq!(ui.hit_test(50.0, 30.0), row, "border interior passes through");
+    assert_eq!(
+        ui.hit_test(50.0, 30.0),
+        row,
+        "border interior passes through"
+    );
 }
 
 // ---- STREAM container (.pkst) — stream.rs readers + the video plane ---------
@@ -2988,13 +3597,26 @@ fn stream_header_block_round_trips() {
     assert_eq!((h.video.fps_num, h.video.fps_den), (15, 1));
     assert_eq!((h.video.slot_count, h.video.latest_seq), (8, 42));
     assert_eq!(h.video.total_frames, 900);
-    assert_eq!(h.video.slot_size, (32 + 1024 + 256 * 128u32).next_multiple_of(16));
+    assert_eq!(
+        h.video.slot_size,
+        (32 + 1024 + 256 * 128u32).next_multiple_of(16)
+    );
     assert_eq!((h.audio.sample_rate, h.audio.channels), (22050, 2));
-    assert_eq!((h.audio.chunk_frames, h.audio.chunk_count, h.audio.latest_seq), (2048, 64, 17));
+    assert_eq!(
+        (
+            h.audio.chunk_frames,
+            h.audio.chunk_count,
+            h.audio.latest_seq
+        ),
+        (2048, 64, 17)
+    );
     // Ring offsets: seq 1 sits at the ring base; seqs wrap modulo the count.
     assert_eq!(crate::stream::slot_offset(&h, 1), Some(h.video_off));
     assert_eq!(crate::stream::slot_offset(&h, 9), Some(h.video_off));
-    assert_eq!(crate::stream::slot_offset(&h, 2), Some(h.video_off + h.video.slot_size));
+    assert_eq!(
+        crate::stream::slot_offset(&h, 2),
+        Some(h.video_off + h.video.slot_size)
+    );
     assert_eq!(crate::stream::slot_offset(&h, 0), None, "seqs start at 1");
     let chunk = crate::stream::chunk_size(2048, 2).unwrap();
     assert_eq!(chunk, 16 + 2048 * 2 * 2);
@@ -3063,8 +3685,14 @@ fn stream_slot_and_chunk_headers_validate() {
     let ch = crate::stream::parse_chunk_header(&chunk).expect("valid chunk");
     assert_eq!((ch.seq, ch.start_frame), (5, 40960));
     chunk[0..4].copy_from_slice(&0u32.to_le_bytes());
-    assert!(crate::stream::parse_chunk_header(&chunk).is_none(), "seq 0 = never written");
-    assert!(crate::stream::parse_chunk_header(&chunk[..8]).is_none(), "short header");
+    assert!(
+        crate::stream::parse_chunk_header(&chunk).is_none(),
+        "seq 0 = never written"
+    );
+    assert!(
+        crate::stream::parse_chunk_header(&chunk[..8]).is_none(),
+        "short header"
+    );
 }
 
 #[test]
@@ -3084,13 +3712,22 @@ fn update_texture_t8_overwrites_in_place() {
     let px = alloc::vec![1u8; 16];
     assert!(ui.update_texture_t8(plane, &pal, &px));
     let view = ui.texture(plane).expect("plane still live");
-    assert_eq!(view.palette.unwrap()[4..8], abgr(0, 255, 0, 255).to_le_bytes());
+    assert_eq!(
+        view.palette.unwrap()[4..8],
+        abgr(0, 255, 0, 255).to_le_bytes()
+    );
     assert_eq!(view.pixels, &px[..]);
     assert_eq!(ui.texture_revision(plane), Some(1));
 
     // Size/format/liveness misuse changes nothing and reports false.
-    assert!(!ui.update_texture_t8(plane, &pal[..100], &px), "short palette");
-    assert!(!ui.update_texture_t8(plane, &pal, &px[..8]), "wrong pixel count");
+    assert!(
+        !ui.update_texture_t8(plane, &pal[..100], &px),
+        "short palette"
+    );
+    assert!(
+        !ui.update_texture_t8(plane, &pal, &px[..8]),
+        "wrong pixel count"
+    );
     assert_eq!(ui.texture_revision(plane), Some(1));
     let rgba = ui.upload_texture(&[0u8; 4 * 4 * 4], 4, 4, spec::psm::PSM_8888);
     assert!(!ui.update_texture_t8(rgba, &pal, &px), "non-T8 texture");
@@ -3111,9 +3748,19 @@ fn stream_golden_fixture_parses() {
     assert!(!h.ended);
     assert_eq!((h.video.w, h.video.h), (16, 16));
     assert_eq!((h.video.fps_num, h.video.fps_den), (15, 1));
-    assert_eq!((h.video.slot_count, h.video.latest_seq, h.video.total_frames), (4, 2, 30));
+    assert_eq!(
+        (h.video.slot_count, h.video.latest_seq, h.video.total_frames),
+        (4, 2, 30)
+    );
     assert_eq!((h.audio.sample_rate, h.audio.channels), (22050, 2));
-    assert_eq!((h.audio.chunk_frames, h.audio.chunk_count, h.audio.latest_seq), (64, 4, 1));
+    assert_eq!(
+        (
+            h.audio.chunk_frames,
+            h.audio.chunk_count,
+            h.audio.latest_seq
+        ),
+        (64, 4, 1)
+    );
 
     // Frame 2 (seq 2): palette bytes are (i + 2) & 255, indices (i * 3) & 255.
     let off = crate::stream::slot_offset(&h, 2).unwrap() as usize;
@@ -3121,9 +3768,18 @@ fn stream_golden_fixture_parses() {
     let sh = crate::stream::parse_slot_header(slot, &h.video).expect("slot 2 parses");
     assert_eq!((sh.seq, sh.frame_index), (2, 1));
     let pal = &slot[spec::stream::SLOT_HEADER_SIZE..spec::stream::SLOT_HEADER_SIZE + 1024];
-    assert!(pal.iter().enumerate().all(|(i, &b)| b == ((i + 2) & 255) as u8));
-    let px = &slot[spec::stream::SLOT_HEADER_SIZE + 1024..spec::stream::SLOT_HEADER_SIZE + 1024 + 256];
-    assert!(px.iter().enumerate().all(|(i, &b)| b == ((i * 3) & 255) as u8));
+    assert!(
+        pal.iter()
+            .enumerate()
+            .all(|(i, &b)| b == ((i + 2) & 255) as u8)
+    );
+    let px =
+        &slot[spec::stream::SLOT_HEADER_SIZE + 1024..spec::stream::SLOT_HEADER_SIZE + 1024 + 256];
+    assert!(
+        px.iter()
+            .enumerate()
+            .all(|(i, &b)| b == ((i * 3) & 255) as u8)
+    );
 
     // Audio chunk 1: s16 LE samples i * 3 - 64.
     let coff = crate::stream::chunk_offset(&h, 1).unwrap() as usize;
@@ -3150,16 +3806,27 @@ fn stream_golden_fixture_parses() {
 fn wire_frame_header_round_trips_and_rejects_oversize() {
     use crate::wire::{encode_frame_header, parse_frame_header};
     let mut out = [0u8; 8];
-    assert!(encode_frame_header(spec::wire::MSG_VIDEO_SLOT, 1, 1040, &mut out));
+    assert!(encode_frame_header(
+        spec::wire::MSG_VIDEO_SLOT,
+        1,
+        1040,
+        &mut out
+    ));
     let h = parse_frame_header(&out).expect("round trip");
-    assert_eq!((h.kind, h.flags, h.len), (spec::wire::MSG_VIDEO_SLOT, 1, 1040));
+    assert_eq!(
+        (h.kind, h.flags, h.len),
+        (spec::wire::MSG_VIDEO_SLOT, 1, 1040)
+    );
     assert!(parse_frame_header(&out[..7]).is_none(), "short header");
     assert!(
         !encode_frame_header(0x10, 0, spec::wire::MAX_PAYLOAD as u32 + 1, &mut out),
         "oversize refused at encode"
     );
     out[4..8].copy_from_slice(&(spec::wire::MAX_PAYLOAD as u32 + 1).to_le_bytes());
-    assert!(parse_frame_header(&out).is_none(), "oversize refused at parse");
+    assert!(
+        parse_frame_header(&out).is_none(),
+        "oversize refused at parse"
+    );
 }
 
 #[test]
@@ -3224,7 +3891,10 @@ fn wire_payload_parsers_validate_and_survive_truncation() {
     let (path, got) = parse_stream_open(&open).expect("streamOpen parses");
     assert_eq!(path, "media/v");
     assert_eq!(got, &block[..]);
-    assert!(parse_stream_open(&open[..open.len() - 1]).is_none(), "short block refused");
+    assert!(
+        parse_stream_open(&open[..open.len() - 1]).is_none(),
+        "short block refused"
+    );
 
     // videoSlot: header · palette · indices.
     let mut slot = Vec::new();
@@ -3237,10 +3907,16 @@ fn wire_payload_parsers_validate_and_survive_truncation() {
     slot.extend_from_slice(&[9u8; 1024]);
     slot.extend_from_slice(&[5u8; 32 * 16]);
     let msg = parse_video_slot(&slot).expect("slot parses");
-    assert_eq!((msg.seq, msg.frame_index, msg.w, msg.h, msg.rle), (2, 7, 32, 16, false));
+    assert_eq!(
+        (msg.seq, msg.frame_index, msg.w, msg.h, msg.rle),
+        (2, 7, 32, 16, false)
+    );
     assert_eq!(msg.palette.len(), 1024);
     assert_eq!(msg.indices.len(), 32 * 16);
-    assert!(parse_video_slot(&slot[..1039]).is_none(), "short slot refused");
+    assert!(
+        parse_video_slot(&slot[..1039]).is_none(),
+        "short slot refused"
+    );
     let mut zero_seq = slot.clone();
     zero_seq[0..4].copy_from_slice(&0u32.to_le_bytes());
     assert!(parse_video_slot(&zero_seq).is_none(), "seq 0 refused");
@@ -3251,7 +3927,10 @@ fn wire_payload_parsers_validate_and_survive_truncation() {
     chunk.extend_from_slice(&2048u32.to_le_bytes());
     chunk.extend_from_slice(&[0u8; 64 * 2 * 2]);
     let msg = parse_audio_chunk(&chunk).expect("chunk parses");
-    assert_eq!((msg.seq, msg.start_frame, msg.pcm.len()), (1, 2048, 64 * 2 * 2));
+    assert_eq!(
+        (msg.seq, msg.start_frame, msg.pcm.len()),
+        (1, 2048, 64 * 2 * 2)
+    );
     assert!(parse_audio_chunk(&chunk[..7]).is_none());
 
     let mut mark = Vec::new();
@@ -3325,7 +4004,14 @@ fn ram_stream_image_equals_the_reference_file_writer() {
     let px = |seed: u8| -> Vec<u8> { (0..32 * 16).map(|i| (i as u8).wrapping_mul(seed)).collect() };
     let pcm = |seed: u8| -> Vec<u8> { (0..64 * 2 * 2).map(|i| (i as u8) ^ seed).collect() };
     for seq in 1..=3u32 {
-        reference_write_slot(&mut reference, &h, seq, seq * 2, &pal(seq as u8), &px(seq as u8));
+        reference_write_slot(
+            &mut reference,
+            &h,
+            seq,
+            seq * 2,
+            &pal(seq as u8),
+            &px(seq as u8),
+        );
     }
     for seq in 1..=2u32 {
         reference_write_chunk(&mut reference, &h, seq, seq * 64, &pcm(seq as u8));
@@ -3350,12 +4036,23 @@ fn ram_stream_image_equals_the_reference_file_writer() {
     }
     for seq in 1..=2u32 {
         let bytes = pcm(seq as u8);
-        assert!(ram.apply_chunk(&AudioChunkMsg { seq, start_frame: seq * 64, pcm: &bytes }));
+        assert!(ram.apply_chunk(&AudioChunkMsg {
+            seq,
+            start_frame: seq * 64,
+            pcm: &bytes
+        }));
     }
-    ram.apply_mark(&StreamMarkMsg { epoch: 5, ended: true });
+    ram.apply_mark(&StreamMarkMsg {
+        epoch: 5,
+        ended: true,
+    });
 
     assert_eq!(ram.buf().len(), reference.len());
-    assert_eq!(ram.buf(), &reference[..], "RAM ring == file ring, byte for byte");
+    assert_eq!(
+        ram.buf(),
+        &reference[..],
+        "RAM ring == file ring, byte for byte"
+    );
 
     // And the shared readers see the expected world.
     let live = crate::stream::parse_header_block(ram.buf()).unwrap();
@@ -3373,7 +4070,9 @@ fn ram_stream_decodes_rle_slots_and_rejects_bad_geometry() {
     let block = stream_header_block(0, 0, 32, 16, 2, 0, 64, 2, 0);
     let mut ram = crate::stream_rx::RamStream::open(&block).unwrap();
 
-    let raw: Vec<u8> = (0..32 * 16).map(|i| if i < 300 { 7 } else { (i % 5) as u8 }).collect();
+    let raw: Vec<u8> = (0..32 * 16)
+        .map(|i| if i < 300 { 7 } else { (i % 5) as u8 })
+        .collect();
     let rle = packbits_encode(&raw);
     assert!(rle.len() < raw.len(), "fixture should actually compress");
     let palette = alloc::vec![1u8; 1024];
@@ -3392,16 +4091,40 @@ fn ram_stream_decodes_rle_slots_and_rejects_bad_geometry() {
 
     // Wrong plane, wrong palette size, wrong index count, truncated RLE.
     assert!(!ram.apply_slot(&VideoSlotMsg {
-        seq: 2, frame_index: 1, w: 16, h: 16, rle: false, palette: &palette, indices: &raw,
+        seq: 2,
+        frame_index: 1,
+        w: 16,
+        h: 16,
+        rle: false,
+        palette: &palette,
+        indices: &raw,
     }));
     assert!(!ram.apply_slot(&VideoSlotMsg {
-        seq: 2, frame_index: 1, w: 32, h: 16, rle: false, palette: &palette[..512], indices: &raw,
+        seq: 2,
+        frame_index: 1,
+        w: 32,
+        h: 16,
+        rle: false,
+        palette: &palette[..512],
+        indices: &raw,
     }));
     assert!(!ram.apply_slot(&VideoSlotMsg {
-        seq: 2, frame_index: 1, w: 32, h: 16, rle: false, palette: &palette, indices: &raw[..100],
+        seq: 2,
+        frame_index: 1,
+        w: 32,
+        h: 16,
+        rle: false,
+        palette: &palette,
+        indices: &raw[..100],
     }));
     assert!(!ram.apply_slot(&VideoSlotMsg {
-        seq: 2, frame_index: 1, w: 32, h: 16, rle: true, palette: &palette, indices: &rle[..rle.len() / 2],
+        seq: 2,
+        frame_index: 1,
+        w: 32,
+        h: 16,
+        rle: true,
+        palette: &palette,
+        indices: &rle[..rle.len() / 2],
     }));
     // Failures must not publish a cursor.
     let h = crate::stream::parse_header_block(ram.buf()).unwrap();
@@ -3470,7 +4193,10 @@ fn ram_stream_reconstructs_the_committed_golden() {
             pcm: &golden[off + 16..off + 16 + pcm_bytes],
         }));
     }
-    ram.apply_mark(&StreamMarkMsg { epoch: h.epoch, ended: h.ended });
+    ram.apply_mark(&StreamMarkMsg {
+        epoch: h.epoch,
+        ended: h.ended,
+    });
     // Restore the golden's final cursors exactly (a lapped ring's latest may
     // exceed the highest resident seq; apply_* published the resident max).
     let final_v = h.video.latest_seq;
@@ -3480,7 +4206,11 @@ fn ram_stream_reconstructs_the_committed_golden() {
     let mut image = ram.buf().to_vec();
     image[v + 20..v + 24].copy_from_slice(&final_v.to_le_bytes());
     image[a + 20..a + 24].copy_from_slice(&final_a.to_le_bytes());
-    assert_eq!(&image[..], golden, "socket-fed RAM ring == TS-written file, byte for byte");
+    assert_eq!(
+        &image[..],
+        golden,
+        "socket-fed RAM ring == TS-written file, byte for byte"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3492,7 +4222,11 @@ fn hit_test_bounds_claims_pure_layout_containers() {
     let mut ui = Ui::new();
     // An unstyled container (a list viewport): ink-transparent, bounds-solid.
     let viewport = ui.create_node(0);
-    ui.set_prop(viewport, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        viewport,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(viewport, spec::prop::INSET_L, 10.0);
     ui.set_prop(viewport, spec::prop::INSET_T, 10.0);
     ui.set_prop(viewport, spec::prop::WIDTH, 100.0);
@@ -3506,8 +4240,16 @@ fn hit_test_bounds_claims_pure_layout_containers() {
     // In the row gap: ink misses, bounds resolves to the container's box —
     // the property that lets a list own its whole viewport without painted
     // rows under every finger (the touchRect workaround this replaces).
-    assert_eq!(ui.hit_test(20.0, 80.0), 0, "ink: nothing painted in the gap");
-    assert_eq!(ui.hit_test_bounds(20.0, 80.0), viewport, "bounds: the gap is the viewport's box");
+    assert_eq!(
+        ui.hit_test(20.0, 80.0),
+        0,
+        "ink: nothing painted in the gap"
+    );
+    assert_eq!(
+        ui.hit_test_bounds(20.0, 80.0),
+        viewport,
+        "bounds: the gap is the viewport's box"
+    );
 }
 
 #[test]
@@ -3580,7 +4322,10 @@ fn auxiliary_surface_isolates_layout_draw_and_touch_domains() {
 
 #[test]
 fn touch_decode_reads_both_packings() {
-    assert_eq!(crate::touch::decode((7 << 18) | (200 << 9) | 300), (7, 300.0, 200.0));
+    assert_eq!(
+        crate::touch::decode((7 << 18) | (200 << 9) | 300),
+        (7, 300.0, 200.0)
+    );
     assert_eq!(
         crate::touch::decode(0x8000_0000 | (9 << 20) | (600 << 10) | 700),
         (9, 700.0, 600.0)
@@ -3595,7 +4340,11 @@ fn hit_pass_layers_never_swallow_bounds_hits() {
     // root): hitPass makes its own box hit-transparent in BOTH walks, while
     // its children still claim.
     let overlay = ui.create_node(0);
-    ui.set_prop(overlay, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(
+        overlay,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
     ui.set_prop(overlay, spec::prop::INSET_L, 0.0);
     ui.set_prop(overlay, spec::prop::INSET_T, 0.0);
     ui.set_prop(overlay, spec::prop::WIDTH, 480.0);
@@ -3611,7 +4360,11 @@ fn hit_pass_layers_never_swallow_bounds_hits() {
     // A toast INSIDE the overlay claims over the content beneath it.
     let toast = abs_box(&mut ui, overlay, 15.0, 15.0, 30.0, 20.0);
     assert_eq!(ui.hit_test_bounds(20.0, 20.0), toast);
-    assert_eq!(ui.hit_test(20.0, 20.0), toast, "ink walk honors overlay content too");
+    assert_eq!(
+        ui.hit_test(20.0, 20.0),
+        toast,
+        "ink walk honors overlay content too"
+    );
 }
 
 // ---- native text (TEXT_RUN, docs/BACKENDS.md) -----------------------------------
@@ -3673,12 +4426,22 @@ fn native_measure_routes_layout_and_emits_text_run() {
     let counts = validate_drawlist(&words);
     assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 1);
     assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 0);
-    let i = words.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEXT_RUN)
+        .unwrap();
     assert_eq!(words[i + 1], 0, "slot 0, left align");
     assert_eq!(f32::from_bits(words[i + 2]), 0.0);
     assert_eq!(f32::from_bits(words[i + 3]), 0.0);
-    assert_eq!(f32::from_bits(words[i + 4]), 30.0, "boxW = laid-out box width");
-    assert!(f32::from_bits(words[i + 5]).is_nan(), "lineHeight NaN = slot default");
+    assert_eq!(
+        f32::from_bits(words[i + 4]),
+        30.0,
+        "boxW = laid-out box width"
+    );
+    assert!(
+        f32::from_bits(words[i + 5]).is_nan(),
+        "lineHeight NaN = slot default"
+    );
     assert_eq!(words[i + 6], color);
     // The run string rides IN the words — the DrawList is the complete
     // pixel truth, no side table.
@@ -3741,6 +4504,112 @@ fn tracked_and_transformed_runs_use_the_baked_pair_on_both_sides() {
 }
 
 #[test]
+fn extended_backend_emits_parent_rotated_glyph_cells() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        10,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    ui.set_rounded_clip_supported(true);
+    let wrap = ui.create_node(spec::NodeType::View as u8);
+    ui.set_prop(
+        wrap,
+        spec::prop::POS_TYPE,
+        spec::PosType::Absolute as u32 as f64,
+    );
+    ui.set_prop(wrap, spec::prop::WIDTH, 100.0);
+    ui.set_prop(wrap, spec::prop::HEIGHT, 100.0);
+    ui.set_prop(wrap, spec::prop::ROTATE, 90.0);
+    ui.set_prop(wrap, spec::prop::ORIGIN_X, -0.5);
+    ui.set_prop(wrap, spec::prop::ORIGIN_Y, -0.5);
+    ui.set_prop(wrap, spec::prop::INSET_L, 30.0);
+    ui.set_prop(wrap, spec::prop::INSET_T, 30.0);
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 20.0);
+    ui.set_text(text, "AB");
+    ui.insert_before(wrap, text, 0);
+    ui.insert_before(spec::ROOT_ID, wrap, 0);
+    ui.tick();
+
+    let words = ui.draw().words.clone();
+    let counts = validate_drawlist(&words);
+    assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 0);
+    assert_eq!(counts[spec::draw_op::GLYPH_RUN_XFORM as usize], 1);
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::GLYPH_RUN_XFORM)
+        .unwrap();
+    assert_eq!(words[i + 1] >> 16, 2);
+    assert_eq!(
+        decode_xy(words[i + 3]),
+        (0, 8),
+        "cell x-axis rotates with parent"
+    );
+    assert_eq!(
+        decode_xy(words[i + 4]),
+        (-10, 0),
+        "cell y-axis rotates with parent"
+    );
+    let first = decode_xy(words[i + 5]);
+    let second = decode_xy(words[i + 7]);
+    assert_eq!(
+        (second.0 - first.0, second.1 - first.1),
+        (0, 6),
+        "glyph advance follows the same rotated baseline"
+    );
+}
+
+#[test]
+fn extended_backend_emits_half_turn_glyph_cells() {
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&encode_atlas(
+        0,
+        8,
+        10,
+        7,
+        10,
+        3,
+        &[(0xfffd, 0, 8), ('A' as u32, 1, 6), ('B' as u32, 2, 5)],
+    )));
+    ui.set_rounded_clip_supported(true);
+    let wrap = ui.create_node(spec::NodeType::View as u8);
+    ui.set_prop(wrap, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+    ui.set_prop(wrap, spec::prop::WIDTH, 100.0);
+    ui.set_prop(wrap, spec::prop::HEIGHT, 100.0);
+    ui.set_prop(wrap, spec::prop::ROTATE, 180.0);
+    ui.set_prop(wrap, spec::prop::ORIGIN_X, -0.5);
+    ui.set_prop(wrap, spec::prop::ORIGIN_Y, -0.5);
+    ui.set_prop(wrap, spec::prop::INSET_L, 30.0);
+    ui.set_prop(wrap, spec::prop::INSET_T, 30.0);
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(text, spec::prop::WIDTH, 20.0);
+    ui.set_text(text, "AB");
+    ui.insert_before(wrap, text, 0);
+    ui.insert_before(spec::ROOT_ID, wrap, 0);
+    ui.tick();
+
+    let words = ui.draw().words.clone();
+    let counts = validate_drawlist(&words);
+    assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 0);
+    assert_eq!(counts[spec::draw_op::GLYPH_RUN_XFORM as usize], 1);
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::GLYPH_RUN_XFORM)
+        .unwrap();
+    assert_eq!(decode_xy(words[i + 3]), (-8, 0), "cell x-axis flips at 180 degrees");
+    assert_eq!(decode_xy(words[i + 4]), (0, -10), "cell y-axis flips at 180 degrees");
+    let first = decode_xy(words[i + 5]);
+    let second = decode_xy(words[i + 7]);
+    assert_eq!((second.0 - first.0, second.1 - first.1), (-6, 0),
+               "glyph advance flips with the half-turn baseline");
+}
+
+#[test]
 fn clipped_text_run_is_scissor_bracketed() {
     let mut ui = Ui::new();
     ui.set_text_measure(Some(fake_native_measure()));
@@ -3759,8 +4628,15 @@ fn clipped_text_run_is_scissor_bracketed() {
     ui.tick();
     let words = ui.draw().words.clone();
     validate_drawlist(&words);
-    let i = words.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
-    assert_eq!(words[i - 3], spec::draw_op::SCISSOR, "run bracketed by its own scissor");
+    let i = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEXT_RUN)
+        .unwrap();
+    assert_eq!(
+        words[i - 3],
+        spec::draw_op::SCISSOR,
+        "run bracketed by its own scissor"
+    );
     assert_eq!(decode_xy(words[i - 2]), (0, 0));
     assert_eq!(decode_wh(words[i - 1]), (20, 10), "scissor = current clip");
     let (_, end) = decode_text_run_text(&words, i);
@@ -3792,7 +4668,11 @@ fn provider_re_decides_within_the_same_draw_after_a_paint_only_transform() {
     ui.tick();
     let counts = validate_drawlist(&ui.draw().words.clone());
     assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 1);
-    assert_eq!(ui.layout_of(t).unwrap().3, 12.0, "native line height sized the box");
+    assert_eq!(
+        ui.layout_of(t).unwrap().3,
+        12.0,
+        "native line height sized the box"
+    );
 
     // Into the transform: the VERY NEXT draw is already the baked pair.
     ui.set_prop(t, spec::prop::ROTATE, 30.0);
@@ -3800,7 +4680,11 @@ fn provider_re_decides_within_the_same_draw_after_a_paint_only_transform() {
     let counts = validate_drawlist(&ui.draw().words.clone());
     assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 0);
     assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 1);
-    assert_eq!(ui.layout_of(t).unwrap().3, 10.0, "box re-measured with the atlas");
+    assert_eq!(
+        ui.layout_of(t).unwrap().3,
+        10.0,
+        "box re-measured with the atlas"
+    );
 
     // Out of the transform: same, back to the native pair immediately.
     ui.set_prop(t, spec::prop::ROTATE, 0.0);
@@ -3839,9 +4723,17 @@ fn canceling_transforms_do_not_oscillate_the_provider() {
     ui.insert_before(spec::ROOT_ID, wrap, 0);
     ui.tick();
     let counts = validate_drawlist(&ui.draw().words.clone());
-    assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 0, "declared path wins");
+    assert_eq!(
+        counts[spec::draw_op::TEXT_RUN as usize],
+        0,
+        "declared path wins"
+    );
     assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 1);
-    assert_eq!(ui.layout_of(t).unwrap().3, 10.0, "baked metrics sized the box");
+    assert_eq!(
+        ui.layout_of(t).unwrap().3,
+        10.0,
+        "baked metrics sized the box"
+    );
     // The killer assertion: a second and third draw must not have been
     // dirtied by a provider oscillation.
     let _ = ui.draw();
@@ -3859,7 +4751,10 @@ fn text_run_words_are_the_complete_pixel_truth() {
     ui.insert_before(spec::ROOT_ID, t, 0);
     ui.tick();
     let words_ab = ui.draw().words.clone();
-    let i = words_ab.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
+    let i = words_ab
+        .iter()
+        .position(|&w| w == spec::draw_op::TEXT_RUN)
+        .unwrap();
     // Same length, same geometry, different content: the word stream MUST
     // differ — the run bytes ride in the words, so a demand-render hash or
     // a damage word-diff can never miss a text change (no hash collisions
@@ -3867,7 +4762,10 @@ fn text_run_words_are_the_complete_pixel_truth() {
     ui.set_text(t, "BA");
     ui.tick();
     let words_ba = ui.draw().words.clone();
-    let j = words_ba.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
+    let j = words_ba
+        .iter()
+        .position(|&w| w == spec::draw_op::TEXT_RUN)
+        .unwrap();
     assert_eq!(i, j);
     assert_eq!(words_ab[i + 4], words_ba[j + 4], "geometry unchanged");
     assert_ne!(words_ab, words_ba, "the payload words track the run string");
@@ -3877,7 +4775,10 @@ fn text_run_words_are_the_complete_pixel_truth() {
     ui.set_text(t, "hello 中文");
     ui.tick();
     let words = ui.draw().words.clone();
-    let k = words.iter().position(|&w| w == spec::draw_op::TEXT_RUN).unwrap();
+    let k = words
+        .iter()
+        .position(|&w| w == spec::draw_op::TEXT_RUN)
+        .unwrap();
     assert_eq!(decode_text_run_text(&words, k).0, "hello 中文");
     validate_drawlist(&words);
 }
@@ -3905,4 +4806,108 @@ fn clearing_native_measure_restores_baked_goldens_path() {
     let counts = validate_drawlist(&ui.draw().words.clone());
     assert_eq!(counts[spec::draw_op::TEXT_RUN as usize], 0);
     assert_eq!(counts[spec::draw_op::GLYPH_RUN as usize], 1);
+}
+
+#[test]
+fn filled_round_border_keeps_its_shape_during_fractional_scroll() {
+    for density in [1usize, 2] {
+        for axis in [spec::prop::TRANSLATE_X, spec::prop::TRANSLATE_Y] {
+            let mut ui = Ui::new_with_raster_density(density as u32);
+            let n = ui.create_node(0);
+            for (prop, value) in [
+                (spec::prop::WIDTH, 44.0),
+                (spec::prop::HEIGHT, 44.0),
+                (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+                (spec::prop::INSET_L, 30.0),
+                (spec::prop::INSET_T, 30.0),
+                (spec::prop::RADIUS, 22.0),
+                (spec::prop::BORDER_WIDTH, 0.7),
+                (spec::prop::BG_COLOR, abgr(28, 31, 33, 255) as f64),
+                (spec::prop::BORDER_COLOR, abgr(255, 96, 38, 255) as f64),
+            ] {
+                ui.set_prop(n, prop, value);
+            }
+            ui.insert_before(spec::ROOT_ID, n, 0);
+            let mut reference = Vec::new();
+            for step in 0..129 {
+                let offset = if step == 0 {
+                    0.0
+                } else {
+                    (step as f64 - 65.0) / 16.0
+                };
+                ui.set_prop(n, axis, offset);
+                ui.tick();
+                let words = ui.draw().words.clone();
+                let width = spec::SCREEN_W as usize * density;
+                let mut pixels = alloc::vec![0; width * spec::SCREEN_H as usize * density * 4];
+                crate::raster::render_scaled(&ui, &words, &mut pixels, density as u32);
+                let moved = crate::layout::roundf(30.0 + offset as f32) as usize * density;
+                let left = if axis == spec::prop::TRANSLATE_X {
+                    moved
+                } else {
+                    30 * density
+                };
+                let top = if axis == spec::prop::TRANSLATE_Y {
+                    moved
+                } else {
+                    30 * density
+                };
+                let mut circle = Vec::new();
+                for y in top..top + 44 * density {
+                    circle.extend_from_slice(
+                        &pixels[(y * width + left) * 4..(y * width + left + 44 * density) * 4],
+                    );
+                }
+                if step == 0 {
+                    reference = circle;
+                } else {
+                    assert!(
+                        circle == reference,
+                        "border changed: density={density}, axis={axis}, offset={offset}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn rounded_overflow_emits_original_offscreen_geometry_and_shared_pop() {
+    let mut ui = Ui::new();
+    ui.set_viewport(8.0, 8.0);
+    let page = ui.create_node(0);
+    for (prop, value) in [
+        (spec::prop::WIDTH, 8.0),
+        (spec::prop::HEIGHT, 8.0),
+        (spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64),
+        (spec::prop::TRANSLATE_X, -4.0),
+        (spec::prop::RADIUS, 9999.0),
+        (spec::prop::OVERFLOW, spec::Overflow::Hidden as u32 as f64),
+    ] {
+        ui.set_prop(page, prop, value);
+    }
+    ui.insert_before(spec::ROOT_ID, page, 0);
+    let child = ui.create_node(0);
+    ui.set_prop(child, spec::prop::WIDTH, 8.0);
+    ui.set_prop(child, spec::prop::HEIGHT, 8.0);
+    ui.set_prop(child, spec::prop::BG_COLOR, abgr(255, 0, 0, 255) as f64);
+    ui.insert_before(page, child, 0);
+    ui.tick();
+    let legacy = validate_drawlist(&ui.draw().words.clone());
+    assert_eq!(legacy[spec::draw_op::ROUNDED_CLIP as usize], 0);
+    assert_eq!(legacy[spec::draw_op::SCISSOR as usize], 1);
+
+    ui.set_rounded_clip_supported(true);
+    let words = ui.draw().words.clone();
+    let counts = validate_drawlist(&words);
+    assert_eq!(counts[spec::draw_op::ROUNDED_CLIP as usize], 1);
+    assert_eq!(counts[spec::draw_op::SCISSOR_POP as usize], 1);
+    let i = words
+        .iter()
+        .position(|&word| word == spec::draw_op::ROUNDED_CLIP)
+        .unwrap();
+    assert_eq!(decode_xy(words[i + 1]), (-4, 0));
+    assert_eq!(decode_wh(words[i + 2]), (8, 8));
+    assert_eq!(f32::from_bits(words[i + 3]), 4.0);
+    assert_eq!(f32::from_bits(words[i + 4]), 4.0);
 }

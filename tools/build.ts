@@ -25,7 +25,8 @@
 //                                (external repos build their apps against a
 //                                vendored PocketJS and keep outputs local)
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, renameSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve as resolvePath, join, dirname } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { IMG_FLAG_LINEAR, PSM } from "../contracts/spec/spec.ts";
@@ -42,7 +43,7 @@ import type { PocketConfig } from "../framework/src/config.ts";
 import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { registerAnimationTheme, setAnimationTickRate } from "../framework/compiler/animation.ts";
 import { compileClasses, generateStylesModule } from "../framework/compiler/tailwind.ts";
-import { bakeAtlases } from "../framework/compiler/bake-font.ts";
+import { bakeAtlases, DEFAULT_REGULAR, DEFAULT_BOLD, DEFAULT_MONO, type BakedAtlas } from "../framework/compiler/bake-font.ts";
 import { bakeSvg } from "../framework/compiler/bake-svg.ts";
 import {
   assertDensityVariantDimensions,
@@ -308,14 +309,49 @@ console.log(
     `${Object.keys(styles.ids).length} literal(s) -> framework/src/styles.generated.ts`,
 );
 
-const atlases = await bakeAtlases({
-  codepoints,
-  slots: styles.usedFontSlots,
-  extraChars,
-  rasterDensity,
-  regularTtf: regularFontPath,
-  boldTtf: boldFontPath,
-});
+const fontCacheDir = join(ROOT, ".cache/font-atlas");
+const fontCacheKey = createHash("sha256")
+  .update("podjs-font-atlas-v3\0")
+  .update(readFileSync(join(ROOT, "framework/compiler/bake-font.ts")))
+  .update(readFileSync(join(ROOT, "framework/compiler/tailwind.ts")))
+  .update(readFileSync(join(ROOT, "contracts/spec/spec.ts")))
+  .update(readFileSync(join(ROOT, "bun.lock")))
+  .update(readFileSync(DEFAULT_MONO))
+  .update(JSON.stringify({ codepoints: [...codepoints].sort((a, b) => a - b), slots: [...styles.usedFontSlots].sort((a, b) => a - b), extraChars, rasterDensity, regular: regularFontPath ?? DEFAULT_REGULAR, bold: boldFontPath ?? DEFAULT_BOLD, mono: DEFAULT_MONO }))
+  .update(readFileSync(regularFontPath ?? DEFAULT_REGULAR))
+  .update(readFileSync(boldFontPath ?? DEFAULT_BOLD))
+  .digest("hex");
+const fontCachePath = join(fontCacheDir, `${fontCacheKey}.json`);
+let atlases: BakedAtlas[] | undefined;
+if (existsSync(fontCachePath)) {
+  try {
+    const cached = JSON.parse(readFileSync(fontCachePath, "utf8")) as { version?: number; slots?: number[]; atlases?: Array<Omit<BakedAtlas, "bytes"> & { bytes: string; digest: string }> };
+    const expectedSlots = [...styles.usedFontSlots].sort((a, b) => a - b);
+    const records = cached?.atlases;
+    const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+    const valid = cached?.version === 1 && Array.isArray(cached.slots) && JSON.stringify(cached.slots) === JSON.stringify(expectedSlots)
+      && Array.isArray(records) && records.length === expectedSlots.length
+      && records.every((a, i) => a && a.slot === expectedSlots[i] && typeof a.bytes === "string" && /^[A-Za-z0-9+/]*={0,2}$/.test(a.bytes)
+        && typeof a.digest === "string" && /^[a-f0-9]{64}$/.test(a.digest));
+    if (valid) {
+      const decoded = records.map(a => ({ ...a, bytes: Uint8Array.from(Buffer.from(a.bytes, "base64")) }));
+      if (decoded.every((a, i) => digest(a.bytes) === records[i].digest)) {
+        atlases = decoded;
+      }
+      if (atlases) {
+        console.log(`  font: cache hit (${fontCacheKey.slice(0, 12)})`);
+      }
+    }
+  } catch { /* a truncated cache entry is simply rebuilt */ }
+}
+if (!atlases) {
+  atlases = await bakeAtlases({ codepoints, slots: styles.usedFontSlots, extraChars, rasterDensity, regularTtf: regularFontPath, boldTtf: boldFontPath });
+  mkdirSync(fontCacheDir, { recursive: true });
+  const temp = `${fontCachePath}.tmp-${process.pid}-${Date.now()}`;
+  const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  await Bun.write(temp, JSON.stringify({ version: 1, slots: [...styles.usedFontSlots].sort((a, b) => a - b), atlases: atlases.map(a => ({ ...a, bytes: Buffer.from(a.bytes).toString("base64"), digest: digest(a.bytes) })) }));
+  try { renameSync(temp, fontCachePath); } catch { try { await Bun.file(temp).delete(); } catch {} }
+}
 for (const a of atlases) {
   console.log(
     `  font: slot ${a.slot} (${a.px}px${a.bold ? " bold" : ""}) ${a.glyphCount} glyphs, ` +

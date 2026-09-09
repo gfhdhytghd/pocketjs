@@ -51,6 +51,7 @@ export {
   type TileLevel,
 } from "./deepzoom.ts";
 export type { NodeMirror } from "./renderer.ts";
+export type { AccessibilityProps, AccessibilityRole, AccessibilityState, AccessibilityAction } from "./accessibility.ts";
 
 type RefProp = ViewProps["ref"];
 

@@ -5,6 +5,7 @@ export { auxiliaryTouches, touches, type TouchContact } from "./touch.ts";
 export {
   cursorX,
   cursorY,
+  dispatchAccessibilityAction,
   enableCursor,
   focusNode,
   getFocused,

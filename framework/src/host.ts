@@ -60,6 +60,10 @@ export interface HostOps {
   setText(id: number, str: string): void;
   /** Solid universal calls this on reactive text updates. */
   replaceText(id: number, str: string): void;
+  /** Optional retained semantics extension. Roles -1 (default), 0..9 match
+   * accessibility.ts; state/action masks match core accessibility.rs;
+   * flags additionally carries bit 512 when an onPress handler is bound. */
+  setAccessibility?(id: number, label: string | null, role: number, value: string | null, hint: string | null, flags: number, actions: number): boolean | void;
   /** pow2 dims ≤ 512; psm: spec PSM. Returns a texture handle. */
   uploadTexture(buf: Uint8Array, w: number, h: number, psm: number): number;
   /** texHandle < 0 clears the image (handles are 0-based: 0 is a real one). */

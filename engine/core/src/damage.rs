@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{spec, Ui};
+use crate::{Ui, spec};
 
 const CLIP_DEPTH: usize = 32;
 
@@ -419,6 +419,12 @@ impl<'a> DamageDecoder<'a> {
                     .checked_add(count.checked_mul(2).ok_or(())?)
                     .ok_or(())?
             }
+            spec::draw_op::GLYPH_RUN_XFORM => {
+                let count = (self.words.get(start + 1).copied().ok_or(())? >> 16) as usize;
+                5usize
+                    .checked_add(count.checked_mul(2).ok_or(())?)
+                    .ok_or(())?
+            }
             spec::draw_op::TEX_QUAD => 9,
             spec::draw_op::SCISSOR => 3,
             spec::draw_op::SCISSOR_POP => 1,
@@ -430,6 +436,7 @@ impl<'a> DamageDecoder<'a> {
                 8usize.checked_add(bytes.div_ceil(4)).ok_or(())?
             }
             spec::draw_op::SURFACE_QUAD => 9,
+            spec::draw_op::ROUNDED_CLIP => 5,
             _ => return Err(()),
         };
         let end = start.checked_add(len).ok_or(())?;
@@ -441,8 +448,9 @@ impl<'a> DamageDecoder<'a> {
                 logical_rect(words[1], words[2]).intersect(self.clip)
             }
             spec::draw_op::GLYPH_RUN => glyph_run_bounds(ui, words, self.clip),
+            spec::draw_op::GLYPH_RUN_XFORM => glyph_run_xform_bounds(ui, words, self.clip),
             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(self.clip),
-            spec::draw_op::SCISSOR => {
+            spec::draw_op::SCISSOR | spec::draw_op::ROUNDED_CLIP => {
                 if self.depth >= self.stack.len() {
                     return Err(());
                 }
@@ -548,6 +556,38 @@ fn glyph_run_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect {
             x + atlas.cell_w as i32,
             y + atlas.cell_h as i32,
         ));
+    }
+    bounds.intersect(clip)
+}
+
+fn glyph_run_xform_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect {
+    if words.len() < 5 || words[2] >> 24 == 0 {
+        return DamageRect::empty();
+    }
+    let slot = (words[1] & 0xff) as u8;
+    let Some(atlas) = ui.font_atlas(slot) else {
+        return DamageRect::empty();
+    };
+    let (ux, uy) = xy(words[3]);
+    let (vx, vy) = xy(words[4]);
+    let mut bounds = DamageRect::empty();
+    for glyph in words[5..].chunks_exact(2) {
+        let gid = (glyph[1] & 0xffff) as u16;
+        if gid >= atlas.glyph_count {
+            continue;
+        }
+        let (x, y) = xy(glyph[0]);
+        let corners = [
+            (x, y),
+            (x + ux, y + uy),
+            (x + vx, y + vy),
+            (x + ux + vx, y + uy + vy),
+        ];
+        let min_x = corners.iter().map(|p| p.0).min().unwrap();
+        let max_x = corners.iter().map(|p| p.0).max().unwrap();
+        let min_y = corners.iter().map(|p| p.1).min().unwrap();
+        let max_y = corners.iter().map(|p| p.1).max().unwrap();
+        bounds = bounds.union(DamageRect::new(min_x, min_y, max_x, max_y));
     }
     bounds.intersect(clip)
 }
@@ -658,22 +698,28 @@ mod tests {
 
         tracker.commit(&ui, &current, target(16, 8, 1));
         tracker.invalidate();
-        assert!(tracker
-            .prepare(&ui, &current, target(16, 8, 1))
-            .unwrap()
-            .is_full_redraw());
+        assert!(
+            tracker
+                .prepare(&ui, &current, target(16, 8, 1))
+                .unwrap()
+                .is_full_redraw()
+        );
 
         tracker.commit(&ui, &current, target(16, 8, 1));
-        assert!(tracker
-            .prepare(&ui, &current, target(32, 16, 2))
-            .unwrap()
-            .is_full_redraw());
+        assert!(
+            tracker
+                .prepare(&ui, &current, target(32, 16, 2))
+                .unwrap()
+                .is_full_redraw()
+        );
 
         tracker.commit(&ui, &current, target(32, 16, 2));
-        assert!(tracker
-            .prepare(&ui, &current, DamageTarget::new(32, 16, 2, 2),)
-            .unwrap()
-            .is_full_redraw());
+        assert!(
+            tracker
+                .prepare(&ui, &current, DamageTarget::new(32, 16, 2, 2),)
+                .unwrap()
+                .is_full_redraw()
+        );
     }
 
     #[test]
@@ -818,15 +864,19 @@ mod tests {
         ui.set_viewport(4.0, 2.0);
         let mut tracker = DamageTracker::<DEFAULT_DAMAGE_REGIONS>::new();
         tracker.commit(&ui, &[], target(4, 2, 1));
-        assert!(tracker
-            .prepare(&ui, &[], target(4, 2, 1))
-            .unwrap()
-            .is_empty());
+        assert!(
+            tracker
+                .prepare(&ui, &[], target(4, 2, 1))
+                .unwrap()
+                .is_empty()
+        );
 
         assert!(ui.upload_texture(&[0xff, 0xff, 0xff, 0xff], 1, 1, spec::psm::PSM_8888,) >= 0);
-        assert!(tracker
-            .prepare(&ui, &[], target(4, 2, 1))
-            .unwrap()
-            .is_full_redraw());
+        assert!(
+            tracker
+                .prepare(&ui, &[], target(4, 2, 1))
+                .unwrap()
+                .is_full_redraw()
+        );
     }
 }

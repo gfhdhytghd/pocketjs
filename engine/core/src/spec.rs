@@ -35,7 +35,7 @@ pub const TEX_MAX_DIM: u32 = 512;
 pub const TEX_SLOT_BITS: u32 = 20;
 pub const TEX_SLOT_MASK: u32 = 0xfffff;
 /// Max baked font-atlas slots.
-pub const MAX_FONT_SLOTS: usize = 24;
+pub const MAX_FONT_SLOTS: usize = 29;
 /// Transition mask value meaning "every animatable prop".
 pub const TRANSITION_MASK_ALL: u32 = 0xffffffff;
 /// Core tick timestep: exactly 1/60 s (fixed — enables byte-exact goldens).
@@ -428,7 +428,8 @@ pub mod font_atlas {
 /// DrawList op codes (core -> backend Vec<u32> words; layout in spec.ts).
 /// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,
 /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
-/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9.
+/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9, ROUNDED_CLIP 5,
+/// GLYPH_RUN_XFORM 5+2n.
 pub mod draw_op {
     pub const RECT: u32 = 1;
     pub const GRAD_RECT: u32 = 2;
@@ -440,6 +441,8 @@ pub mod draw_op {
     pub const TEX_TRI: u32 = 8;
     pub const TEXT_RUN: u32 = 9;
     pub const SURFACE_QUAD: u32 = 10;
+    pub const ROUNDED_CLIP: u32 = 11;
+    pub const GLYPH_RUN_XFORM: u32 = 12;
 }
 
 /// .pak container constants (byte-compatible with dreamcart's format;

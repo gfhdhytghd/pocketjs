@@ -33,6 +33,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 pub mod anim;
+pub mod accessibility;
 pub mod codec;
 pub mod damage;
 pub mod draw;
@@ -239,6 +240,9 @@ struct AuxiliarySurface {
 /// The retained UI core. One per AppInstance, with an optional independent
 /// auxiliary output root sharing the same resources and frame clock.
 pub struct Ui {
+    accessibility_enabled: bool,
+    semantic_geometry: Vec<Option<accessibility::Bounds>>,
+    semantic_snapshot: accessibility::Snapshot,
     tree: tree::Tree,
     styles: style::StyleTable,
     fonts: text::Fonts,
@@ -256,6 +260,10 @@ pub struct Ui {
     /// coordinates always remain logical; only core-owned bitmap resources
     /// (currently rounded-corner masks) use this density.
     raster_density: u32,
+    /// Whether the selected DrawList backend implements additive geometry
+    /// commands ROUNDED_CLIP (op 11) and GLYPH_RUN_XFORM (op 12). Default-off
+    /// keeps legacy fixed-function consumers on their original command set.
+    rounded_clip_supported: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
     focused: i32,
@@ -328,6 +336,9 @@ impl Ui {
             "raster density must be an integer from 1 through 255"
         );
         Ui {
+            accessibility_enabled: false,
+            semantic_geometry: Vec::new(),
+            semantic_snapshot: accessibility::Snapshot::default(),
             tree: tree::Tree::new(),
             styles: style::StyleTable::new(),
             fonts: text::Fonts::new(),
@@ -339,6 +350,7 @@ impl Ui {
             tex_free: Vec::new(),
             discs: draw::DiscCache::new(),
             raster_density,
+            rounded_clip_supported: false,
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
@@ -362,6 +374,13 @@ impl Ui {
     /// Raster pixels per logical UI pixel for core-owned bitmap resources.
     pub fn raster_density(&self) -> u32 {
         self.raster_density
+    }
+
+    /// Opt into additive DrawList geometry. Hosts must enable this only after
+    /// their decoder implements ops 11 and 12; disabled cores retain legacy
+    /// rectangular overflow scissors and upright transformed glyph cells.
+    pub fn set_rounded_clip_supported(&mut self, supported: bool) {
+        self.rounded_clip_supported = supported;
     }
 
     /// Declare how many `tick()` calls make one second of virtual time
@@ -831,6 +850,10 @@ impl Ui {
                     let Some(meta) = words.get(i + 1) else { break };
                     3 + 2 * ((*meta >> 16) as usize)
                 }
+                x if x == spec::draw_op::GLYPH_RUN_XFORM => {
+                    let Some(meta) = words.get(i + 1) else { break };
+                    5 + 2 * ((*meta >> 16) as usize)
+                }
                 x if x == spec::draw_op::TEX_QUAD => 9,
                 x if x == spec::draw_op::SCISSOR => 3,
                 x if x == spec::draw_op::SCISSOR_POP => 1,
@@ -841,6 +864,7 @@ impl Ui {
                     8 + (*bytes as usize).div_ceil(4)
                 }
                 x if x == spec::draw_op::SURFACE_QUAD => 9,
+                x if x == spec::draw_op::ROUNDED_CLIP => 5,
                 _ => break,
             };
             let Some(end) = i.checked_add(len) else { break };
@@ -1402,10 +1426,12 @@ impl Ui {
             &mut self.tex_free,
             &mut self.discs,
             self.raster_density,
+            self.rounded_clip_supported,
             &mut self.draw_list,
             self.inspect_id,
             self.inspect_drawn,
             cursor,
+            self.accessibility_enabled.then_some(&mut self.semantic_geometry),
         );
         let (mut target, mut drawn) = (target, drawn);
         if provider_stale {
@@ -1428,16 +1454,22 @@ impl Ui {
                 &mut self.tex_free,
                 &mut self.discs,
                 self.raster_density,
+                self.rounded_clip_supported,
                 &mut self.draw_list,
                 self.inspect_id,
                 self.inspect_drawn,
                 cursor,
+                self.accessibility_enabled.then_some(&mut self.semantic_geometry),
             );
             target = retry.0;
             drawn = retry.1;
             debug_assert!(!retry.2, "provider gate must be stable after re-decision");
         }
         self.inspect_drawn = drawn;
+        if self.accessibility_enabled {
+            self.semantic_snapshot=accessibility::snapshot(&self.tree,&self.semantic_geometry,spec::ROOT_ID);
+            self.semantic_snapshot.frame_number=self.frame;
+        }
         if self.inspect_id != 0 {
             self.inspect_rect = target;
         }
@@ -1475,9 +1507,11 @@ impl Ui {
             &mut self.tex_free,
             &mut self.discs,
             self.raster_density,
+            self.rounded_clip_supported,
             &mut auxiliary.draw_list,
             self.inspect_id,
             auxiliary.inspect_drawn,
+            None,
             None,
         );
         let (mut target, mut drawn) = (target, drawn);
@@ -1501,9 +1535,11 @@ impl Ui {
                 &mut self.tex_free,
                 &mut self.discs,
                 self.raster_density,
+                self.rounded_clip_supported,
                 &mut auxiliary.draw_list,
                 self.inspect_id,
                 auxiliary.inspect_drawn,
+                None,
                 None,
             );
             target = retry.0;
@@ -1628,6 +1664,27 @@ impl Ui {
         let n = self.tree.get(id)?;
         Some((n.layout.x, n.layout.y, n.layout.w, n.layout.h))
     }
+
+    /// Atomically replace semantic metadata; stale ids and invalid values do not mutate.
+    pub fn set_accessibility(&mut self, id: i32, value: accessibility::Properties) -> bool {
+        if !value.valid() { return false; }
+        let Some(slot)=self.tree.resolve(id) else {return false;};
+        self.tree.slots[slot as usize].accessibility=value;
+        true
+    }
+
+    pub fn accessibility_of(&self, id: i32) -> Option<&accessibility::Properties> {
+        Some(&self.tree.get(id)?.accessibility)
+    }
+
+    /// Opt in to committed primary-output semantics; disabled hosts pay no walk cost.
+    pub fn set_accessibility_enabled(&mut self, enabled: bool) {
+        self.accessibility_enabled=enabled;
+        if !enabled {self.semantic_snapshot=accessibility::Snapshot::default();self.semantic_geometry.clear();}
+    }
+
+    /// Snapshot from the most recent draw, unaffected by uncommitted guest mutations.
+    pub fn current_accessibility(&self) -> &accessibility::Snapshot {&self.semantic_snapshot}
 
     /// The fully-resolved style of a node (variants + overrides + anims).
     pub fn resolved_style(&self, id: i32) -> Option<style::Resolved> {

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   attachGesture,
   pushTouchBlock,
+  cancelActiveTouches,
   resetGestures,
   __runGestures,
   type GestureContact,
@@ -462,4 +463,16 @@ describe("pinch", () => {
     pump([[1, 91, 88], [2, 103, 104]]); // span 20, dspan 15, centroid moved 7.5
     expect(log).toEqual(["start 20 c=97,96"]);
   });
+});
+
+
+test("native cancellation cannot activate a tap or complete a pan", () => {
+  const events: string[] = [];
+  attachGesture({ axis: "x", onTap: () => events.push("tap"), onPanStart: () => events.push("pan"), onPanEnd: () => events.push("end"), onCancel: () => events.push("cancel") });
+  pump([[1, 20, 20]]); cancelActiveTouches(); pump([]);
+  expect(events).toEqual(["cancel"]);
+  pump([[1, 20, 20]]); pump([[1, 90, 20]]); cancelActiveTouches(); pump([]);
+  expect(events).toEqual(["cancel", "pan", "cancel"]);
+  pump([[1, 20, 20]]); pump([]);
+  expect(events.at(-1)).toBe("tap");
 });

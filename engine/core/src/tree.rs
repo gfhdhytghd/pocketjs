@@ -41,6 +41,7 @@ pub struct LayoutRect {
 
 /// One retained UI node.
 pub struct Node {
+    pub accessibility: crate::accessibility::Properties,
     /// spec::NodeType value (0 view, 1 text, 2 image, 3 compositor surface).
     pub node_type: u8,
     /// Current generation of this slot (already masked to GEN_MASK).
@@ -98,6 +99,7 @@ pub struct Node {
 impl Node {
     fn empty(generation: u32) -> Node {
         Node {
+            accessibility: crate::accessibility::Properties::default(),
             node_type: 0,
             generation,
             alive: false,

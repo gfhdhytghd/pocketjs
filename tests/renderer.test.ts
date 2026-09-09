@@ -57,6 +57,7 @@ import {
 } from "../framework/src/styles.ts";
 import {
   getFocused,
+  dispatchAccessibilityAction,
   focusNode,
   handleFrame,
   pushFocusGrid,
@@ -193,6 +194,23 @@ function childIds(node: NodeMirror): number[] {
 
 let host: MockHost;
 let root: NodeMirror;
+
+test("public semantic props reach native metadata with atomic validation and removal", () => {
+  host.ops.setAccessibility=(...args)=>{host.calls.push(["setAccessibility",...args]);return true;};
+  const node=createElement("view");
+  setProp(node,"accessibilityLabel","批准😀");
+  setProp(node,"accessibilityRole","button");
+  setProp(node,"onPress",()=>{});
+  expect(host.of("setAccessibility").at(-1)).toEqual(["setAccessibility",node.id,"批准😀",1,null,null,512,0]);
+  const count=host.of("setAccessibility").length;
+  expect(()=>setProp(node,"accessibilityRole","bad")).toThrow();
+  expect(host.of("setAccessibility").length).toBe(count);
+  expect(node.domAttrs?.accessibilityRole).toBe("button");
+  setProp(node,"accessibilityLabel",undefined,"批准😀");
+  expect(host.of("setAccessibility").at(-1)?.[2]).toBeNull();
+  setProp(node,"onPress",undefined,node.onPress);
+  expect(host.of("setAccessibility").at(-1)?.[6]).toBe(0);
+});
 
 beforeEach(() => {
   host = makeMockHost();
@@ -644,6 +662,42 @@ describe("setProperty dispatch table [R]", () => {
 });
 
 describe("focus + onPress (input.ts)", () => {
+  test("semantic actions target exact live controls and respect revocation and modal scope", () => {
+    setInputRoot(root);
+    const parent = createElement("view");
+    const node = createElement("view");
+    insertNode(root, parent);
+    insertNode(parent, node);
+    let presses = 0;
+    const actions: string[] = [];
+    setProp(parent, "onPress", () => presses++);
+    expect(dispatchAccessibilityAction(node.id, "activate")).toBe(false);
+    setProp(node, "onPress", () => presses++);
+    expect(dispatchAccessibilityAction(node.id, "activate")).toBe(true);
+    expect(presses).toBe(1);
+    setProp(node, "accessibilityActions", ["increment"]);
+    setProp(node, "onAccessibilityAction", (e: { actionName: string }) => actions.push(e.actionName));
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(true);
+    expect(dispatchAccessibilityAction(node.id, "decrement")).toBe(false);
+    expect(actions).toEqual(["increment"]);
+    setProp(parent, "accessibilityState", { disabled: true });
+    expect(dispatchAccessibilityAction(node.id, "activate")).toBe(false);
+    setProp(parent, "accessibilityState", undefined, parent.domAttrs?.accessibilityState);
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(true);
+    setProp(parent, "accessibilityHidden", true);
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(false);
+    setProp(parent, "accessibilityHidden", false);
+    const modal = createElement("view");
+    insertNode(root, modal);
+    const pop = pushFocusScope(modal);
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(false);
+    pop();
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(true);
+    setProp(node, "accessibilityActions", []);
+    expect(dispatchAccessibilityAction(node.id, "increment")).toBe(false);
+    expect(dispatchAccessibilityAction(-1, "activate")).toBe(false);
+  });
+
   test("d-pad traversal in document order, CIRCLE fires focused handler", () => {
     setInputRoot(root);
     let pressedA = 0;
