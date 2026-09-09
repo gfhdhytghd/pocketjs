@@ -30,7 +30,7 @@ import { setOverlayRoot } from "./overlay.ts";
 import { mountAuxiliarySurface, unmountAuxiliarySurface } from "./display.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setAuxiliaryHitRoot, setHitRoot, setInputRoot } from "./input.ts";
-import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame-octane.tsx";
+import { __setAnalog, __setWheelDelta, resetFrameHooks, runFrameHooks } from "./frame-octane.tsx";
 import { __resetTouches, __setTouches } from "./touch.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
 import { __drainEffects, resetEffects } from "./effects.ts";
@@ -215,6 +215,7 @@ export function render(code: OctaneRenderRoot, opts: RenderOptions = {}): () => 
       touchSurfaces?: readonly number[],
     ) => {
       __advanceClock();
+      __setWheelDelta(analog);
       __setAnalog(analog);
       __setTouches(touches, hits, touchSurfaces);
       runServicePumps();

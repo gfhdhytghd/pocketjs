@@ -2,8 +2,10 @@
 
 import { computed, onScopeDispose, shallowRef, type ComputedRef } from "vue";
 import { __resetAnalog } from "./analog.ts";
+import { __resetWheelDelta } from "./wheel.ts";
 
 export { __setAnalog, analogRaw, analogX, analogY } from "./analog.ts";
+export { __setWheelDelta, wheelDelta } from "./wheel.ts";
 
 type FrameCallback = (buttons: number) => void;
 
@@ -14,6 +16,7 @@ export function resetFrameHooks(): void {
   callbacks.clear();
   buttonHandlerBlockDepth = 0;
   __resetAnalog();
+  __resetWheelDelta();
 }
 
 export function runFrameHooks(buttons: number): void {

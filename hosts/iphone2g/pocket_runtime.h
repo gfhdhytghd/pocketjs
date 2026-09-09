@@ -127,6 +127,18 @@ uint32_t pocket_runtime_height(void);
 uint32_t pocket_runtime_stride(void);
 size_t pocket_runtime_length(void);
 const char *pocket_runtime_error(void);
+
+/* Low-overhead, caller-triggered diagnostics. No allocation or disk IO. */
+typedef struct {
+  size_t qjs_malloc_bytes;
+  size_t qjs_memory_bytes;
+  size_t qjs_object_count;
+  size_t qjs_string_count;
+  size_t native_nodes;
+  size_t native_nodes_peak;
+} PocketRuntimeMemory;
+int pocket_runtime_memory_snapshot(PocketRuntimeMemory *snapshot, int run_gc);
+size_t pocket_runtime_native_node_count(void);
 void pocket_runtime_shutdown(void);
 
 #endif

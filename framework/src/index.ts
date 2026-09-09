@@ -44,7 +44,7 @@ import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setAuxiliaryHitRoot, setHitRoot, setInputRoot } from "./input.ts";
 import { __runGestures, resetGestures } from "./gesture.ts";
 import { installTouchActivation } from "./touch-activation.ts";
-import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame.ts";
+import { __setAnalog, __setWheelDelta, resetFrameHooks, runFrameHooks } from "./frame.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
 import { __drainEffects, resetEffects } from "./effects.ts";
@@ -278,6 +278,7 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
       touchSurfaces?: readonly number[],
     ) => {
       __advanceClock(); // virtual frame++, fire due after() timers
+      __setWheelDelta(analog); // PocketRock frame-local click-wheel pulse count
       __setAnalog(analog); // latch the nub before any app code reads it
       __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
       runServicePumps(); // only modules with pending async work register here

@@ -195,20 +195,32 @@ describe("Rockbox iPod classic development profile", () => {
     );
     const separators = shellList.indexOf('bg-[#d7dde4]');
     const selection = shellList.indexOf('bg-[#176fce]');
-    const text = shellList.indexOf("{row.title}");
+    const text = shellList.indexOf("{visibleRow().title}");
     expect(separators).toBeGreaterThan(-1);
     expect(separators).toBeLessThan(selection);
     expect(selection).toBeLessThan(text);
     expect(pocketRockShell).toContain("<ShellListScreen");
     expect(pocketRockShell).toContain("<NowPlayingScreen");
     expect(pocketRockShell).toContain("<UsbScreen");
-    expect(pocketRockShell).toContain("servicePollFrames >= 10");
+    expect(pocketRockShellView).toContain('src="assets/icons/usb-64.png"');
+    expect(pocketRockShellView).not.toContain('rotate-315');
+    expect(pocketRockShell).toContain('listScroller.state() !== "idle"');
+    expect(pocketRockShell).toContain("!transitionActive() && !interacting");
+    expect(pocketRockShell).toContain('page() === "Now Playing" ? 10');
+    expect(pocketRockShell).toContain("const pulses = wheelDelta()");
+    expect(pocketRockShell).toContain("pulse < Math.abs(pulses)");
+    expect(pocketRockShell).toContain("samePlayback(current, next) ? current : next");
+    expect(pocketRockShell).toContain("sameSystem(current, next) ? current : next");
+    expect(pocketRockShell).toContain("rows={props.rows}");
+    expect(pocketRockShell).not.toContain("props.rows.map((row)");
+    expect(shellList).toContain("<For each={SHELL_SLOTS}>");
+    expect(shellList).not.toContain("props.rows.slice(");
     expect(pocketRockShell).toContain('usb !== undefined && usb !== "disconnected"');
     expect(pocketRockShell).toContain("if (usbSurfaceVisible()) {");
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", -64');
     expect(pocketRockShell).toContain('animate(activePanel, "translateX", 0');
     expect(pocketRockShell).toContain('animate(transitionPanel, "translateX", 320');
-    expect(pocketRockShell).toContain("const TRANSITION_MS = 110");
+    expect(pocketRockShell).toContain("const TRANSITION_MS = POCKETROCK_TRANSITION_MS");
   });
 
   test("ships Hero and hardware tests as production Pocket apps", () => {

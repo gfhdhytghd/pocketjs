@@ -74,6 +74,8 @@ static char reported_action_name[POCKETJS_ACTION_NAME_CAPACITY];
 static int32_t reported_action_value;
 static unsigned long reported_action_sequence;
 static int runtime_failed;
+static size_t native_nodes;
+static size_t native_nodes_peak;
 
 static void clear_error(void) {
   last_error[0] = '\0';
@@ -279,10 +281,16 @@ static JSValue host_operation(
   switch ((HostOperation)magic) {
     case HostCreateNode:
       if (!uint_argument(ctx, argc, argv, 0, &ua)) return JS_EXCEPTION;
-      return JS_NewInt32(ctx, ui_create_node(ua));
+      a = ui_create_node(ua);
+      if (a >= 0) {
+        native_nodes++;
+        if (native_nodes > native_nodes_peak) native_nodes_peak = native_nodes;
+      }
+      return JS_NewInt32(ctx, a);
     case HostDestroyNode:
       if (!int_argument(ctx, argc, argv, 0, &a)) return JS_EXCEPTION;
       ui_destroy_node(a);
+      if (native_nodes > 0) native_nodes--;
       return JS_UNDEFINED;
     case HostInsertBefore:
       if (!int_argument(ctx, argc, argv, 0, &a) ||
@@ -566,7 +574,27 @@ void pocket_runtime_shutdown(void) {
   runtime_failed = 0;
   frame_function = JS_UNDEFINED;
   global = JS_UNDEFINED;
+  native_nodes = 0;
   ui_shutdown();
+}
+
+int pocket_runtime_memory_snapshot(PocketRuntimeMemory *snapshot, int run_gc) {
+  JSMemoryUsage usage;
+  if (snapshot == 0 || runtime == 0) return 0;
+  if (run_gc) JS_RunGC(runtime);
+  memset(&usage, 0, sizeof(usage));
+  JS_ComputeMemoryUsage(runtime, &usage);
+  snapshot->qjs_malloc_bytes = usage.malloc_size > 0 ? (size_t)usage.malloc_size : 0;
+  snapshot->qjs_memory_bytes = usage.memory_used_size > 0 ? (size_t)usage.memory_used_size : 0;
+  snapshot->qjs_object_count = usage.obj_count > 0 ? (size_t)usage.obj_count : 0;
+  snapshot->qjs_string_count = usage.str_count > 0 ? (size_t)usage.str_count : 0;
+  snapshot->native_nodes = native_nodes;
+  snapshot->native_nodes_peak = native_nodes_peak;
+  return 1;
+}
+
+size_t pocket_runtime_native_node_count(void) {
+  return native_nodes;
 }
 
 int pocket_runtime_boot(
@@ -583,6 +611,8 @@ int pocket_runtime_boot(
   reported_action_name[0] = '\0';
   reported_action_value = 0;
   reported_action_sequence = 0;
+  native_nodes = 0;
+  native_nodes_peak = 0;
   ui_init(POCKET_RASTER_DENSITY);
   REPORT_BOOT_STAGE(2);
   ui_set_viewport((float)width, (float)height);
@@ -677,6 +707,8 @@ int pocket_runtime_boot_bytecode(
   reported_action_name[0] = '\0';
   reported_action_value = 0;
   reported_action_sequence = 0;
+  native_nodes = 0;
+  native_nodes_peak = 0;
   ui_init(POCKET_RASTER_DENSITY);
   ui_set_viewport((float)width, (float)height);
   runtime = JS_NewRuntime();

@@ -7,7 +7,14 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { createScroller, bindDpadScroll, type Scroller } from "../framework/src/kinetics.ts";
 import { resetClock } from "../framework/src/clock.ts";
-import { resetFrameHooks, runFrameHooks, __setAnalog, analogY } from "../framework/src/frame.ts";
+import {
+  resetFrameHooks,
+  runFrameHooks,
+  __setAnalog,
+  __setWheelDelta,
+  analogY,
+  wheelDelta,
+} from "../framework/src/frame.ts";
 import { BTN } from "../contracts/spec/spec.ts";
 
 function withHz(hz: number): void {
@@ -34,6 +41,24 @@ beforeEach(() => {
   delete (globalThis as { __simHz?: number }).__simHz;
   resetClock();
   resetFrameHooks();
+});
+
+describe("PocketRock wheel frame input", () => {
+  test("decodes a signed pulse count without disturbing analog center", () => {
+    __setWheelDelta(0x00038080);
+    __setAnalog(0x00038080);
+    expect(wheelDelta()).toBe(3);
+    expect(analogY()).toBe(0);
+
+    __setWheelDelta(0xfffe8080);
+    expect(wheelDelta()).toBe(-2);
+  });
+
+  test("reset drops the frame-local count instead of leaving momentum", () => {
+    __setWheelDelta(0x00078080);
+    resetFrameHooks();
+    expect(wheelDelta()).toBe(0);
+  });
 });
 
 describe("fling", () => {

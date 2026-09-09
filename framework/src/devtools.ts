@@ -211,7 +211,11 @@ export function wrapFrameHandler(
       flushInspectReport();
     }
     let mask = buttons;
-    let analog = analogArg === undefined ? ANALOG_CENTER : analogArg & 0xffff;
+    // Keep the FULL analog word: the low 16 bits carry the portable nub
+    // sample while PocketRock packs a signed click-wheel delta in the high
+    // 16 bits (framework/src/wheel.ts). __setAnalog/__setWheelDelta each
+    // extract their half, and the tape's Uint16Array truncates on store.
+    let analog = analogArg === undefined ? ANALOG_CENTER : analogArg;
     let touch = touchArg;
     let hits = hitsArg;
     let touchSurfaces = touchSurfacesArg;

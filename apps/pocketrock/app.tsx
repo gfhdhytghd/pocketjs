@@ -5,7 +5,7 @@ import { getOps } from "@pocketjs/framework/host";
 import { BTN } from "@pocketjs/framework/input";
 import { createScroller } from "@pocketjs/framework/kinetics";
 import { appTable, launchNativePlugin, launchPackage } from "@pocketjs/framework/launcher";
-import { onButtonPress, onFrame } from "@pocketjs/framework/lifecycle";
+import { onButtonPress, onFrame, wheelDelta } from "@pocketjs/framework/lifecycle";
 import { mount } from "@pocketjs/framework/solid";
 import {
   library,
@@ -31,6 +31,11 @@ import {
   contactVisibleIndex,
   wheelMultiplier,
 } from "../../framework/src/ipod-list-motion.ts";
+import {
+  POCKETROCK_TRANSITION_MS,
+  transitionDeadline,
+  transitionExpired,
+} from "./transition-timing.ts";
 
 type Page = "Home" | "Now Playing" | "Music" | "Queue" | "Files" |
   "Apps" | "Settings" | "Library" | "Sound" | "Equalizer" | "Playback" |
@@ -58,6 +63,10 @@ interface ScreenSnapshot {
   offset: number;
   back: boolean;
   notice: string;
+  playback: PlaybackSnapshot | null;
+  system: SystemSnapshot | null;
+  queueTotal: number;
+  pending: boolean;
 }
 
 const MUSIC: readonly LibraryKind[] = ["artists", "albums", "tracks", "playlists"];
@@ -93,8 +102,8 @@ const DEFAULT_DISPLAY_SETTINGS = [
   { label: "屏幕休眠", value: "5 分钟" },
 ] as const;
 const WHEEL_IDLE_FRAMES = 6;
-const TRANSITION_FRAMES = 8;
-const TRANSITION_MS = 110;
+const TRANSITION_MS = POCKETROCK_TRANSITION_MS;
+const VOLUME_FLASH_MS = 1400;
 
 interface AppsPageEntry {
   title?: string;
@@ -165,11 +174,34 @@ function PageSurface(props: ScreenSnapshot) {
     <ShellListScreen
       title={props.title}
       back={props.back}
-      rows={props.rows.map((row) => ({ title: row.title, value: row.subtitle }))}
+      rows={props.rows}
       selected={props.selected}
       offset={props.offset}
       emptyTitle={props.notice || "这里没有内容"}
+      hideEmpty={props.pending}
     />
+  );
+}
+
+function SnapshotSurface(props: ScreenSnapshot) {
+  return (
+    <Show when={props.page === "Now Playing"} fallback={<PageSurface {...props} />}>
+      <NowPlayingScreen
+        title={props.playback?.title || "暂无播放"}
+        artist={props.playback?.artist || "请选择一首歌曲"}
+        album={props.playback?.album}
+        elapsedSeconds={(props.playback?.elapsedMs ?? 0) / 1000}
+        durationSeconds={(props.playback?.durationMs ?? 0) / 1000}
+        playing={props.playback?.status === "playing"}
+        trackIndex={props.playback?.index}
+        trackTotal={props.queueTotal}
+        battery={props.system?.batteryPercent}
+        charging={props.system?.charging}
+        shuffle={props.playback?.shuffle}
+        repeat={props.playback?.repeat}
+        back
+      />
+    </Show>
   );
 }
 
@@ -189,16 +221,23 @@ function Shell() {
   const [eqPreset, setEqPreset] = createSignal<string>(DEFAULT_EQ_PRESETS[0]);
   const [eqBands, setEqBands] = createSignal<EqBand[]>(DEFAULT_EQ_BANDS.map((band) => ({ ...band })));
   const [transitionSnapshot, setTransitionSnapshot] = createSignal<ScreenSnapshot | null>(null);
+  const [transitionDirection, setTransitionDirection] = createSignal<"push" | "pop" | null>(null);
   const [playbackState, setPlaybackState] = createSignal<PlaybackSnapshot | null>(null);
   const [systemState, setSystemState] = createSignal<SystemSnapshot | null>(null);
+  const [queueTotal, setQueueTotal] = createSignal(0);
   let activePanel: NodeMirror | undefined;
   let transitionPanel: NodeMirror | undefined;
   let wheelDirection = 0;
   let wheelBurst = 0;
   let wheelTargetIndex = 0;
   let wheelIdleFrames = WHEEL_IDLE_FRAMES;
-  let transitionFrames = 0;
-  let servicePollFrames = 0;
+  let transitionDeadlineMs = 0;
+  let pendingLibraryKind: LibraryKind | null = null;
+  const loadedLibraryPages = new Set<number>();
+  let playbackPollFrames = 0;
+  let systemPollFrames = 0;
+  const [volumeFlash, setVolumeFlash] = createSignal<number | null>(null);
+  let volumeFlashUntilMs = 0;
 
   const route = createMemo(() => stack()[stack().length - 1]);
   const page = createMemo(() => route().page);
@@ -218,11 +257,41 @@ function Shell() {
     try { return system.snapshot(); } catch { return null; }
   };
 
-  const refreshServiceState = (): void => {
-    setPlaybackState(readPlayback());
-    setSystemState(readSystem());
+  const refreshQueueTotal = (): void => {
+    if (!serviceActive()) {
+      setQueueTotal(0);
+      return;
+    }
+    try {
+      setQueueTotal(queue.page(0, 1).total);
+    } catch {
+      // Keep the last total rather than flashing an empty sequence label.
+    }
   };
-  refreshServiceState();
+
+  const samePlayback = (left: PlaybackSnapshot | null, right: PlaybackSnapshot | null): boolean =>
+    left === right || (!!left && !!right &&
+      left.status === right.status && left.index === right.index && left.path === right.path &&
+      left.title === right.title && left.artist === right.artist && left.album === right.album &&
+      left.elapsedMs === right.elapsedMs && left.durationMs === right.durationMs &&
+      left.volume === right.volume && left.repeat === right.repeat && left.shuffle === right.shuffle);
+  const sameSystem = (left: SystemSnapshot | null, right: SystemSnapshot | null): boolean =>
+    left === right || (!!left && !!right && left.batteryPercent === right.batteryPercent &&
+      left.batteryMinutes === right.batteryMinutes && left.charging === right.charging &&
+      left.freeBytes === right.freeBytes && left.totalBytes === right.totalBytes &&
+      left.backlight === right.backlight && left.usb === right.usb);
+
+  const refreshPlaybackState = (): void => {
+    const next = readPlayback();
+    setPlaybackState((current) => samePlayback(current, next) ? current : next);
+  };
+  const refreshSystemState = (): void => {
+    const next = readSystem();
+    setSystemState((current) => sameSystem(current, next) ? current : next);
+  };
+  refreshPlaybackState();
+  refreshSystemState();
+  refreshQueueTotal();
 
   const allApps = (): AppsPageEntry[] => (appTable()?.apps ?? []).map((app) => ({
     title: app.title,
@@ -366,6 +435,10 @@ function Shell() {
     offset: listScroller.offset(),
     back: stack().length > 1,
     notice: notice(),
+    playback: playbackState(),
+    system: systemState(),
+    queueTotal: queueTotal(),
+    pending: page() === "Library" && pendingLibraryKind !== null,
   });
   const saveCurrentRoute = (): Route => ({
     ...route(),
@@ -387,27 +460,32 @@ function Shell() {
     resetWheel(next.selected);
   }
 
-  function beginTransition(snapshot: ScreenSnapshot, direction: "push" | "pop"): void {
+  function transitionActive(): boolean {
+    return transitionDeadlineMs !== 0;
+  }
+
+  function prepareTransition(snapshot: ScreenSnapshot, direction: "push" | "pop"): void {
+    setTransitionDirection(direction);
     setTransitionSnapshot(snapshot);
-    transitionFrames = TRANSITION_FRAMES;
-    queueMicrotask(() => {
-      if (!activePanel || !transitionPanel) return;
-      if (direction === "push") {
-        jump(activePanel, "translateX", 320);
-        jump(transitionPanel, "translateX", 0);
-        animate(transitionPanel, "translateX", -64, { dur: TRANSITION_MS, easing: "out" });
-        animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
-      } else {
-        jump(activePanel, "translateX", -64);
-        jump(transitionPanel, "translateX", 0);
-        animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
-        animate(transitionPanel, "translateX", 320, { dur: TRANSITION_MS, easing: "out" });
-      }
-    });
+    if (!activePanel || !transitionPanel) return;
+    jump(activePanel, "translateX", direction === "push" ? 320 : -64);
+    jump(transitionPanel, "translateX", 0);
+  }
+
+  function runTransition(direction: "push" | "pop"): void {
+    if (!activePanel || !transitionPanel) return;
+    transitionDeadlineMs = transitionDeadline(Date.now());
+    if (direction === "push") {
+      animate(transitionPanel, "translateX", -64, { dur: TRANSITION_MS, easing: "out" });
+      animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
+    } else {
+      animate(activePanel, "translateX", 0, { dur: TRANSITION_MS, easing: "out" });
+      animate(transitionPanel, "translateX", 320, { dur: TRANSITION_MS, easing: "out" });
+    }
   }
 
   function push(next: Pick<Route, "page"> & Partial<Route>): void {
-    if (transitionFrames > 0) return;
+    if (transitionActive()) return;
     const snapshot = activeSnapshot();
     const current = saveCurrentRoute();
     const destination: Route = {
@@ -417,34 +495,114 @@ function Shell() {
       libraryKind: next.libraryKind,
       libraryRows: next.libraryRows,
     };
+    prepareTransition(snapshot, "push");
     setStack((value) => [...value.slice(0, -1), current, destination]);
     restoreRoute(destination);
-    beginTransition(snapshot, "push");
+    runTransition("push");
   }
 
   function pop(): void {
-    if (stack().length <= 1 || transitionFrames > 0) return;
+    if (stack().length <= 1 || transitionActive()) return;
     const snapshot = activeSnapshot();
     const destination = stack()[stack().length - 2];
+    prepareTransition(snapshot, "pop");
     setStack((value) => value.slice(0, -1));
     restoreRoute(destination);
-    beginTransition(snapshot, "pop");
+    runTransition("pop");
   }
 
   function openLibrary(kind: LibraryKind): void {
+    loadedLibraryPages.clear();
+    pendingLibraryKind = kind;
+    push({
+      page: "Library",
+      libraryKind: kind,
+      libraryRows: [],
+    });
+  }
+
+  function loadPendingLibrary(): void {
+    const kind = pendingLibraryKind;
+    if (kind === null) return;
+    pendingLibraryKind = null;
     let libraryRows: Row[];
     if (!serviceActive()) {
       libraryRows = [{ title: "音乐资料库不可用", subtitle: "Tagcache 服务离线" }];
     } else {
       try {
         const result = library.page(kind, 0, 64);
-        libraryRows = result.items.map((item) => ({ title: item.title, subtitle: item.subtitle }));
+        libraryRows = new Array<Row>(result.total);
+        for (let index = 0; index < result.items.length; index++) {
+          libraryRows[result.offset + index] = libraryRow(result.items[index]);
+        }
+        loadedLibraryPages.add(Math.floor(result.offset / 64));
         if (result.scanning) setNotice("正在扫描音乐资料库");
       } catch (error) {
         libraryRows = [{ title: "音乐资料库不可用", subtitle: String(error) }];
       }
     }
-    push({ page: "Library", libraryKind: kind, libraryRows });
+    setStack((value) => value.map((entry, index) => index === value.length - 1 &&
+      entry.page === "Library" && entry.libraryKind === kind
+      ? { ...entry, libraryRows }
+      : entry));
+  }
+
+  function libraryRow(item: { title: string; subtitle?: string; path?: string }): Row {
+    return {
+      title: item.title,
+      subtitle: item.subtitle,
+      action: item.path ? () => playLibraryTrack(item.path!) : undefined,
+    };
+  }
+
+  function ensureLibraryPage(index: number): void {
+    if (page() !== "Library" || !serviceActive()) return;
+    const kind = route().libraryKind;
+    const currentRows = route().libraryRows;
+    if (!kind || !currentRows || currentRows.length === 0) return;
+    const offset = Math.floor(Math.max(0, index) / 64) * 64;
+    const pageIndex = offset / 64;
+    if (loadedLibraryPages.has(pageIndex)) return;
+    loadedLibraryPages.add(pageIndex);
+    try {
+      const result = library.page(kind, offset, 64);
+      const nextRows = currentRows.slice();
+      for (let itemIndex = 0; itemIndex < result.items.length; itemIndex++) {
+        nextRows[result.offset + itemIndex] = libraryRow(result.items[itemIndex]);
+      }
+      const pagesByDistance = [...loadedLibraryPages]
+        .sort((left, right) => Math.abs(right - pageIndex) - Math.abs(left - pageIndex));
+      while (pagesByDistance.length > 3) {
+        const droppedPage = pagesByDistance.shift()!;
+        loadedLibraryPages.delete(droppedPage);
+        const droppedOffset = droppedPage * 64;
+        for (let rowIndex = droppedOffset;
+          rowIndex < Math.min(nextRows.length, droppedOffset + 64); rowIndex++) {
+          delete nextRows[rowIndex];
+        }
+      }
+      setStack((value) => value.map((entry, routeIndex) =>
+        routeIndex === value.length - 1 && entry.page === "Library"
+          ? { ...entry, libraryRows: nextRows }
+          : entry));
+    } catch (error) {
+      loadedLibraryPages.delete(pageIndex);
+      setNotice(`读取资料库失败：${String(error)}`);
+    }
+  }
+
+  function playLibraryTrack(path: string): void {
+    if (!serviceActive()) return;
+    try {
+      if (!queue.replace([path], 0)) {
+        setNotice("无法播放所选歌曲");
+        return;
+      }
+      refreshPlaybackState();
+      push({ page: "Now Playing" });
+    } catch (error) {
+      setNotice(`播放失败：${String(error)}`);
+    }
   }
 
   function moveSelection(delta: number): void {
@@ -543,6 +701,22 @@ function Shell() {
     }
   }
 
+  /**
+   * On the Now Playing surface the wheel and UP/DOWN change volume, mirroring
+   * the stock iPod.  The magnitude is clamped per frame so a fast spin can not
+   * leapfrog the 0..100 master range in a single pulse burst.
+   */
+  function adjustVolume(delta: number): void {
+    if (!serviceActive()) return;
+    const current = playbackState()?.volume ?? 0;
+    const next = Math.max(0, Math.min(100, current + delta));
+    if (next === current) return;
+    if (!playback.setVolume(next)) return;
+    refreshPlaybackState();
+    volumeFlashUntilMs = Date.now() + VOLUME_FLASH_MS;
+    setVolumeFlash(next);
+  }
+
   function CurrentPage() {
     return (
       <Show
@@ -556,6 +730,13 @@ function Shell() {
               elapsedSeconds={(playbackState()?.elapsedMs ?? 0) / 1000}
               durationSeconds={(playbackState()?.durationMs ?? 0) / 1000}
               playing={playbackState()?.status === "playing"}
+              trackIndex={playbackState()?.index}
+              trackTotal={queueTotal()}
+              battery={systemState()?.batteryPercent}
+              charging={systemState()?.charging}
+              volumeFlash={volumeFlash()}
+              shuffle={playbackState()?.shuffle}
+              repeat={playbackState()?.repeat}
               back
             />
           </Show>
@@ -567,28 +748,72 @@ function Shell() {
   }
 
   onFrame((buttons) => {
-    if (++servicePollFrames >= 10) {
-      servicePollFrames = 0;
-      refreshServiceState();
+    if (volumeFlashUntilMs !== 0 && Date.now() >= volumeFlashUntilMs) {
+      volumeFlashUntilMs = 0;
+      setVolumeFlash(null);
+    }
+    const interacting = wheelDirection !== 0 || listScroller.state() !== "idle";
+    if (!transitionActive() && !interacting) {
+      const playbackInterval = page() === "Now Playing" ? 10
+        : page() === "Home" || page() === "Settings" || page() === "Playback" ? 60
+          : 180;
+      const systemInterval = usbSurfaceVisible() ? 10
+        : page() === "Home" || page() === "Settings" || page() === "Power" ||
+            page() === "Storage" || page() === "Display" ? 60 : 180;
+      if (++playbackPollFrames >= playbackInterval) {
+        playbackPollFrames = 0;
+        refreshPlaybackState();
+        if (page() === "Now Playing") refreshQueueTotal();
+      }
+      if (++systemPollFrames >= systemInterval) {
+        systemPollFrames = 0;
+        refreshSystemState();
+      }
     }
     if (usbSurfaceVisible()) {
       listScroller.stop();
       resetWheel(selected());
       return;
     }
-    if (transitionFrames > 0) {
-      transitionFrames -= 1;
-      if (transitionFrames === 0) {
-        setTransitionSnapshot(null);
+    if (transitionActive()) {
+      if (transitionExpired(transitionDeadlineMs, Date.now())) {
+        transitionDeadlineMs = 0;
         if (activePanel) jump(activePanel, "translateX", 0);
+        if (transitionPanel) jump(transitionPanel, "translateX", 320);
+        setTransitionSnapshot(null);
+        setTransitionDirection(null);
+        loadPendingLibrary();
       }
       return;
     }
     listScroller.step();
     updateVisualSelection();
-    if ((buttons & BTN.UP) !== 0) moveSelection(acceleratedWheelDelta(-1));
-    else if ((buttons & BTN.DOWN) !== 0) moveSelection(acceleratedWheelDelta(1));
-    else {
+    ensureLibraryPage(selected());
+    const nowPlaying = page() === "Now Playing";
+    const pulses = wheelDelta();
+    if (pulses !== 0) {
+      if (nowPlaying) {
+        adjustVolume(Math.max(-5, Math.min(5, pulses)));
+      } else {
+        const direction: -1 | 1 = pulses < 0 ? -1 : 1;
+        for (let pulse = 0; pulse < Math.abs(pulses); pulse++) {
+          moveSelection(acceleratedWheelDelta(direction));
+        }
+        ensureLibraryPage(wheelTargetIndex);
+      }
+    } else if ((buttons & BTN.UP) !== 0) {
+      if (nowPlaying) adjustVolume(-1);
+      else {
+        moveSelection(acceleratedWheelDelta(-1));
+        ensureLibraryPage(wheelTargetIndex);
+      }
+    } else if ((buttons & BTN.DOWN) !== 0) {
+      if (nowPlaying) adjustVolume(1);
+      else {
+        moveSelection(acceleratedWheelDelta(1));
+        ensureLibraryPage(wheelTargetIndex);
+      }
+    } else {
       wheelIdleFrames = Math.min(WHEEL_IDLE_FRAMES, wheelIdleFrames + 1);
       if (wheelDirection !== 0 && wheelIdleFrames === 1) settleReleasedSelection();
       if (wheelDirection !== 0 && wheelIdleFrames === WHEEL_IDLE_FRAMES) resetWheel(selected());
@@ -596,7 +821,7 @@ function Shell() {
   });
 
   onButtonPress(BTN.CIRCLE, () => {
-    if (usbSurfaceVisible() || transitionFrames !== 0) return;
+    if (usbSurfaceVisible() || transitionActive()) return;
     if (page() === "Equalizer" && selected() < 2) adjustCurrent(1);
     else rows()[selected()]?.action?.();
   }, { latched: true });
@@ -609,14 +834,22 @@ function Shell() {
 
   return (
     <View class="relative w-[320] h-[240] bg-[#f5f6f8] overflow-hidden">
-      <View ref={(node) => (activePanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
-        <Show when={page()} keyed>{(_currentPage) => <CurrentPage />}</Show>
+      <View
+        ref={(node) => (activePanel = node)}
+        class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden"
+        style={{ zIndex: transitionDirection() === "push" ? 2 : 1 }}
+      >
+        <CurrentPage />
       </View>
-      <Show when={transitionSnapshot()} keyed>{(snapshot) =>
-        <View ref={(node) => (transitionPanel = node)} class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden">
-          <PageSurface {...snapshot} />
-        </View>
-      }</Show>
+      <View
+        ref={(node) => (transitionPanel = node)}
+        class="absolute left-0 top-0 w-[320] h-[240] overflow-hidden"
+        style={{ translateX: 320, zIndex: transitionDirection() === "push" ? 1 : 2 }}
+      >
+        <Show when={transitionSnapshot()} keyed>
+          {(snapshot) => <SnapshotSurface {...snapshot} />}
+        </Show>
+      </View>
     </View>
   );
 }

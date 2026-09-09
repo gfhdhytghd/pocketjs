@@ -29,7 +29,7 @@ import { setOverlayRoot } from "./overlay.ts";
 import { mountAuxiliarySurface, unmountAuxiliarySurface } from "./display.ts";
 import { registerStyles, resolveStyle } from "./styles.ts";
 import { handleFrame, setAuxiliaryHitRoot, setHitRoot, setInputRoot } from "./input.ts";
-import { __setAnalog, resetFrameHooks, runFrameHooks } from "./frame-vue-vapor.ts";
+import { __setAnalog, __setWheelDelta, resetFrameHooks, runFrameHooks } from "./frame-vue-vapor.ts";
 import { __runGestures, resetGestures } from "./gesture.ts";
 import { installTouchActivation } from "./touch-activation.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
@@ -225,6 +225,7 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
       touchSurfaces?: readonly number[],
     ) => {
       __advanceClock();
+      __setWheelDelta(analog);
       __setAnalog(analog);
       __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
       runServicePumps();
