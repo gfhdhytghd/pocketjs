@@ -2966,8 +2966,15 @@ impl<'a> Walker<'a> {
             .iter()
             .all(|&v| v >= i16::MIN as f32 && v <= i16::MAX as f32);
         let legacy_basis = axis_x == (cell_w, 0.0) && axis_y == (0.0, cell_h);
+        // Legacy glyph anchors are unsigned: a partially visible cell with
+        // a negative origin needs the signed extended command even when its
+        // basis is axis-aligned and unscaled. Scissoring clips its pixels.
+        let needs_signed_anchor = legacy_basis && scratch.iter().any(|g| {
+            let (x, y) = world.apply(g.x, g.y);
+            roundf(x) < 0.0 || roundf(y) < 0.0
+        });
         let oriented = self.rounded_clip_supported
-            && !legacy_basis
+            && (!legacy_basis || needs_signed_anchor)
             && basis_fits
             && axis_x.0 * axis_y.1 != axis_x.1 * axis_y.0;
         let start = dl.words.len();

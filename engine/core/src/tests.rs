@@ -4504,6 +4504,34 @@ fn tracked_and_transformed_runs_use_the_baked_pair_on_both_sides() {
 }
 
 #[test]
+fn extended_backend_preserves_partially_visible_glyphs_at_screen_edges() {
+    for (x, y, expected_pixels) in [(10.0, -3.0, 40), (-3.0, 10.0, 40), (-3.0, -3.0, 25)] {
+        let mut ui = Ui::new();
+        let mut atlas = encode_atlas(0, 8, 8, 7, 8, 1, &[('A' as u32, 0, 8)]);
+        atlas[24..].fill(255);
+        assert!(ui.load_font_atlas(&atlas));
+        ui.set_rounded_clip_supported(true);
+        let text = ui.create_node(spec::NodeType::Text as u8);
+        ui.set_prop(text, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(text, spec::prop::WIDTH, 8.0);
+        ui.set_prop(text, spec::prop::HEIGHT, 8.0);
+        ui.set_prop(text, spec::prop::INSET_L, x);
+        ui.set_prop(text, spec::prop::INSET_T, y);
+        ui.set_prop(text, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 255) as f64);
+        ui.set_text(text, "A");
+        ui.insert_before(spec::ROOT_ID, text, 0);
+        ui.tick();
+        let words = ui.draw().words.clone();
+        let counts = validate_drawlist(&words);
+        assert_eq!(counts[spec::draw_op::GLYPH_RUN_XFORM as usize], 1, "glyph at ({x}, {y}) disappeared");
+        let mut pixels = alloc::vec![0; spec::SCREEN_W as usize * spec::SCREEN_H as usize * 4];
+        crate::raster::render(&ui, &words, &mut pixels);
+        let painted = pixels.chunks_exact(4).filter(|pixel| pixel[0] != 0).count();
+        assert_eq!(painted, expected_pixels, "partial glyph coverage at ({x}, {y})");
+    }
+}
+
+#[test]
 fn extended_backend_emits_parent_rotated_glyph_cells() {
     let mut ui = Ui::new();
     assert!(ui.load_font_atlas(&encode_atlas(
