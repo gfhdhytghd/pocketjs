@@ -1393,7 +1393,6 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           which opt into extended DrawList geometry. Its
 //                           signed anchors and corners remain i16-safe and are
 //                           clipped by the current clip stack.
-//   TEX_QUAD    (9 words):  op, texHandle, xy, wh, u0, v0, u1, v1 (f32 bits,
 //   GLYPH_RUN_F32 (7 + 3n): op 13, metadata/color as GLYPH_RUN,
 //                           four f32 words for cell basis ux, uy, vx, vy,
 //                           then n x { f32 x, f32 y, u16 gid in a u32 }.
@@ -1402,6 +1401,7 @@ export const FONT_FLAG_BOLD = 1 << 0;
 //                           the backend clips each cell to its current scissor.
 //                           Ui::set_subpixel_glyphs_supported is a separate,
 //                           default-off host opt-in. Older commands are unchanged.
+//   TEX_QUAD    (9 words):  op, texHandle, xy, wh, u0, v0, u1, v1 (f32 bits,
 //                           normalized 0..1), color (modulate; 0xFFFFFFFF = none)
 //   SCISSOR     (3 words):  op, xy, wh — push clip rect. The core emits rects
 //                           already intersected with every enclosing scissor,
@@ -1489,8 +1489,8 @@ export const DRAW_OP = {
   surfaceQuad: 10,
   roundedClip: 11,
   glyphRunXform: 12,
-} as const;
   glyphRunF32: 13,
+} as const;
 
 // ---------------------------------------------------------------------------
 // PAK container constants
