@@ -967,6 +967,7 @@ struct Walker<'a> {
     discs: &'a mut DiscCache,
     raster_density: u32,
     rounded_clip_supported: bool,
+    subpixel_glyphs_supported: bool,
     /// DevTools: slot to capture the world AABB of (u32::MAX = none).
     inspect_slot: u32,
     /// World AABB of `inspect_slot`, set when the walk reaches it.
@@ -990,6 +991,7 @@ pub fn build(
     discs: &mut DiscCache,
     raster_density: u32,
     rounded_clip_supported: bool,
+    subpixel_glyphs_supported: bool,
     dl: &mut DrawList,
     inspect_id: i32,
     inspect_prev: Option<(f32, f32, f32, f32)>,
@@ -1012,6 +1014,7 @@ pub fn build(
         discs,
         raster_density,
         rounded_clip_supported,
+        subpixel_glyphs_supported,
         dl,
         inspect_id,
         inspect_prev,
@@ -1035,6 +1038,7 @@ pub fn build_root(
     discs: &mut DiscCache,
     raster_density: u32,
     rounded_clip_supported: bool,
+    subpixel_glyphs_supported: bool,
     dl: &mut DrawList,
     inspect_id: i32,
     inspect_prev: Option<(f32, f32, f32, f32)>,
@@ -1070,6 +1074,7 @@ pub fn build_root(
         discs,
         raster_density,
         rounded_clip_supported,
+        subpixel_glyphs_supported,
         inspect_slot,
         inspect_hit: None,
         in_3d: false,
@@ -2966,6 +2971,36 @@ impl<'a> Walker<'a> {
             .iter()
             .all(|&v| v >= i16::MIN as f32 && v <= i16::MAX as f32);
         let legacy_basis = axis_x == (cell_w, 0.0) && axis_y == (0.0, cell_h);
+        if self.subpixel_glyphs_supported {
+            let axes = [world.a * cell_w, world.b * cell_w,
+                        world.c * cell_h, world.d * cell_h];
+            if axes.iter().all(|v| v.is_finite())
+                && axes[0] * axes[3] != axes[1] * axes[2] {
+                let start = dl.words.len();
+                dl.words.extend_from_slice(&[spec::draw_op::GLYPH_RUN_F32, 0, color]);
+                dl.words.extend(axes.map(f32::to_bits));
+                let mut n = 0u32;
+                for g in &scratch {
+                    let (x, y) = world.apply(g.x, g.y);
+                    let xs = [x, x + axes[0], x + axes[2], x + axes[0] + axes[2]];
+                    let ys = [y, y + axes[1], y + axes[3], y + axes[1] + axes[3]];
+                    if !xs.iter().chain(ys.iter()).all(|v| v.is_finite())
+                        || xs.iter().copied().fold(f32::NEG_INFINITY, f32::max) <= clip.x0
+                        || xs.iter().copied().fold(f32::INFINITY, f32::min) >= clip.x1
+                        || ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) <= clip.y0
+                        || ys.iter().copied().fold(f32::INFINITY, f32::min) >= clip.y1 {
+                        continue;
+                    }
+                    if n == u16::MAX as u32 { break; }
+                    dl.words.extend_from_slice(&[x.to_bits(), y.to_bits(), g.gid as u32]);
+                    n += 1;
+                }
+                if n == 0 { dl.words.truncate(start); }
+                else { dl.words[start + 1] = slot as u32 | n << 16; }
+            }
+            self.glyph_scratch = scratch;
+            return;
+        }
         // Legacy glyph anchors are unsigned: a partially visible cell with
         // a negative origin needs the signed extended command even when its
         // basis is axis-aligned and unscaled. Scissoring clips its pixels.

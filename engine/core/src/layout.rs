@@ -52,6 +52,7 @@ impl MeasureCtx {
 /// The layout engine: one TaffyTree + the dirty flag.
 pub struct LayoutEngine {
     pub taffy: TaffyTree<MeasureCtx>,
+    pub fractional: bool,
     /// STRUCTURE dirty: the taffy tree must be rebuilt from scratch (node
     /// inserts/removes/destroys, text content changes, table/font swaps).
     pub dirty: bool,
@@ -77,6 +78,12 @@ impl Default for LayoutEngine {
 }
 
 impl LayoutEngine {
+    pub fn set_fractional(&mut self, enabled: bool) {
+        self.fractional = enabled;
+        if enabled { self.taffy.disable_rounding(); } else { self.taffy.enable_rounding(); }
+        self.dirty = true;
+    }
+
     /// Mark one node style-dirty (cheap; deduped at relayout).
     pub fn mark_style(&mut self, slot: u32) {
         self.style_dirty.push(slot);
@@ -90,6 +97,7 @@ impl LayoutEngine {
     pub fn new() -> LayoutEngine {
         LayoutEngine {
             taffy: TaffyTree::new(),
+            fractional: false,
             dirty: true,
             style_dirty: Vec::new(),
             built: false,
@@ -291,7 +299,8 @@ fn build(
 
 /// Copy rounded layout output back into the node tree (flat pass — layouts
 /// are parent-relative, so order does not matter; no per-node allocations).
-fn readback(tree: &mut Tree, taffy: &TaffyTree<MeasureCtx>, root_id: i32) {
+fn readback(tree: &mut Tree, taffy: &TaffyTree<MeasureCtx>, root_id: i32, fractional: bool) {
+    let quantize = |v| if fractional { v } else { roundf(v) };
     let mut slots = Vec::new();
     tree.collect_subtree(root_id, &mut slots);
     for slot in slots {
@@ -300,10 +309,10 @@ fn readback(tree: &mut Tree, taffy: &TaffyTree<MeasureCtx>, root_id: i32) {
             Some(nid) => {
                 if let Ok(l) = taffy.layout(nid) {
                     node.layout = LayoutRect {
-                        x: roundf(l.location.x),
-                        y: roundf(l.location.y),
-                        w: roundf(l.size.width),
-                        h: roundf(l.size.height),
+                        x: quantize(l.location.x),
+                        y: quantize(l.location.y),
+                        w: quantize(l.size.width),
+                        h: quantize(l.size.height),
                     };
                 }
             }
@@ -335,7 +344,7 @@ fn compute(
             }
         },
     );
-    readback(tree, &eng.taffy, root_id);
+    readback(tree, &eng.taffy, root_id, eng.fractional);
 }
 
 /// Relayout. STYLE-only dirt restyles the dirty nodes in the LIVE taffy tree

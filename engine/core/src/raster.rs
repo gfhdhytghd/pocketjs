@@ -956,6 +956,18 @@ fn render_scaled_clipped<T: RenderTarget>(
                 );
                 i += 5 + 2 * n;
             }
+            draw_op::GLYPH_RUN_F32 => {
+                if i + 7 > words.len() { return; }
+                let n = (words[i + 1] >> 16) as usize;
+                if i + 7 + 3 * n > words.len() { return; }
+                let axes = [words[i+3], words[i+4], words[i+5], words[i+6]]
+                    .map(|v| f32::from_bits(v) * scale as f32);
+                glyph_cells(ui, &mut masked, width, clip, (words[i+1] & 255) as u8,
+                    words[i+2], axes, words[i+7..i+7+3*n].chunks_exact(3).map(|g|
+                    (f32::from_bits(g[0]) * scale as f32,
+                     f32::from_bits(g[1]) * scale as f32, (g[2] & 65535) as u16)));
+                i += 7 + 3 * n;
+            }
             draw_op::TEX_QUAD => {
                 if i + 9 > words.len() {
                     return;
@@ -1374,52 +1386,47 @@ fn glyph_run_xform<T: RenderTarget>(
     axis_y_word: u32,
     glyphs: &[u32],
 ) {
-    let Some(atlas) = ui.font_atlas(slot) else {
-        return;
-    };
-    let (r, g, b, a) = channels(color);
-    if a == 0 {
-        return;
-    }
     let (ux, uy) = xy(axis_x_word, output_scale);
     let (vx, vy) = xy(axis_y_word, output_scale);
-    let det = ux as i64 * vy as i64 - uy as i64 * vx as i64;
-    if det == 0 {
-        return;
-    }
+    glyph_cells(ui, target, stride, clip, slot, color,
+        [ux as f32, uy as f32, vx as f32, vy as f32],
+        glyphs.chunks_exact(2).map(|g| {
+            let (x, y) = xy(g[0], output_scale);
+            (x as f32, y as f32, (g[1] & 65535) as u16)
+        }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
+    clip: Clip, slot: u8, color: u32, axes: [f32; 4],
+    glyphs: impl Iterator<Item=(f32, f32, u16)>) {
+    let Some(atlas) = ui.font_atlas(slot) else { return; };
+    let (r, g, b, a) = channels(color);
+    if a == 0 || !axes.iter().all(|v| v.is_finite()) { return; }
+    let [ux, uy, vx, vy] = axes;
+    let det = ux * vy - uy * vx;
+    if det == 0.0 || !det.is_finite() { return; }
     let coverage_w = atlas.coverage_width() as i32;
     let coverage_h = atlas.coverage_height() as i32;
     let bpr = atlas.bytes_per_row();
-    let inv_det = 1.0f32 / det as f32;
-    for pair in glyphs.chunks_exact(2) {
-        let gid = (pair[1] & 0xffff) as u16;
-        if gid >= atlas.glyph_count {
-            continue;
-        }
-        let (gx, gy) = xy(pair[0], output_scale);
-        let corners = [
-            (gx, gy),
-            (gx + ux, gy + uy),
-            (gx + vx, gy + vy),
-            (gx + ux + vx, gy + uy + vy),
-        ];
-        let x0 = corners.iter().map(|p| p.0).min().unwrap().max(clip.x0);
-        let x1 = corners.iter().map(|p| p.0).max().unwrap().min(clip.x1);
-        let y0 = corners.iter().map(|p| p.1).min().unwrap().max(clip.y0);
-        let y1 = corners.iter().map(|p| p.1).max().unwrap().min(clip.y1);
-        if x0 >= x1 || y0 >= y1 {
-            continue;
-        }
+    let inv_det = 1.0 / det;
+    for (gx, gy, gid) in glyphs {
+        if gid >= atlas.glyph_count { continue; }
+        let xs = [gx, gx+ux, gx+vx, gx+ux+vx];
+        let ys = [gy, gy+uy, gy+vy, gy+uy+vy];
+        if !xs.iter().chain(ys.iter()).all(|v| v.is_finite()) { continue; }
+        let x0 = (crate::layout::floorf(xs.iter().copied().fold(f32::INFINITY, f32::min)) as i32).max(clip.x0);
+        let x1 = (-crate::layout::floorf(-xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)) as i32).min(clip.x1);
+        let y0 = (crate::layout::floorf(ys.iter().copied().fold(f32::INFINITY, f32::min)) as i32).max(clip.y0);
+        let y1 = (-crate::layout::floorf(-ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)) as i32).min(clip.y1);
         let rows = atlas.glyph_rows(gid);
         for py in y0..y1 {
             for px in x0..x1 {
-                let dx = px as f32 + 0.5 - gx as f32;
-                let dy = py as f32 + 0.5 - gy as f32;
-                let u = (dx * vy as f32 - dy * vx as f32) * inv_det;
-                let v = (ux as f32 * dy - uy as f32 * dx) * inv_det;
-                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
-                    continue;
-                }
+                let dx = px as f32 + 0.5 - gx;
+                let dy = py as f32 + 0.5 - gy;
+                let u = (dx * vy - dy * vx) * inv_det;
+                let v = (ux * dy - uy * dx) * inv_det;
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) { continue; }
                 let sx = ((u * coverage_w as f32) as i32).clamp(0, coverage_w - 1);
                 let sy = ((v * coverage_h as f32) as i32).clamp(0, coverage_h - 1);
                 let cov = rows[sy as usize * bpr + sx as usize] as u32;

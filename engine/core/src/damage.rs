@@ -425,6 +425,10 @@ impl<'a> DamageDecoder<'a> {
                     .checked_add(count.checked_mul(2).ok_or(())?)
                     .ok_or(())?
             }
+            spec::draw_op::GLYPH_RUN_F32 => {
+                let count = (self.words.get(start + 1).copied().ok_or(())? >> 16) as usize;
+                7usize.checked_add(count.checked_mul(3).ok_or(())?).ok_or(())?
+            }
             spec::draw_op::TEX_QUAD => 9,
             spec::draw_op::SCISSOR => 3,
             spec::draw_op::SCISSOR_POP => 1,
@@ -449,6 +453,7 @@ impl<'a> DamageDecoder<'a> {
             }
             spec::draw_op::GLYPH_RUN => glyph_run_bounds(ui, words, self.clip),
             spec::draw_op::GLYPH_RUN_XFORM => glyph_run_xform_bounds(ui, words, self.clip),
+            spec::draw_op::GLYPH_RUN_F32 => glyph_run_f32_bounds(ui, words, self.clip),
             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(self.clip),
             spec::draw_op::SCISSOR | spec::draw_op::ROUNDED_CLIP => {
                 if self.depth >= self.stack.len() {
@@ -588,6 +593,28 @@ fn glyph_run_xform_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRec
         let min_y = corners.iter().map(|p| p.1).min().unwrap();
         let max_y = corners.iter().map(|p| p.1).max().unwrap();
         bounds = bounds.union(DamageRect::new(min_x, min_y, max_x, max_y));
+    }
+    bounds.intersect(clip)
+}
+
+fn glyph_run_f32_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect {
+    if words[2] >> 24 == 0 { return DamageRect::empty(); }
+    let Some(atlas) = ui.font_atlas((words[1] & 0xff) as u8) else { return DamageRect::empty(); };
+    let [ux, uy, vx, vy] = [words[3], words[4], words[5], words[6]].map(f32::from_bits);
+    let mut bounds = DamageRect::empty();
+    for glyph in words[7..].chunks_exact(3) {
+        if (glyph[2] & 0xffff) >= atlas.glyph_count as u32 { continue; }
+        let (x, y) = (f32::from_bits(glyph[0]), f32::from_bits(glyph[1]));
+        let xs = [x, x + ux, x + vx, x + ux + vx];
+        let ys = [y, y + uy, y + vy, y + uy + vy];
+        if !xs.iter().chain(ys.iter()).all(|v| v.is_finite()) { return clip; }
+        let min_x = xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min_y = ys.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_y = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        bounds = bounds.union(DamageRect::new(crate::layout::floorf(min_x) as i32,
+            crate::layout::floorf(min_y) as i32, -crate::layout::floorf(-max_x) as i32,
+            -crate::layout::floorf(-max_y) as i32));
     }
     bounds.intersect(clip)
 }

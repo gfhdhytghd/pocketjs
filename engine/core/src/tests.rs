@@ -208,7 +208,7 @@ fn decode_wh(word: u32) -> (i32, i32) {
 /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
 /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
 /// balanced, only known ops. Returns per-op counts (indexed by op code).
-fn validate_drawlist(words: &[u32]) -> [u32; 13] {
+fn validate_drawlist(words: &[u32]) -> [u32; 14] {
     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
     let xy_ok = |w: u32| {
         let (x, y) = decode_xy(w);
@@ -226,7 +226,7 @@ fn validate_drawlist(words: &[u32]) -> [u32; 13] {
             "rect exceeds screen: {x},{y} {w}x{h}"
         );
     };
-    let mut counts = [0u32; 13];
+    let mut counts = [0u32; 14];
     let mut depth = 0i32;
     let mut i = 0usize;
     while i < words.len() {
@@ -273,6 +273,16 @@ fn validate_drawlist(words: &[u32]) -> [u32; 13] {
                     );
                 }
                 i += 5 + 2 * n;
+            }
+            spec::draw_op::GLYPH_RUN_F32 => {
+                let n = (words[i + 1] >> 16) as usize;
+                assert!(n > 0);
+                for v in &words[i+3..i+7] { assert!(f32::from_bits(*v).is_finite()); }
+                for glyph in words[i+7..i+7+3*n].chunks_exact(3) {
+                    assert!(f32::from_bits(glyph[0]).is_finite());
+                    assert!(f32::from_bits(glyph[1]).is_finite());
+                }
+                i += 7 + 3 * n;
             }
             spec::draw_op::TEX_QUAD => {
                 rect_ok(words[i + 2], words[i + 3]);
@@ -383,6 +393,10 @@ fn tex_tri_runs(words: &[u32]) -> Vec<(u32, usize)> {
             spec::draw_op::GLYPH_RUN_XFORM => {
                 previous_was_tex_tri = false;
                 i += 5 + 2 * ((words[i + 1] >> 16) as usize);
+            }
+            spec::draw_op::GLYPH_RUN_F32 => {
+                previous_was_tex_tri = false;
+                i += 7 + 3 * ((words[i + 1] >> 16) as usize);
             }
             spec::draw_op::TEX_QUAD => {
                 previous_was_tex_tri = false;
@@ -4938,4 +4952,53 @@ fn rounded_overflow_emits_original_offscreen_geometry_and_shared_pop() {
     assert_eq!(decode_wh(words[i + 2]), (8, 8));
     assert_eq!(f32::from_bits(words[i + 3]), 4.0);
     assert_eq!(f32::from_bits(words[i + 4]), 4.0);
+}
+
+#[test]
+fn subpixel_glyphs_preserve_half_logical_pixel_at_double_density() {
+    for precise in [false, true] {
+        let mut ui = Ui::new();
+        let mut atlas = encode_atlas(0, 8, 8, 7, 8, 1, &[('A' as u32, 0, 8)]);
+        atlas[24..].fill(255);
+        assert!(ui.load_font_atlas(&atlas));
+        ui.set_subpixel_glyphs_supported(precise);
+        ui.set_fractional_layout(precise);
+        let text = ui.create_node(spec::NodeType::Text as u8);
+        ui.set_prop(text, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+        ui.set_prop(text, spec::prop::WIDTH, 8.0);
+        ui.set_prop(text, spec::prop::HEIGHT, 8.0);
+        ui.set_prop(text, spec::prop::INSET_L, 10.5);
+        ui.set_prop(text, spec::prop::INSET_T, 14.5);
+        ui.set_prop(text, spec::prop::TEXT_COLOR, abgr(255, 255, 255, 255) as f64);
+        ui.set_text(text, "A"); ui.insert_before(spec::ROOT_ID, text, 0); ui.tick();
+        let words = ui.draw().words.clone();
+        let counts = validate_drawlist(&words);
+        assert_eq!(counts[spec::draw_op::GLYPH_RUN_F32 as usize], precise as u32);
+        let width = spec::SCREEN_W as usize * 2;
+        let mut pixels = alloc::vec![0; width * spec::SCREEN_H as usize * 2 * 4];
+        crate::raster::render_scaled(&ui, &words, &mut pixels, 2);
+        let first = pixels.chunks_exact(4).position(|p| p[0] != 0).unwrap();
+        assert_eq!((first % width, first / width), if precise { (21, 29) } else { (22, 30) });
+        assert_eq!(pixels.chunks_exact(4).filter(|p| p[0] != 0).count(), 256);
+    }
+}
+
+#[test]
+fn subpixel_glyph_damage_clears_previous_fractional_and_negative_cells() {
+    let mut ui = Ui::new();
+    ui.set_viewport(32.0, 32.0);
+    let mut atlas = encode_atlas(0, 8, 8, 7, 8, 1, &[('A' as u32, 0, 8)]);
+    atlas[24..].fill(255);
+    assert!(ui.load_font_atlas(&atlas));
+    let mut tracker = crate::damage::DamageTracker::<8>::new();
+    let mut incremental = alloc::vec![0; 64 * 64 * 4];
+    for (x, y) in [(10.5f32, 14.5f32), (-3.25, 1.75), (20.25, 27.5)] {
+        let words = [spec::draw_op::GLYPH_RUN_F32, 1 << 16, 0xffffffff,
+                     8.25f32.to_bits(), 0, 0, 8.5f32.to_bits(), x.to_bits(), y.to_bits(), 0];
+        crate::raster::render_scaled_incremental(&ui, &words, &mut incremental, 2,
+            &mut tracker, crate::damage::DamagePolicy::default()).unwrap();
+        let mut full = alloc::vec![0; incremental.len()];
+        crate::raster::render_scaled(&ui, &words, &mut full, 2);
+        assert_eq!(incremental, full, "damage lost fractional cell at ({x}, {y})");
+    }
 }
