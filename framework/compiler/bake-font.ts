@@ -29,6 +29,8 @@ import {
   FONT_HEADER_SIZE,
   FONT_MAGIC,
   FONT_VERSION,
+  FONT_RASTER_ADVANCE_VERSION,
+  FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE,
   MAX_FONT_SLOTS,
 } from "../../contracts/spec/spec.ts";
 import { fileURLToPath } from "node:url";
@@ -54,11 +56,33 @@ export interface BakedAtlas {
   coverageH: number;
 }
 
+export interface FontSlotResource {
+  slot: number;
+  px: number;
+  path: string;
+  bold?: boolean;
+  /** Quantize advances to physical pixels, stored as fractional logical px. */
+  rasterAdvances?: boolean;
+}
+
+export function validateFontSlots(value: unknown): FontSlotResource[] {
+  if (!Array.isArray(value)) throw new Error("fontSlots must be an array");
+  const seen = new Set<number>();
+  return value.map(item => {
+    if (!item || typeof item !== "object" || !Number.isInteger(item.slot) || item.slot < 33 || item.slot >= MAX_FONT_SLOTS || seen.has(item.slot)) throw new Error("fontSlots require unique application slots 33..63");
+    if (!Number.isFinite(item.px) || item.px < 1 || item.px > 128 || typeof item.path !== "string" || !item.path.trim()) throw new Error("fontSlots require px in 1..128 and a font path");
+    if ((item.bold !== undefined && typeof item.bold !== "boolean") || (item.rasterAdvances !== undefined && typeof item.rasterAdvances !== "boolean")) throw new Error("fontSlots bold/rasterAdvances must be booleans");
+    seen.add(item.slot);
+    return {slot:item.slot, px:item.px, path:item.path, bold:item.bold, rasterAdvances:item.rasterAdvances};
+  });
+}
+
 export interface BakeOptions {
   /** Codepoints collected by the pass-1 AST scan. */
   codepoints: Iterable<number>;
   /** Slots to bake (indices per framework/compiler/tailwind.ts fontSlotFor). */
   slots: number[];
+  fontSlots?: FontSlotResource[];
   /** Extra characters to force into every atlas [R]. */
   extraChars?: string;
   /** Raster samples per logical pixel. Defaults to 1. */
@@ -276,6 +300,7 @@ export function bakeSlot(
   bold: boolean,
   chars: number[],
   rasterDensity = 1,
+  rasterAdvances = false,
 ): BakedAtlas {
   rasterDensity = checkedRasterDensity(rasterDensity);
   const upm = font.unitsPerEm;
@@ -307,7 +332,7 @@ export function bakeSlot(
     const gi = font.charToGlyphIndex(ch);
     if (gi <= 0) continue;
     const glyph = font.glyphs.get(gi);
-    const advance = Math.max(0, Math.min(255, Math.round((glyph.advanceWidth ?? 0) * scale)));
+    const advance = Math.max(0, Math.min(255, (rasterAdvances ? Math.round((glyph.advanceWidth ?? 0) * scale * rasterDensity) / rasterDensity : Math.round((glyph.advanceWidth ?? 0) * scale))));
     const path = glyph.getPath(0, baseline, px);
     // Keep every metric byte-for-byte equivalent to the density-1 bake. The
     // higher-density contour gets more curve subdivisions, then is scaled into
@@ -349,12 +374,13 @@ export function bakeSlot(
   if (!Number.isSafeInteger(coverageBytes)) {
     throw new RangeError("PocketJS bake-font: atlas coverage is too large");
   }
-  const size = FONT_HEADER_SIZE + glyphCount * FONT_CMAP_ENTRY_SIZE + coverageBytes;
+  const cmapEntrySize = rasterAdvances ? FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE : FONT_CMAP_ENTRY_SIZE;
+  const size = FONT_HEADER_SIZE + glyphCount * cmapEntrySize + coverageBytes;
   const out = new Uint8Array(size);
   const dv = new DataView(out.buffer);
 
   dv.setUint32(0, FONT_MAGIC, true);
-  dv.setUint16(4, FONT_VERSION, true);
+  dv.setUint16(4, rasterAdvances ? FONT_RASTER_ADVANCE_VERSION : FONT_VERSION, true);
   dv.setUint16(6, glyphCount, true);
   out[8] = cellW;
   out[9] = cellH;
@@ -382,13 +408,14 @@ export function bakeSlot(
   for (const e of entries) {
     dv.setUint32(o, e.cp, true);
     dv.setUint16(o + 4, e.gid, true);
-    out[o + 6] = e.advance;
+    out[o + 6] = Math.round(e.advance);
+    if (rasterAdvances) dv.setFloat32(o + 8, e.advance, true);
     out[o + 7] = e.xoff; // left-side-bearing shift (spec.ts cmap byte +7)
-    o += FONT_CMAP_ENTRY_SIZE;
+    o += cmapEntrySize;
   }
 
   // coverage region, indexed by gid
-  const coverageOff = FONT_HEADER_SIZE + glyphCount * FONT_CMAP_ENTRY_SIZE;
+  const coverageOff = FONT_HEADER_SIZE + glyphCount * cmapEntrySize;
   const cellBytes = coverageH * coverageW;
   out.set(tofuCoverage, coverageOff); // gid 0
   glyphs.forEach((g, i) => {
@@ -426,10 +453,20 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
     bold: null,
     mono: null,
   };
+  const resources = validateFontSlots(opts.fontSlots ?? []);
+  const resourceMap = new Map(resources.map(resource => [resource.slot, resource]));
+  const loadedResources = new Map<string, Font>();
   const results: BakedAtlas[] = [];
-  for (const slot of [...opts.slots].sort((a, b) => a - b)) {
+  for (const slot of [...new Set([...opts.slots, ...resourceMap.keys()])].sort((a, b) => a - b)) {
     if (slot < 0 || slot >= MAX_FONT_SLOTS) {
       throw new Error(`PocketJS bake-font: slot ${slot} out of range (0..${MAX_FONT_SLOTS - 1})`);
+    }
+    const resource = resourceMap.get(slot);
+    if (resource) {
+      let font = loadedResources.get(resource.path);
+      if (!font) { font = await loadFont(resource.path); loadedResources.set(resource.path, font); }
+      results.push(bakeSlot(font, slot, resource.px, resource.bold ?? false, chars, rasterDensity, resource.rasterAdvances ?? false));
+      continue;
     }
     const { px, bold, mono } = fontSlotInfo(slot);
     const key = mono ? "mono" : bold ? "bold" : "regular";

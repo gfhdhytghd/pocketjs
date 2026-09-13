@@ -5002,3 +5002,25 @@ fn subpixel_glyph_damage_clears_previous_fractional_and_negative_cells() {
         assert_eq!(incremental, full, "damage lost fractional cell at ({x}, {y})");
     }
 }
+
+
+#[test]
+fn atlas_v4_uses_fractional_advances_and_rejects_invalid_metrics() {
+    let legacy = encode_atlas(0, 8, 8, 7, 8, 1, &[('A' as u32, 0, 8)]);
+    let mut bytes = legacy[..24].to_vec();
+    bytes[4..6].copy_from_slice(&4u16.to_le_bytes());
+    bytes[12] = 33;
+    bytes.extend_from_slice(&8.5f32.to_le_bytes());
+    bytes.extend_from_slice(&legacy[24..]);
+    let mut ui = Ui::new();
+    assert!(ui.load_font_atlas(&bytes));
+    assert_eq!(ui.measure_text("AAA", 33), 25.5);
+    assert_eq!(ui.font_atlas(33).unwrap().lookup_entry('A' as u32).unwrap().advance_px, 8.5);
+    assert_eq!(ui.font_atlas(33).unwrap().glyph_rows(0), &legacy[24..]);
+    for advance in [f32::NAN, f32::INFINITY, -0.5, 256.0] {
+        bytes[24..28].copy_from_slice(&advance.to_le_bytes());
+        assert!(!ui.load_font_atlas(&bytes));
+    }
+    bytes[24..28].copy_from_slice(&8.5f32.to_le_bytes());
+    assert!(!ui.load_font_atlas(&bytes[..bytes.len()-1]));
+}

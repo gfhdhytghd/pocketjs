@@ -77,6 +77,8 @@ import {
   FONT_HEADER_SIZE,
   FONT_MAGIC,
   FONT_VERSION,
+  FONT_RASTER_ADVANCE_VERSION,
+  FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE,
   ID_SLOT_BITS,
   ID_SLOT_MASK,
   LAYOUT_DIRTYING,
@@ -421,8 +423,10 @@ export function generateRust(): string {
   put("pub mod font_atlas {");
   put(`    pub const MAGIC: u32 = ${hex(FONT_MAGIC)}; // 'DCFA' LE`);
   put(`    pub const VERSION: u16 = ${FONT_VERSION};`);
+  put(`    pub const RASTER_ADVANCE_VERSION: u16 = ${FONT_RASTER_ADVANCE_VERSION};`);
   put(`    pub const HEADER_SIZE: usize = ${FONT_HEADER_SIZE};`);
   put(`    pub const CMAP_ENTRY_SIZE: usize = ${FONT_CMAP_ENTRY_SIZE};`);
+  put(`    pub const RASTER_ADVANCE_CMAP_ENTRY_SIZE: usize = ${FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE};`);
   put(`    pub const FLAG_BOLD: u8 = ${FONT_FLAG_BOLD};`);
   put("}");
   put("");

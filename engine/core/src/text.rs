@@ -36,6 +36,8 @@ pub struct CmapEntry {
     pub gid: u16,
     /// Logical px advance; independent of atlas raster density.
     pub advance: u8,
+    /// Fractional logical advance (v4); v2/v3 use the integer advance above.
+    pub advance_px: f32,
     /// Left-side-bearing shift (cmap byte +7): logical px the outline was shifted
     /// RIGHT at bake so negative-LSB ink stays inside the cell. The cell is
     /// placed at penX - xoff when drawing.
@@ -76,7 +78,7 @@ impl Atlas {
         // per logical pixel. Keep loading it so old packs remain usable.
         let raster_density = if version == 2 {
             1
-        } else if version == fa::VERSION {
+        } else if version == fa::VERSION || version == fa::RASTER_ADVANCE_VERSION {
             let density = *bytes.get(14)?;
             if density == 0 {
                 return None;
@@ -96,8 +98,9 @@ impl Atlas {
             return None;
         }
         let cmap_off = fa::HEADER_SIZE;
+        let cmap_entry_size = if version == fa::RASTER_ADVANCE_VERSION { fa::RASTER_ADVANCE_CMAP_ENTRY_SIZE } else { fa::CMAP_ENTRY_SIZE };
         let bitmap_off = (glyph_count as usize)
-            .checked_mul(fa::CMAP_ENTRY_SIZE)?
+            .checked_mul(cmap_entry_size)?
             .checked_add(cmap_off)?;
         let coverage_w = (cell_w as usize).checked_mul(raster_density as usize)?;
         let coverage_h = (cell_h as usize).checked_mul(raster_density as usize)?;
@@ -110,15 +113,20 @@ impl Atlas {
         }
         let mut cmap = Vec::with_capacity(glyph_count as usize);
         for i in 0..glyph_count as usize {
-            let o = cmap_off + i * fa::CMAP_ENTRY_SIZE;
+            let o = cmap_off + i * cmap_entry_size;
             let gid = rd_u16(bytes, o + 4)?;
             if gid >= glyph_count {
                 return None;
             }
+            let advance_px = if version == fa::RASTER_ADVANCE_VERSION {
+                f32::from_bits(rd_u32(bytes, o + 8)?)
+            } else { *bytes.get(o + 6)? as f32 };
+            if !advance_px.is_finite() || !(0.0..=255.0).contains(&advance_px) { return None; }
             cmap.push(CmapEntry {
                 codepoint: rd_u32(bytes, o)?,
                 gid,
                 advance: *bytes.get(o + 6)?,
+                advance_px,
                 xoff: *bytes.get(o + 7)?,
             });
         }
@@ -292,7 +300,7 @@ impl Fonts {
     /// cell width advance) and bumps the miss counter.
     fn glyph(&self, atlas: &Atlas, cp: u32) -> (u16, f32, f32) {
         match atlas.lookup_entry(cp) {
-            Some(e) => (e.gid, e.advance as f32, e.xoff as f32),
+            Some(e) => (e.gid, e.advance_px, e.xoff as f32),
             None => {
                 self.misses.set(self.misses.get().wrapping_add(1));
                 (0, atlas.cell_w as f32, 0.0)

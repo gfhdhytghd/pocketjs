@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parse as parseFont } from "opentype.js";
-import { bakeSlot, DEFAULT_REGULAR } from "../framework/compiler/bake-font.ts";
+import { bakeAtlases, validateFontSlots, bakeSlot, DEFAULT_REGULAR } from "../framework/compiler/bake-font.ts";
 import {
   FONT_CMAP_ENTRY_SIZE,
   FONT_HEADER_SIZE,
@@ -175,5 +175,38 @@ describe("fill rule", () => {
       return atlas.coverageH;
     };
     expect(topInk(h)).toBeLessThan(topInk(n));
+  });
+});
+
+
+describe("application font resources", () => {
+  test("v4 stores physical-grid advances without altering legacy v3 coverage", () => {
+    const precise = bakeSlot(font, 33, 14, false, codepoints, 2, true);
+    const legacy = bakeSlot(font, 0, 14, false, codepoints, 2);
+    const view = new DataView(precise.bytes.buffer);
+    expect(view.getUint16(4, true)).toBe(4);
+    expect(precise.bytes[12]).toBe(33);
+    for (let i = 0; i < precise.glyphCount; i++) {
+      const at = FONT_HEADER_SIZE + i * 12;
+      const cp = view.getUint32(at, true);
+      if (cp === 0xfffd) continue;
+      const glyph = font.glyphs.get(font.charToGlyphIndex(String.fromCodePoint(cp)));
+      const expected = Math.round((glyph.advanceWidth ?? 0) * 14 / font.unitsPerEm * 2) / 2;
+      expect(view.getFloat32(at + 8, true)).toBe(expected);
+    }
+    expect(precise.bytes.slice(FONT_HEADER_SIZE + precise.glyphCount * 12))
+      .toEqual(legacy.bytes.slice(FONT_HEADER_SIZE + legacy.glyphCount * FONT_CMAP_ENTRY_SIZE));
+  });
+  test("explicit resources bake even when not found by the class scanner", async () => {
+    const fonts = await bakeAtlases({codepoints:[65],slots:[0],fontSlots:[{slot:37,px:21.7,path:DEFAULT_REGULAR,rasterAdvances:true}],rasterDensity:2});
+    expect(fonts.map(a => a.slot)).toEqual([0,37]);
+    expect(fonts[1].px).toBe(21.7);
+    expect(new DataView(fonts[1].bytes.buffer).getUint16(4,true)).toBe(4);
+    expect(new DataView(fonts[0].bytes.buffer).getUint16(4,true)).toBe(3);
+  });
+  test("rejects reserved, duplicate, invalid and out-of-range custom resources", () => {
+    const good = {slot:33,px:14,path:DEFAULT_REGULAR};
+    for (const value of [null,{},[{...good,slot:2}],[good,good],[{...good,slot:64}],[{...good,px:NaN}],[{...good,px:129}],[{...good,rasterAdvances:"true"}]])
+      expect(() => validateFontSlots(value)).toThrow();
   });
 });

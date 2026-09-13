@@ -900,7 +900,7 @@ export const WIRE_MARK_FLAG_ENDED = 1 << 0;
 
 // 0..6 regular / 7..13 bold (FONT_PX sizes), 14/15 the 54 px display pair,
 // 16..18 monospace regular (12/14/16 px — `font-mono`, code spans).
-export const MAX_FONT_SLOTS = 29;
+export const MAX_FONT_SLOTS = 64;
 
 // ---------------------------------------------------------------------------
 // STYLE TABLE binary format — styles.bin  (version 2)
@@ -1347,10 +1347,18 @@ export function decodeStyleTable(bytes: Uint8Array): DecodedStyleTable {
 // logical layout metrics so a 2x target can sharpen text without relayout.
 
 export const FONT_MAGIC = 0x41464344; // 'DCFA' LE
+// Version 4 retains the header and first 8 cmap bytes, then stores an f32
+// logical advance at cmap +8 (12-byte entries). This can preserve a physical
+// pixel advance divided by raster density. Coverage follows the expanded
+// cmap. Versions 2/3 retain their original integer metrics and byte layout.
+// Slots 33..63 may be explicitly bound to application font resources.
+
 export const FONT_VERSION = 3;
 export const FONT_HEADER_SIZE = 16;
+export const FONT_RASTER_ADVANCE_VERSION = 4;
 export const FONT_CMAP_ENTRY_SIZE = 8;
 export const FONT_FLAG_BOLD = 1 << 0;
+export const FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE = 12;
 
 // ---------------------------------------------------------------------------
 // DRAWLIST op format  (core -> backend)
