@@ -19,6 +19,7 @@
 //   --no-config                  ignore pocket.config.ts
 //   --extra-chars=<string>       force extra codepoints into every atlas
 //   --density=<integer>          low-level target sampling density (default 1)
+//   --font-slots-json=<json>     explicit application font resources in slots 33..63
 //   --font-regular=<path>        override the regular font source
 //   --font-bold=<path>           override the bold font source
 //   --outdir=<path>              write <app>.js/.pak here instead of dist/
@@ -43,7 +44,7 @@ import type { PocketConfig } from "../framework/src/config.ts";
 import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { registerAnimationTheme, setAnimationTickRate } from "../framework/compiler/animation.ts";
 import { compileClasses, generateStylesModule } from "../framework/compiler/tailwind.ts";
-import { bakeAtlases, DEFAULT_REGULAR, DEFAULT_BOLD, DEFAULT_MONO, type BakedAtlas } from "../framework/compiler/bake-font.ts";
+import { bakeAtlases, DEFAULT_REGULAR, DEFAULT_BOLD, DEFAULT_MONO, type BakedAtlas, type FontSlotResource, validateFontSlots } from "../framework/compiler/bake-font.ts";
 import { bakeSvg } from "../framework/compiler/bake-svg.ts";
 import {
   assertDensityVariantDimensions,
@@ -81,6 +82,7 @@ const args = process.argv.slice(2);
 let extraChars = "";
 let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
+let fontSlots: FontSlotResource[] = [];
 let appArg = "";
 let frameworkFlag: string | undefined;
 let configPath = join(ROOT, "pocket.config.ts");
@@ -93,6 +95,7 @@ let projectRoot = process.cwd();
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
+  else if (a.startsWith("--font-slots-json=")) fontSlots = validateFontSlots(JSON.parse(a.slice("--font-slots-json=".length)));
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
   else if (a.startsWith("--config=")) { configPath = resolvePath(ROOT, a.slice("--config=".length)); configFlagged = true; }
@@ -299,7 +302,9 @@ if (styles.records.length === 0) {
   console.warn("  tailwind: no class literals compiled — is the app unstyled?");
 }
 const generatedPath = join(ROOT, "framework/src/styles.generated.ts");
-const generatedStyles = generateStylesModule(styles);
+const generatedStyles = generateStylesModule(styles) + "\n" + fontSlots.map(resource =>
+  `FONT_SLOTS[${resource.slot}] = { px: ${resource.px}, bold: ${resource.bold ?? false} };`).join("\n");
+const allFontSlots = [...new Set([...styles.usedFontSlots, ...fontSlots.map(resource => resource.slot)])].sort((a, b) => a - b);
 // Keep the ignored mirror for docs/site tooling and human inspection. Pass 2
 // receives this build's source directly through jsxPlugin, so concurrent
 // targets can never import another build's transient STYLE_IDS table.
@@ -317,16 +322,18 @@ const fontCacheKey = createHash("sha256")
   .update(readFileSync(join(ROOT, "contracts/spec/spec.ts")))
   .update(readFileSync(join(ROOT, "bun.lock")))
   .update(readFileSync(DEFAULT_MONO))
-  .update(JSON.stringify({ codepoints: [...codepoints].sort((a, b) => a - b), slots: [...styles.usedFontSlots].sort((a, b) => a - b), extraChars, rasterDensity, regular: regularFontPath ?? DEFAULT_REGULAR, bold: boldFontPath ?? DEFAULT_BOLD, mono: DEFAULT_MONO }))
+  .update(JSON.stringify({ codepoints: [...codepoints].sort((a, b) => a - b), slots: allFontSlots, extraChars, rasterDensity, regular: regularFontPath ?? DEFAULT_REGULAR, bold: boldFontPath ?? DEFAULT_BOLD, mono: DEFAULT_MONO }))
   .update(readFileSync(regularFontPath ?? DEFAULT_REGULAR))
   .update(readFileSync(boldFontPath ?? DEFAULT_BOLD))
+  .update(JSON.stringify(fontSlots.map(resource => ({...resource,
+    digest: createHash("sha256").update(readFileSync(resource.path)).digest("hex")}))))
   .digest("hex");
 const fontCachePath = join(fontCacheDir, `${fontCacheKey}.json`);
 let atlases: BakedAtlas[] | undefined;
 if (existsSync(fontCachePath)) {
   try {
     const cached = JSON.parse(readFileSync(fontCachePath, "utf8")) as { version?: number; slots?: number[]; atlases?: Array<Omit<BakedAtlas, "bytes"> & { bytes: string; digest: string }> };
-    const expectedSlots = [...styles.usedFontSlots].sort((a, b) => a - b);
+    const expectedSlots = allFontSlots;
     const records = cached?.atlases;
     const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
     const valid = cached?.version === 1 && Array.isArray(cached.slots) && JSON.stringify(cached.slots) === JSON.stringify(expectedSlots)
@@ -345,11 +352,11 @@ if (existsSync(fontCachePath)) {
   } catch { /* a truncated cache entry is simply rebuilt */ }
 }
 if (!atlases) {
-  atlases = await bakeAtlases({ codepoints, slots: styles.usedFontSlots, extraChars, rasterDensity, regularTtf: regularFontPath, boldTtf: boldFontPath });
+  atlases = await bakeAtlases({ codepoints, slots: styles.usedFontSlots, fontSlots, extraChars, rasterDensity, regularTtf: regularFontPath, boldTtf: boldFontPath });
   mkdirSync(fontCacheDir, { recursive: true });
   const temp = `${fontCachePath}.tmp-${process.pid}-${Date.now()}`;
   const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-  await Bun.write(temp, JSON.stringify({ version: 1, slots: [...styles.usedFontSlots].sort((a, b) => a - b), atlases: atlases.map(a => ({ ...a, bytes: Buffer.from(a.bytes).toString("base64"), digest: digest(a.bytes) })) }));
+  await Bun.write(temp, JSON.stringify({ version: 1, slots: allFontSlots, atlases: atlases.map(a => ({ ...a, bytes: Buffer.from(a.bytes).toString("base64"), digest: digest(a.bytes) })) }));
   try { renameSync(temp, fontCachePath); } catch { try { await Bun.file(temp).delete(); } catch {} }
 }
 for (const a of atlases) {
