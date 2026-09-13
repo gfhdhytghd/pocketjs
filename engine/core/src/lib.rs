@@ -264,6 +264,7 @@ pub struct Ui {
     /// commands ROUNDED_CLIP (op 11) and GLYPH_RUN_XFORM (op 12). Default-off
     /// keeps legacy fixed-function consumers on their original command set.
     rounded_clip_supported: bool,
+    subpixel_glyphs_supported: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
     focused: i32,
@@ -351,6 +352,7 @@ impl Ui {
             discs: draw::DiscCache::new(),
             raster_density,
             rounded_clip_supported: false,
+            subpixel_glyphs_supported: false,
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
@@ -381,6 +383,21 @@ impl Ui {
     /// rectangular overflow scissors and upright transformed glyph cells.
     pub fn set_rounded_clip_supported(&mut self, supported: bool) {
         self.rounded_clip_supported = supported;
+    }
+
+    /// Opt into GLYPH_RUN_F32 (op 13). The host decoder must support float
+    /// cell axes and anchors; default-off preserves existing wire formats.
+    pub fn set_subpixel_glyphs_supported(&mut self, supported: bool) {
+        self.subpixel_glyphs_supported = supported;
+    }
+
+    /// Preserve fractional logical layout coordinates for high-density hosts.
+    /// Default-off retains integer layout on existing targets.
+    pub fn set_fractional_layout(&mut self, enabled: bool) {
+        self.layout.set_fractional(enabled);
+        if let Some(surface) = self.auxiliary.as_mut() {
+            surface.layout.set_fractional(enabled);
+        }
     }
 
     /// Declare how many `tick()` calls make one second of virtual time
@@ -458,6 +475,7 @@ impl Ui {
         }
         let mut surface_layout = layout::LayoutEngine::new();
         surface_layout.viewport = (width, height);
+        surface_layout.set_fractional(self.layout.fractional);
         self.auxiliary = Some(AuxiliarySurface {
             root,
             layout: surface_layout,
@@ -853,6 +871,10 @@ impl Ui {
                 x if x == spec::draw_op::GLYPH_RUN_XFORM => {
                     let Some(meta) = words.get(i + 1) else { break };
                     5 + 2 * ((*meta >> 16) as usize)
+                }
+                x if x == spec::draw_op::GLYPH_RUN_F32 => {
+                    let Some(meta) = words.get(i + 1) else { break };
+                    7 + 3 * ((*meta >> 16) as usize)
                 }
                 x if x == spec::draw_op::TEX_QUAD => 9,
                 x if x == spec::draw_op::SCISSOR => 3,
@@ -1427,6 +1449,7 @@ impl Ui {
             &mut self.discs,
             self.raster_density,
             self.rounded_clip_supported,
+            self.subpixel_glyphs_supported,
             &mut self.draw_list,
             self.inspect_id,
             self.inspect_drawn,
@@ -1455,6 +1478,7 @@ impl Ui {
                 &mut self.discs,
                 self.raster_density,
                 self.rounded_clip_supported,
+            self.subpixel_glyphs_supported,
                 &mut self.draw_list,
                 self.inspect_id,
                 self.inspect_drawn,
@@ -1508,6 +1532,7 @@ impl Ui {
             &mut self.discs,
             self.raster_density,
             self.rounded_clip_supported,
+            self.subpixel_glyphs_supported,
             &mut auxiliary.draw_list,
             self.inspect_id,
             auxiliary.inspect_drawn,
@@ -1536,6 +1561,7 @@ impl Ui {
                 &mut self.discs,
                 self.raster_density,
                 self.rounded_clip_supported,
+            self.subpixel_glyphs_supported,
                 &mut auxiliary.draw_list,
                 self.inspect_id,
                 auxiliary.inspect_drawn,
