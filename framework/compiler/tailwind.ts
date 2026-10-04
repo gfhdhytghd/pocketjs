@@ -50,13 +50,16 @@ const MONO_SLOT_BASE = 16;
 const EXTRA_FONT_PX = [9, 11, 13, 17, 21] as const;
 const EXTRA_REGULAR_SLOT = 19;
 const EXTRA_BOLD_SLOT = 24;
+const CHART_FONT_PX = [8, 23] as const;
+const CHART_REGULAR_SLOT = 29;
+const CHART_BOLD_SLOT = 31;
 const TEXT_SIZE_PX: Record<string, number> = {
   xs: 12, sm: 14, base: 16, lg: 18, xl: 20, "2xl": 24, "4xl": 36, "5xl": 54,
-  "[9px]": 9, "[11px]": 11, "[13px]": 13, "[17px]": 17, "[21px]": 21,
+  "[8px]": 8, "[23px]": 23, "[9px]": 9, "[11px]": 11, "[13px]": 13, "[17px]": 17, "[21px]": 21,
 };
 
 /** Slot index for a (px, weight, family) triple. Legacy indices stay fixed;
- * appended exact sizes use 19..23 regular and 24..28 bold. */
+ * appended exact sizes use 19..23 regular and 24..28 bold; 8/23px use 29..32. */
 export function fontSlotFor(px: number, bold: boolean, mono = false): number {
   if (mono) {
     const i = (MONO_FONT_PX as readonly number[]).indexOf(px);
@@ -66,6 +69,8 @@ export function fontSlotFor(px: number, bold: boolean, mono = false): number {
   if (px === LARGE_FONT_PX) {
     return bold ? LARGE_FONT_BOLD_SLOT : LARGE_FONT_REGULAR_SLOT;
   }
+  const chart = (CHART_FONT_PX as readonly number[]).indexOf(px);
+  if (chart >= 0) return (bold ? CHART_BOLD_SLOT : CHART_REGULAR_SLOT) + chart;
   const i = (FONT_PX as readonly number[]).indexOf(px);
   if (i < 0) {
     const extra = (EXTRA_FONT_PX as readonly number[]).indexOf(px);
@@ -77,6 +82,12 @@ export function fontSlotFor(px: number, bold: boolean, mono = false): number {
 
 /** (px, bold, mono) for a slot index — inverse of fontSlotFor. */
 export function fontSlotInfo(slot: number): { px: number; bold: boolean; mono: boolean } {
+  if (slot >= CHART_REGULAR_SLOT) {
+      const bold = slot >= CHART_BOLD_SLOT;
+      const px = CHART_FONT_PX[slot - (bold ? CHART_BOLD_SLOT : CHART_REGULAR_SLOT)];
+      if (px === undefined) throw new Error(`PocketJS tailwind: bad font slot ${slot}`);
+      return { px, bold, mono: false };
+  }
   if (slot >= EXTRA_BOLD_SLOT) {
       const px = EXTRA_FONT_PX[slot - EXTRA_BOLD_SLOT];
       if (px === undefined) throw new Error(`PocketJS tailwind: bad font slot ${slot}`);

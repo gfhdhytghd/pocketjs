@@ -265,6 +265,7 @@ pub struct Ui {
     /// keeps legacy fixed-function consumers on their original command set.
     rounded_clip_supported: bool,
     subpixel_glyphs_supported: bool,
+    subpixel_images_supported: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
     focused: i32,
@@ -353,6 +354,7 @@ impl Ui {
             raster_density,
             rounded_clip_supported: false,
             subpixel_glyphs_supported: false,
+            subpixel_images_supported: false,
             raster_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
@@ -389,6 +391,11 @@ impl Ui {
     /// cell axes and anchors; default-off preserves existing wire formats.
     pub fn set_subpixel_glyphs_supported(&mut self, supported: bool) {
         self.subpixel_glyphs_supported = supported;
+    }
+
+    /// Opt into TEX_QUAD_F32 (op 14); only hosts with the additive decoder may enable it.
+    pub fn set_subpixel_images_supported(&mut self, supported: bool) {
+        self.subpixel_images_supported = supported;
     }
 
     /// Preserve fractional logical layout coordinates for high-density hosts.
@@ -794,6 +801,18 @@ impl Ui {
         true
     }
 
+    /// Replace a live RGBA8888 texture in place. Dimensions, format and handle
+    /// remain stable; rejected updates do not mutate pixels or revisions.
+    pub fn update_texture_rgba(&mut self, handle: i32, pixels: &[u8]) -> bool {
+        let Some(slot) = tex_resolve(&self.textures, handle) else { return false };
+        let Some(tex) = self.textures[slot as usize].tex.as_mut() else { return false };
+        if tex.psm != spec::psm::PSM_8888 || pixels.len() != tex.byte_len { return false; }
+        unsafe { core::ptr::copy_nonoverlapping(pixels.as_ptr(), tex.data.as_mut_ptr() as *mut u8, tex.byte_len); }
+        tex.revision = tex.revision.wrapping_add(1);
+        self.bump_raster_revision();
+        true
+    }
+
     /// Release a texture slot (spec op freeTexture): drop the pixels, bump
     /// the slot's generation so every outstanding copy of the handle goes
     /// stale (resolves to nothing, draws nothing), and push the slot on the
@@ -877,6 +896,7 @@ impl Ui {
                     7 + 3 * ((*meta >> 16) as usize)
                 }
                 x if x == spec::draw_op::TEX_QUAD => 9,
+                x if x == spec::draw_op::TEX_QUAD_F32 => 11,
                 x if x == spec::draw_op::SCISSOR => 3,
                 x if x == spec::draw_op::SCISSOR_POP => 1,
                 x if x == spec::draw_op::TRI => 7,
@@ -1450,6 +1470,7 @@ impl Ui {
             self.raster_density,
             self.rounded_clip_supported,
             self.subpixel_glyphs_supported,
+            self.subpixel_images_supported,
             &mut self.draw_list,
             self.inspect_id,
             self.inspect_drawn,
@@ -1479,6 +1500,7 @@ impl Ui {
                 self.raster_density,
                 self.rounded_clip_supported,
             self.subpixel_glyphs_supported,
+            self.subpixel_images_supported,
                 &mut self.draw_list,
                 self.inspect_id,
                 self.inspect_drawn,
@@ -1533,6 +1555,7 @@ impl Ui {
             self.raster_density,
             self.rounded_clip_supported,
             self.subpixel_glyphs_supported,
+            self.subpixel_images_supported,
             &mut auxiliary.draw_list,
             self.inspect_id,
             auxiliary.inspect_drawn,
@@ -1562,6 +1585,7 @@ impl Ui {
                 self.raster_density,
                 self.rounded_clip_supported,
             self.subpixel_glyphs_supported,
+            self.subpixel_images_supported,
                 &mut auxiliary.draw_list,
                 self.inspect_id,
                 auxiliary.inspect_drawn,

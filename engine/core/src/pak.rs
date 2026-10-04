@@ -11,9 +11,7 @@ pub struct PakEntry<'a> {
 #[derive(Clone)]
 pub struct PakEntries<'a> {
     pak: &'a [u8],
-    directory_offset: usize,
-    names_offset: usize,
-    count: usize,
+    directory: PakDirectory,
     index: usize,
 }
 
@@ -35,29 +33,63 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     ]))
 }
 
-pub fn entries(pak: &[u8]) -> PakEntries<'_> {
-    let valid =
-        read_u32(pak, 0) == Some(spec::pak::MAGIC) && read_u16(pak, 4) == Some(spec::pak::VERSION);
-    let (count, directory_offset, names_offset) = if valid {
-        match (read_u32(pak, 8), read_u32(pak, 12), read_u32(pak, 16)) {
-            (Some(count), Some(directory), Some(names)) => {
-                let directory = directory as usize;
-                let count = (count as usize)
-                    .min(pak.len().saturating_sub(directory) / spec::pak::ENTRY_SIZE);
-                (count, directory, names as usize)
+/// Shared directory/range decoder for borrowed and bounded-reader hosts.
+/// Invalid headers yield an empty directory; invalid entries are skipped.
+#[derive(Clone, Copy, Debug)]
+pub struct PakDirectory {
+    length: usize,
+    directory_offset: usize,
+    names_offset: usize,
+    count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakEntryRanges {
+    pub name: core::ops::Range<usize>,
+    pub blob: core::ops::Range<usize>,
+}
+
+impl PakDirectory {
+    /// Only the first 20 header bytes are inspected, matching the original
+    /// walker. Reserved fields, entry type, order and alignment are ignored.
+    pub fn new(header: &[u8], length: usize) -> Self {
+        let valid = read_u32(header, 0) == Some(spec::pak::MAGIC)
+            && read_u16(header, 4) == Some(spec::pak::VERSION);
+        let (count, directory_offset, names_offset) = if valid {
+            match (read_u32(header, 8), read_u32(header, 12), read_u32(header, 16)) {
+                (Some(count), Some(directory), Some(names)) => {
+                    let directory = directory as usize;
+                    let count = (count as usize)
+                        .min(length.saturating_sub(directory) / spec::pak::ENTRY_SIZE);
+                    (count, directory, names as usize)
+                }
+                _ => (0, 0, 0),
             }
-            _ => (0, 0, 0),
-        }
-    } else {
-        (0, 0, 0)
-    };
-    PakEntries {
-        pak,
-        directory_offset,
-        names_offset,
-        count,
-        index: 0,
+        } else {
+            (0, 0, 0)
+        };
+        Self { length, directory_offset, names_offset, count }
     }
+
+    pub fn len(&self) -> usize { self.count }
+    pub fn is_empty(&self) -> bool { self.count == 0 }
+
+    pub fn entry_offset(&self, index: usize) -> Option<usize> {
+        (index < self.count).then(|| self.directory_offset + index * spec::pak::ENTRY_SIZE)
+    }
+
+    pub fn entry_ranges(&self, entry: &[u8]) -> Option<PakEntryRanges> {
+        let blob_start = read_u32(entry, 4)? as usize;
+        let blob_end = blob_start.checked_add(read_u32(entry, 8)? as usize)?;
+        let name_start = self.names_offset.checked_add(read_u32(entry, 12)? as usize)?;
+        let name_end = name_start.checked_add(read_u16(entry, 16)? as usize)?;
+        if name_end > self.length || blob_end > self.length { return None; }
+        Some(PakEntryRanges { name: name_start..name_end, blob: blob_start..blob_end })
+    }
+}
+
+pub fn entries(pak: &[u8]) -> PakEntries<'_> {
+    PakEntries { pak, directory: PakDirectory::new(pak, pak.len()), index: 0 }
 }
 
 pub fn find<'a>(pak: &'a [u8], key: &str) -> Option<&'a [u8]> {
@@ -70,33 +102,12 @@ impl<'a> Iterator for PakEntries<'a> {
     type Item = PakEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.count {
-            let entry = self.directory_offset + self.index * spec::pak::ENTRY_SIZE;
+        while let Some(offset) = self.directory.entry_offset(self.index) {
             self.index += 1;
-            let (Some(blob_offset), Some(blob_length), Some(name_offset), Some(name_length)) = (
-                read_u32(self.pak, entry + 4),
-                read_u32(self.pak, entry + 8),
-                read_u32(self.pak, entry + 12),
-                read_u16(self.pak, entry + 16),
-            ) else {
-                continue;
-            };
-            let Some(name_start) = self.names_offset.checked_add(name_offset as usize) else {
-                continue;
-            };
-            let Some(name_end) = name_start.checked_add(name_length as usize) else {
-                continue;
-            };
-            let blob_start = blob_offset as usize;
-            let Some(blob_end) = blob_start.checked_add(blob_length as usize) else {
-                continue;
-            };
-            let (Some(name), Some(blob)) = (
-                self.pak.get(name_start..name_end),
-                self.pak.get(blob_start..blob_end),
-            ) else {
-                continue;
-            };
+            let entry = &self.pak[offset..offset + spec::pak::ENTRY_SIZE];
+            let Some(ranges) = self.directory.entry_ranges(entry) else { continue; };
+            let name = &self.pak[ranges.name];
+            let blob = &self.pak[ranges.blob];
             let Ok(key) = core::str::from_utf8(name) else {
                 continue;
             };

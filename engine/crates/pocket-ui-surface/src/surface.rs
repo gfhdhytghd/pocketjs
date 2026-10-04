@@ -99,6 +99,68 @@ fn should_retain_lazy_entry(key: &str) -> bool {
             || key.starts_with("ui:sprite."))
 }
 
+fn feed_entry(inner: &mut Inner, key: &str, blob: &[u8]) {
+    if should_retain_lazy_entry(key) {
+        inner.tile_paks.insert(key.to_string(), blob.to_vec());
+    } else if key == "ui:styles" {
+        if !inner.ui.load_styles(blob) {
+            log::warn!("pocket-ui: bad styles.bin in pak");
+        }
+    } else if key.starts_with("ui:font.") {
+        if !inner.ui.load_font_atlas(blob) {
+            log::warn!("pocket-ui: bad font atlas {}", key);
+        }
+    } else if let Some(name) = key.strip_prefix("ui:img.") {
+        // IMG entry: 8-byte header {u16 w, u16 h, u8 psm, 3B pad} + pixels.
+        let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
+            log::warn!("pocket-ui: bad image entry {}", key);
+            return;
+        };
+        let handle = inner.ui.upload_texture(pixels, w, h, psm);
+        if handle >= 0 {
+            let name = name.to_string();
+            inner.textures.push((name, handle));
+        } else {
+            log::warn!(
+                "pocket-ui: image {} rejected ({}x{} psm {})",
+                key,
+                w,
+                h,
+                psm
+            );
+        }
+    } else if let Some(name) = key.strip_prefix("ui:sprite.") {
+        // SPRITE entry: 16-byte header {u16 w, u16 h, u8 psm, u8 pad,
+        // u16 frames, u16 cols, u16 step, 4B pad} + atlas pixels.
+        let Some((w, h, psm, pixels)) = decode_pix_header(blob, 16) else {
+            log::warn!("pocket-ui: bad sprite entry {}", key);
+            return;
+        };
+        let (Some(frames), Some(cols), Some(step)) = (
+            rd_u16(blob, 6),
+            rd_u16(blob, 8),
+            rd_u16(blob, 10),
+        ) else {
+            return;
+        };
+        let handle = inner.ui.upload_texture(pixels, w, h, psm);
+        if handle >= 0 {
+            let name = name.to_string();
+            inner.sprites.push(SpriteReg {
+                name,
+                handle,
+                frames,
+                cols,
+                step,
+            });
+        } else {
+            log::warn!("pocket-ui: sprite {} rejected", key);
+        }
+    }
+    // Unknown keys are retained for the loadTileTexture compatibility
+    // path; custom TILESET names need not use the ui:tile prefix.
+}
+
 /// The `ui` surface. Clone-cheap handle; single-threaded like the guest.
 #[derive(Clone)]
 pub struct UiSurface {
@@ -191,66 +253,22 @@ impl UiSurface {
         let mut inner = self.inner.borrow_mut();
         inner.tile_paks.clear();
         for entry in walk_pak(pak) {
-            if should_retain_lazy_entry(entry.key) {
-                inner.tile_paks.insert(entry.key.to_string(), entry.blob.to_vec());
-            } else if entry.key == "ui:styles" {
-                if !inner.ui.load_styles(entry.blob) {
-                    log::warn!("pocket-ui: bad styles.bin in pak");
-                }
-            } else if entry.key.starts_with("ui:font.") {
-                if !inner.ui.load_font_atlas(entry.blob) {
-                    log::warn!("pocket-ui: bad font atlas {}", entry.key);
-                }
-            } else if let Some(name) = entry.key.strip_prefix("ui:img.") {
-                // IMG entry: 8-byte header {u16 w, u16 h, u8 psm, 3B pad} + pixels.
-                let Some((w, h, psm, pixels)) = decode_pix_header(entry.blob, 8) else {
-                    log::warn!("pocket-ui: bad image entry {}", entry.key);
-                    continue;
-                };
-                let handle = inner.ui.upload_texture(pixels, w, h, psm);
-                if handle >= 0 {
-                    let name = name.to_string();
-                    inner.textures.push((name, handle));
-                } else {
-                    log::warn!(
-                        "pocket-ui: image {} rejected ({}x{} psm {})",
-                        entry.key,
-                        w,
-                        h,
-                        psm
-                    );
-                }
-            } else if let Some(name) = entry.key.strip_prefix("ui:sprite.") {
-                // SPRITE entry: 16-byte header {u16 w, u16 h, u8 psm, u8 pad,
-                // u16 frames, u16 cols, u16 step, 4B pad} + atlas pixels.
-                let Some((w, h, psm, pixels)) = decode_pix_header(entry.blob, 16) else {
-                    log::warn!("pocket-ui: bad sprite entry {}", entry.key);
-                    continue;
-                };
-                let (Some(frames), Some(cols), Some(step)) = (
-                    rd_u16(entry.blob, 6),
-                    rd_u16(entry.blob, 8),
-                    rd_u16(entry.blob, 10),
-                ) else {
-                    continue;
-                };
-                let handle = inner.ui.upload_texture(pixels, w, h, psm);
-                if handle >= 0 {
-                    let name = name.to_string();
-                    inner.sprites.push(SpriteReg {
-                        name,
-                        handle,
-                        frames,
-                        cols,
-                        step,
-                    });
-                } else {
-                    log::warn!("pocket-ui: sprite {} rejected", entry.key);
-                }
-            }
-            // Unknown keys are retained for the loadTileTexture compatibility
-            // path; custom TILESET names need not use the ui:tile prefix.
+            feed_entry(&mut inner, entry.key, entry.blob);
         }
+    }
+
+    /// Same tolerant entry semantics as `feed_pak`, without holding the entire
+    /// pack in memory. The caller supplies an immutable, exact read-at source.
+    /// At most one entry blob is staged at a time. On IO failure the host must
+    /// discard the partially loaded runtime.
+    pub fn feed_pak_reader(
+        &self,
+        length: usize,
+        read_at: impl FnMut(usize, &mut [u8]) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.tile_paks.clear();
+        crate::pak::read_pak(length, read_at, |key, blob| feed_entry(&mut inner, key, blob))
     }
 
     /// Register an installed Pocket System package before [`mount`](Self::mount).
@@ -375,6 +393,19 @@ impl UiSurface {
                     ui.borrow_mut()
                         .ui
                         .upload_texture(bytes, w as u32, h as u32, psm as u32)
+                }
+            );
+
+            let ui = self.inner.clone();
+            op!(
+                "uploadTextureSampled",
+                move |buf: TypedArray<u8>, w: i32, h: i32, psm: i32, sampling: i32| {
+                    let Some(bytes) = buf.as_bytes() else {
+                        return -1;
+                    };
+                    if sampling != 0 && sampling != 1 { return -1; }
+                    let flags = if sampling == 1 { pocketjs_core::spec::img::FLAG_LINEAR } else { 0 };
+                    ui.borrow_mut().ui.upload_texture_flags(bytes, w as u32, h as u32, psm as u32, flags)
                 }
             );
 
@@ -655,6 +686,23 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_upload_preserves_linear_hint_and_rejects_invalid_sampling() {
+        let guest=Guest::new().unwrap();let surface=UiSurface::new((16.0,16.0));
+        surface.mount(&guest).unwrap();
+        guest.eval("sampled",r#"
+            const pixels=new Uint8Array([255,0,0,255]);
+            globalThis.nearest=ui.uploadTextureSampled(pixels,1,1,3,0);
+            globalThis.linear=ui.uploadTextureSampled(pixels,1,1,3,1);
+            globalThis.invalid=ui.uploadTextureSampled(pixels,1,1,3,2);
+        "#).unwrap();
+        let (nearest,linear,invalid):(i32,i32,i32)=guest.with(|ctx|(
+            ctx.globals().get("nearest").unwrap(),ctx.globals().get("linear").unwrap(),ctx.globals().get("invalid").unwrap()
+        ));
+        assert!(nearest>=0&&linear>=0);assert_eq!(invalid,-1);
+        surface.with_ui(|ui|{assert!(!ui.texture(nearest).unwrap().linear);assert!(ui.texture(linear).unwrap().linear);});
+    }
 
     #[test]
     fn guest_accessibility_metadata_is_retained_and_invalid_updates_are_atomic() {

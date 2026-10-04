@@ -208,7 +208,7 @@ fn decode_wh(word: u32) -> (i32, i32) {
 /// Walk a DrawList asserting the pinned CPU-clip invariant: every coordinate
 /// in [0, SCREEN_W] x [0, SCREEN_H], rect extents in range, scissors
 /// balanced, only known ops. Returns per-op counts (indexed by op code).
-fn validate_drawlist(words: &[u32]) -> [u32; 14] {
+fn validate_drawlist(words: &[u32]) -> [u32; 15] {
     let (sw, sh) = (spec::SCREEN_W as i32, spec::SCREEN_H as i32);
     let xy_ok = |w: u32| {
         let (x, y) = decode_xy(w);
@@ -226,7 +226,7 @@ fn validate_drawlist(words: &[u32]) -> [u32; 14] {
             "rect exceeds screen: {x},{y} {w}x{h}"
         );
     };
-    let mut counts = [0u32; 14];
+    let mut counts = [0u32; 15];
     let mut depth = 0i32;
     let mut i = 0usize;
     while i < words.len() {
@@ -283,6 +283,12 @@ fn validate_drawlist(words: &[u32]) -> [u32; 14] {
                     assert!(f32::from_bits(glyph[1]).is_finite());
                 }
                 i += 7 + 3 * n;
+            }
+            spec::draw_op::TEX_QUAD_F32 => {
+                let values=[words[i+2],words[i+3],words[i+4],words[i+5]].map(f32::from_bits);
+                assert!(values.iter().all(|v|v.is_finite()));
+                assert!(values[0]>=0.0&&values[1]>=0.0&&values[2]<=sw as f32&&values[3]<=sh as f32);
+                assert!(values[2]>values[0]&&values[3]>values[1]);i+=11;
             }
             spec::draw_op::TEX_QUAD => {
                 rect_ok(words[i + 2], words[i + 3]);
@@ -398,6 +404,7 @@ fn tex_tri_runs(words: &[u32]) -> Vec<(u32, usize)> {
                 previous_was_tex_tri = false;
                 i += 7 + 3 * ((words[i + 1] >> 16) as usize);
             }
+            spec::draw_op::TEX_QUAD_F32 => { previous_was_tex_tri=false;i+=11; }
             spec::draw_op::TEX_QUAD => {
                 previous_was_tex_tri = false;
                 i += 9;
@@ -1049,6 +1056,38 @@ fn scaled_flat_rounded_box_has_no_gaps_between_fast_path_pieces() {
             &[0, 0, 0],
             "rounded-box fast-path pieces left a black gap at ({x},{y})",
         );
+    }
+}
+
+#[test]
+fn odd_size_rounded_boxes_do_not_paint_outside_layout_bounds() {
+    for density in [1, 2] {
+        for (width, height) in [(13, 13), (30, 17), (17, 30)] {
+            let mut ui = Ui::new_with_raster_density(density);
+            let n = ui.create_node(0);
+            ui.set_prop(n, spec::prop::WIDTH, width as f64);
+            ui.set_prop(n, spec::prop::HEIGHT, height as f64);
+            ui.set_prop(n, spec::prop::POS_TYPE, spec::PosType::Absolute as u32 as f64);
+            ui.set_prop(n, spec::prop::INSET_T, 10.0);
+            ui.set_prop(n, spec::prop::INSET_L, 10.0);
+            ui.set_prop(n, spec::prop::RADIUS, 9999.0);
+            ui.set_prop(n, spec::prop::BG_COLOR, abgr(229, 77, 77, 255) as f64);
+            ui.insert_before(spec::ROOT_ID, n, 0);
+            ui.tick();
+            let words = ui.draw().words.clone();
+            let mut framebuffer = alloc::vec![0u8; spec::SCREEN_W as usize * spec::SCREEN_H as usize * 4];
+            crate::raster::render(&ui, &words, &mut framebuffer);
+            let center = ((10 + height / 2) * spec::SCREEN_W as usize + 10 + width / 2) * 4;
+            assert_ne!(&framebuffer[center..center + 3], &[0, 0, 0]);
+            for y in 0..45 {
+                for x in 0..45 {
+                    if x >= 10 && x < 10 + width && y >= 10 && y < 10 + height { continue; }
+                    let offset = (y * spec::SCREEN_W as usize + x) * 4;
+                    assert_eq!(&framebuffer[offset..offset + 3], &[0, 0, 0],
+                        "{width}x{height} rounded box at density {density} overflowed at ({x},{y})");
+                }
+            }
+        }
     }
 }
 
@@ -5023,4 +5062,42 @@ fn atlas_v4_uses_fractional_advances_and_rejects_invalid_metrics() {
     }
     bytes[24..28].copy_from_slice(&8.5f32.to_le_bytes());
     assert!(!ui.load_font_atlas(&bytes[..bytes.len()-1]));
+}
+
+#[test]
+fn subpixel_images_keep_physical_origin_and_clipped_uvs_without_legacy_opt_in() {
+    for precise in [false,true] {
+        let mut ui=Ui::new();ui.set_fractional_layout(true);ui.set_subpixel_images_supported(precise);
+        let texture=ui.upload_texture(&[255u8;8*8*4],8,8,spec::psm::PSM_8888);
+        let image=ui.create_node(spec::NodeType::Image as u8);ui.set_image(image,texture);
+        for (prop,value) in [(spec::prop::POS_TYPE,spec::PosType::Absolute as u32 as f64),(spec::prop::WIDTH,8.0),(spec::prop::HEIGHT,8.0),(spec::prop::INSET_L,10.5),(spec::prop::INSET_T,14.5)]{ui.set_prop(image,prop,value);}
+        ui.insert_before(spec::ROOT_ID,image,0);ui.tick();let words=ui.draw().words.clone();let counts=validate_drawlist(&words);
+        assert_eq!(counts[spec::draw_op::TEX_QUAD_F32 as usize],precise as u32);
+        let width=spec::SCREEN_W as usize*2;let mut pixels=alloc::vec![0;width*spec::SCREEN_H as usize*2*4];crate::raster::render_scaled(&ui,&words,&mut pixels,2);
+        let first=pixels.chunks_exact(4).position(|p|p[0]!=0).unwrap();assert_eq!((first%width,first/width),if precise{(21,29)}else{(22,30)});
+        assert_eq!(pixels.chunks_exact(4).filter(|p|p[0]!=0).count(),256);
+        ui.set_prop(image,spec::prop::INSET_L,-0.5);ui.tick();let words=ui.draw().words.clone();validate_drawlist(&words);
+        if precise {let i=words.iter().position(|w|*w==spec::draw_op::TEX_QUAD_F32).unwrap();assert_eq!(f32::from_bits(words[i+2]),0.0);assert_eq!(f32::from_bits(words[i+6]),0.0625);}
+    }
+}
+
+#[test]
+fn subpixel_image_damage_clears_prior_fractional_bounds() {
+    let mut ui=Ui::new();ui.set_viewport(32.0,32.0);let tex=ui.upload_texture(&[255u8;4*4*4],4,4,spec::psm::PSM_8888);
+    let mut tracker=crate::damage::DamageTracker::<8>::new();let mut incremental=alloc::vec![0;64*64*4];
+    for x in [1.5f32,2.0,-0.5] {
+        let words=[spec::draw_op::TEX_QUAD_F32,tex as u32,x.to_bits(),1.5f32.to_bits(),(x+4.0).to_bits(),5.5f32.to_bits(),0,0,1f32.to_bits(),1f32.to_bits(),0xffffffff];
+        crate::raster::render_scaled_incremental(&ui,&words,&mut incremental,2,&mut tracker,crate::damage::DamagePolicy::default()).unwrap();
+        let mut full=alloc::vec![0;incremental.len()];crate::raster::render_scaled(&ui,&words,&mut full,2);assert_eq!(incremental,full);
+    }
+}
+
+#[test]
+fn rgba_frame_updates_preserve_handles_and_reject_stale_or_malformed_writes() {
+    let mut ui=Ui::new();let original=[1,2,3,255];let handle=ui.upload_texture(&original,1,1,spec::psm::PSM_8888);
+    let revision=ui.raster_revision();assert!(ui.update_texture_rgba(handle,&[9,8,7,255]));
+    assert_eq!(ui.texture(handle).unwrap().pixels,&[9,8,7,255]);assert_eq!(ui.texture_revision(handle),Some(1));assert_ne!(ui.raster_revision(),revision);
+    assert!(!ui.update_texture_rgba(handle,&[0,0,0]));assert_eq!(ui.texture(handle).unwrap().pixels,&[9,8,7,255]);assert_eq!(ui.texture_revision(handle),Some(1));
+    let other=ui.upload_texture(&[0,0],1,1,spec::psm::PSM_5650);assert!(!ui.update_texture_rgba(other,&[9,9]));
+    ui.free_texture(handle);let reused=ui.upload_texture(&original,1,1,spec::psm::PSM_8888);assert_ne!(handle,reused);assert!(!ui.update_texture_rgba(handle,&[0,0,0,0]));assert_eq!(ui.texture(reused).unwrap().pixels,&original);
 }

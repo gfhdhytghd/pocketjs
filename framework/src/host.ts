@@ -66,6 +66,8 @@ export interface HostOps {
   setAccessibility?(id: number, label: string | null, role: number, value: string | null, hint: string | null, flags: number, actions: number): boolean | void;
   /** pow2 dims ≤ 512; psm: spec PSM. Returns a texture handle. */
   uploadTexture(buf: Uint8Array, w: number, h: number, psm: number): number;
+  /** Optional texture upload with immutable sampling: 0 nearest, 1 linear. */
+  uploadTextureSampled?(buf: Uint8Array, w: number, h: number, psm: number, sampling: number): number;
   /** texHandle < 0 clears the image (handles are 0-based: 0 is a real one). */
   setImage(id: number, texHandle: number): void;
   /** Bind a native application surface to a surface node. Optional on

@@ -1,7 +1,7 @@
 // Byte codecs shared by the module SDKs (db, fs, net). Internal — not a
 // framework subpath. QuickJS has no btoa/Buffer/TextEncoder/TextDecoder, so
-// the codecs are spelled out; every caller is a cold path (payloads cross
-// the boundary far less often than draw ops).
+// the codecs are spelled out. Portable hosts may supply a native Base64
+// decoder for large image/file payloads; older hosts retain the JS fallback.
 
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -22,6 +22,9 @@ const B64_INV: Record<string, number> = {};
 for (let i = 0; i < B64.length; i++) B64_INV[B64[i]] = i;
 
 export function base64ToBytes(s: string): Uint8Array {
+  const native = (globalThis as {pod?:{decodeBase64?:(input:string)=>Uint8Array|null|undefined}}).pod?.decodeBase64;
+  const decoded = native?.(s);
+  if (decoded) return decoded;
   while (s.endsWith("=")) s = s.slice(0, -1);
   const out = new Uint8Array(Math.floor((s.length * 3) / 4));
   let o = 0;
@@ -74,12 +77,15 @@ export function stringToUtf8(s: string): Uint8Array {
 /** UTF-8 decode, strict: malformed sequences throw (a file that fails
  *  .text() is a bytes file — read it with .bytes()). */
 export function utf8ToString(bytes: Uint8Array): string {
-  let out = "";
+  const parts: string[] = [];
+  const units: number[] = [];
+  const flush = () => { if (units.length) { parts.push(String.fromCharCode(...units)); units.length = 0; } };
   let i = 0;
   while (i < bytes.length) {
+    if (units.length >= 1024) flush();
     const a = bytes[i++];
     if (a < 0x80) {
-      out += String.fromCharCode(a);
+      units.push(a);
       continue;
     }
     let n: number;
@@ -113,11 +119,12 @@ export function utf8ToString(bytes: Uint8Array): string {
       throw new Error("invalid UTF-8");
     }
     if (n < 0x10000) {
-      out += String.fromCharCode(n);
+      units.push(n);
     } else {
       n -= 0x10000;
-      out += String.fromCharCode(0xd800 + (n >> 10), 0xdc00 + (n & 0x3ff));
+      units.push(0xd800 + (n >> 10), 0xdc00 + (n & 0x3ff));
     }
   }
-  return out;
+  flush();
+  return parts.join("");
 }

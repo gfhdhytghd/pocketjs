@@ -430,6 +430,7 @@ impl<'a> DamageDecoder<'a> {
                 7usize.checked_add(count.checked_mul(3).ok_or(())?).ok_or(())?
             }
             spec::draw_op::TEX_QUAD => 9,
+            spec::draw_op::TEX_QUAD_F32 => 11,
             spec::draw_op::SCISSOR => 3,
             spec::draw_op::SCISSOR_POP => 1,
             spec::draw_op::TRI => 7,
@@ -455,6 +456,12 @@ impl<'a> DamageDecoder<'a> {
             spec::draw_op::GLYPH_RUN_XFORM => glyph_run_xform_bounds(ui, words, self.clip),
             spec::draw_op::GLYPH_RUN_F32 => glyph_run_f32_bounds(ui, words, self.clip),
             spec::draw_op::TEX_QUAD => logical_rect(words[2], words[3]).intersect(self.clip),
+            spec::draw_op::TEX_QUAD_F32 => {
+                let [x0,y0,x1,y1]=[words[2],words[3],words[4],words[5]].map(f32::from_bits);
+                if ![x0,y0,x1,y1].iter().all(|v|v.is_finite()&&v.abs()<=16777216.0) || x1<=x0 || y1<=y0 {return Err(());}
+                DamageRect::new(crate::layout::floorf(x0) as i32,crate::layout::floorf(y0) as i32,
+                    -crate::layout::floorf(-x1) as i32,-crate::layout::floorf(-y1) as i32).intersect(self.clip)
+            },
             spec::draw_op::SCISSOR | spec::draw_op::ROUNDED_CLIP => {
                 if self.depth >= self.stack.len() {
                     return Err(());

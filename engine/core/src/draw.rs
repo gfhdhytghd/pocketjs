@@ -968,6 +968,7 @@ struct Walker<'a> {
     raster_density: u32,
     rounded_clip_supported: bool,
     subpixel_glyphs_supported: bool,
+    subpixel_images_supported: bool,
     /// DevTools: slot to capture the world AABB of (u32::MAX = none).
     inspect_slot: u32,
     /// World AABB of `inspect_slot`, set when the walk reaches it.
@@ -992,6 +993,7 @@ pub fn build(
     raster_density: u32,
     rounded_clip_supported: bool,
     subpixel_glyphs_supported: bool,
+    subpixel_images_supported: bool,
     dl: &mut DrawList,
     inspect_id: i32,
     inspect_prev: Option<(f32, f32, f32, f32)>,
@@ -1015,6 +1017,7 @@ pub fn build(
         raster_density,
         rounded_clip_supported,
         subpixel_glyphs_supported,
+        subpixel_images_supported,
         dl,
         inspect_id,
         inspect_prev,
@@ -1039,6 +1042,7 @@ pub fn build_root(
     raster_density: u32,
     rounded_clip_supported: bool,
     subpixel_glyphs_supported: bool,
+    subpixel_images_supported: bool,
     dl: &mut DrawList,
     inspect_id: i32,
     inspect_prev: Option<(f32, f32, f32, f32)>,
@@ -1075,6 +1079,7 @@ pub fn build_root(
         raster_density,
         rounded_clip_supported,
         subpixel_glyphs_supported,
+        subpixel_images_supported,
         inspect_slot,
         inspect_hit: None,
         in_3d: false,
@@ -2060,7 +2065,7 @@ impl<'a> Walker<'a> {
                 x1: sx1.min(clip.x1),
                 y1: sy1.min(clip.y1),
             };
-            if c.is_empty() || roundf(c.x1 - c.x0) <= 0.0 || roundf(c.y1 - c.y0) <= 0.0 {
+            if c.is_empty() || (!self.subpixel_images_supported && (roundf(c.x1 - c.x0) <= 0.0 || roundf(c.y1 - c.y0) <= 0.0)) {
                 return;
             }
             match fill {
@@ -2210,7 +2215,14 @@ impl<'a> Walker<'a> {
             x1: (x + r).min(clip.x1),
             y1: (y + r).min(clip.y1),
         };
-        if c.is_empty() || roundf(c.x1 - c.x0) <= 0.0 || roundf(c.y1 - c.y0) <= 0.0 {
+        // A clamped corner can be half a logical pixel wide (odd-sized
+        // circles/capsules). Round shared endpoints, not start and extent
+        // independently: round(6.5) + round(6.5) would extend a 13px box to 14px.
+        let qx0 = roundf(c.x0);
+        let qy0 = roundf(c.y0);
+        let qx1 = roundf(c.x1);
+        let qy1 = roundf(c.y1);
+        if c.is_empty() || qx1 <= qx0 || qy1 <= qy0 {
             return;
         }
         let cu0 = u0 + (c.x0 - x) / r * du;
@@ -2219,8 +2231,8 @@ impl<'a> Walker<'a> {
         let cv1 = v0 + (c.y1 - y) / r * du;
         dl.words.push(spec::draw_op::TEX_QUAD);
         dl.words.push(tex);
-        dl.words.push(xy_word(c.x0, c.y0));
-        dl.words.push(wh_word(c.x1 - c.x0, c.y1 - c.y0));
+        dl.words.push(xy_word(qx0, qy0));
+        dl.words.push(wh_word(qx1 - qx0, qy1 - qy0));
         dl.words.push(cu0.to_bits());
         dl.words.push(cv0.to_bits());
         dl.words.push(cu1.to_bits());
@@ -2580,10 +2592,14 @@ impl<'a> Walker<'a> {
                         self.emit_corner_quad(dl, tex, cx, cy, rf, u0, v0, du, color, clip);
                     }
                     let mid = Fill::Flat(color);
+                    let inner_left = roundf(qx0 + rf);
+                    let inner_right = roundf(qx1 - rf);
+                    let inner_top = roundf(qy0 + rf);
+                    let inner_bottom = roundf(qy1 - rf);
                     // middle band (full width) + top/bottom strips between corners
-                    self.emit_screen_rect(dl, qx0, qy0 + rf, qx1, qy1 - rf, mid, clip);
-                    self.emit_screen_rect(dl, qx0 + rf, qy0, qx1 - rf, qy0 + rf, mid, clip);
-                    self.emit_screen_rect(dl, qx0 + rf, qy1 - rf, qx1 - rf, qy1, mid, clip);
+                    self.emit_screen_rect(dl, qx0, inner_top, qx1, inner_bottom, mid, clip);
+                    self.emit_screen_rect(dl, inner_left, qy0, inner_right, inner_top, mid, clip);
+                    self.emit_screen_rect(dl, inner_left, inner_bottom, inner_right, qy1, mid, clip);
                     return;
                 }
             }
@@ -2838,7 +2854,7 @@ impl<'a> Walker<'a> {
             x1: sx1.min(clip.x1),
             y1: sy1.min(clip.y1),
         };
-        if c.is_empty() || roundf(c.x1 - c.x0) <= 0.0 || roundf(c.y1 - c.y0) <= 0.0 {
+        if c.is_empty() || (!self.subpixel_images_supported && (roundf(c.x1 - c.x0) <= 0.0 || roundf(c.y1 - c.y0) <= 0.0)) {
             return;
         }
         // UV re-interpolation over the clipped span, remapped into the frame's
@@ -2849,6 +2865,13 @@ impl<'a> Walker<'a> {
         let u1 = fu0 + (c.x1 - sx0) / (sx1 - sx0) * du;
         let v0 = fv0 + (c.y0 - sy0) / (sy1 - sy0) * dv;
         let v1 = fv0 + (c.y1 - sy0) / (sy1 - sy0) * dv;
+        if self.subpixel_images_supported {
+            dl.words.extend_from_slice(&[spec::draw_op::TEX_QUAD_F32, tex,
+                c.x0.to_bits(), c.y0.to_bits(), c.x1.to_bits(), c.y1.to_bits(),
+                u0.to_bits(), v0.to_bits(), u1.to_bits(), v1.to_bits(),
+                scale_alpha(0xffff_ffff, op)]);
+            return;
+        }
         dl.words.push(spec::draw_op::TEX_QUAD);
         dl.words.push(tex);
         dl.words.push(xy_word(c.x0, c.y0));
@@ -2960,17 +2983,6 @@ impl<'a> Walker<'a> {
             box_w,
             &mut scratch,
         );
-        // Android's extended DrawList path already opts into additive
-        // geometry commands. Preserve the compact legacy run for every
-        // axis-aligned transform and for fixed-function hosts; transformed
-        // runs additionally carry the two cell basis vectors so a single
-        // glyph inherits its parent's complete affine transform.
-        let axis_x = (roundf(world.a * cell_w), roundf(world.b * cell_w));
-        let axis_y = (roundf(world.c * cell_h), roundf(world.d * cell_h));
-        let basis_fits = [axis_x.0, axis_x.1, axis_y.0, axis_y.1]
-            .iter()
-            .all(|&v| v >= i16::MIN as f32 && v <= i16::MAX as f32);
-        let legacy_basis = axis_x == (cell_w, 0.0) && axis_y == (0.0, cell_h);
         if self.subpixel_glyphs_supported {
             let axes = [world.a * cell_w, world.b * cell_w,
                         world.c * cell_h, world.d * cell_h];
@@ -3001,6 +3013,17 @@ impl<'a> Walker<'a> {
             self.glyph_scratch = scratch;
             return;
         }
+        // Android's extended DrawList path already opts into additive
+        // geometry commands. Preserve the compact legacy run for every
+        // axis-aligned transform and for fixed-function hosts; transformed
+        // runs additionally carry the two cell basis vectors so a single
+        // glyph inherits its parent's complete affine transform.
+        let axis_x = (roundf(world.a * cell_w), roundf(world.b * cell_w));
+        let axis_y = (roundf(world.c * cell_h), roundf(world.d * cell_h));
+        let basis_fits = [axis_x.0, axis_x.1, axis_y.0, axis_y.1]
+            .iter()
+            .all(|&v| v >= i16::MIN as f32 && v <= i16::MAX as f32);
+        let legacy_basis = axis_x == (cell_w, 0.0) && axis_y == (0.0, cell_h);
         // Legacy glyph anchors are unsigned: a partially visible cell with
         // a negative origin needs the signed extended command even when its
         // basis is axis-aligned and unscaled. Scissoring clips its pixels.

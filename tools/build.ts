@@ -238,7 +238,7 @@ function importSpecifiers(src: string): string[] {
   return out;
 }
 
-/** Resolve a relative import the SAME way pass 2's Bun.build does (extension
+/** Resolve source imports the SAME way pass 2's Bun.build does (extension
  *  remapping like `./card.js` -> card.tsx included), so the two passes agree
  *  on the module graph by construction. */
 function resolveImport(fromFile: string, spec: string): string | null {
@@ -246,7 +246,8 @@ function resolveImport(fromFile: string, spec: string): string | null {
     const exported = packagePath(spec, framework);
     return exported && /\.tsx?$/.test(exported) ? exported : null;
   }
-  if (!spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("/")) return null; // external bare
+  // Workspace packages may export TSX components with their own classes.
+  // Resolve them too; the extension check below still excludes JS externals.
   let resolved: string;
   try {
     resolved = Bun.resolveSync(spec, dirname(fromFile));

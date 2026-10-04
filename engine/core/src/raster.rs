@@ -968,6 +968,10 @@ fn render_scaled_clipped<T: RenderTarget>(
                      f32::from_bits(g[1]) * scale as f32, (g[2] & 65535) as u16)));
                 i += 7 + 3 * n;
             }
+            draw_op::TEX_QUAD_F32 => {
+                if i+11>words.len(){return;}
+                tex_quad_f32(ui,&mut masked,width,scale,clip,&words[i+1..i+11]);i+=11;
+            }
             draw_op::TEX_QUAD => {
                 if i + 9 > words.len() {
                     return;
@@ -1427,9 +1431,7 @@ fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
                 let u = (dx * vy - dy * vx) * inv_det;
                 let v = (ux * dy - uy * dx) * inv_det;
                 if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) { continue; }
-                let sx = ((u * coverage_w as f32) as i32).clamp(0, coverage_w - 1);
-                let sy = ((v * coverage_h as f32) as i32).clamp(0, coverage_h - 1);
-                let cov = rows[sy as usize * bpr + sx as usize] as u32;
+                let cov = sample_glyph_coverage(rows, coverage_w, coverage_h, bpr, u, v);
                 if cov != 0 {
                     let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
                     target.blend((py * stride + px) as usize, r, g, b, alpha);
@@ -1437,6 +1439,25 @@ fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
             }
         }
     }
+}
+
+/// Resample a transformed coverage cell with the same 8-bit weights used by
+/// Android. Clamp the fixed coordinate before taking its fraction so the first
+/// half texel repeats the edge instead of mixing in the next column/row.
+#[inline]
+fn sample_glyph_coverage(rows: &[u8], width: i32, height: i32, stride: usize, u: f32, v: f32) -> u32 {
+    let uf = ((u * width as f32 * 256.0) as i32 - 128).max(0);
+    let vf = ((v * height as f32 * 256.0) as i32 - 128).max(0);
+    let x0 = (uf >> 8).min(width - 1) as usize;
+    let y0 = (vf >> 8).min(height - 1) as usize;
+    let x1 = (x0 + 1).min(width as usize - 1);
+    let y1 = (y0 + 1).min(height as usize - 1);
+    let fx = (uf & 255) as u32;
+    let fy = (vf & 255) as u32;
+    let lerp = |a: u8, b: u8| (a as u32 * (256 - fx) + b as u32 * fx) >> 8;
+    let top = lerp(rows[y0 * stride + x0], rows[y0 * stride + x1]);
+    let bottom = lerp(rows[y1 * stride + x0], rows[y1 * stride + x1]);
+    (top * (256 - fy) + bottom * fy) >> 8
 }
 
 // ---- texel fetch + samplers ----------------------------------------------------------
@@ -1709,6 +1730,22 @@ fn tex_quad<T: RenderTarget>(
                 a = (a * ma + 127) / 255;
             }
             target.blend((py * stride + px) as usize, r, g, b, a);
+        }
+    }
+}
+
+fn tex_quad_f32<T:RenderTarget>(ui:&Ui,target:&mut T,stride:i32,scale:i32,clip:Clip,p:&[u32]) {
+    let [x0,y0,x1,y1]=[p[1],p[2],p[3],p[4]].map(|v|f32::from_bits(v)*scale as f32);
+    let [u0,v0,u1,v1]=[p[5],p[6],p[7],p[8]].map(f32::from_bits);
+    if ![x0,y0,x1,y1,u0,v0,u1,v1].iter().all(|v|v.is_finite()&&v.abs()<=16777216.0)||x1<=x0||y1<=y0{return;}
+    let Some(view)=ui.texture(p[0] as i32) else{return;};
+    let c=clip.intersect(Clip{x0:crate::layout::floorf(x0) as i32,y0:crate::layout::floorf(y0) as i32,
+        x1:-crate::layout::floorf(-x1) as i32,y1:-crate::layout::floorf(-y1) as i32});
+    let (mr,mg,mb,ma)=channels(p[9]);
+    for y in c.y0..c.y1 {let py=y as f32+0.5;if py<y0||py>=y1{continue;}let v=v0+(v1-v0)*(py-y0)/(y1-y0);
+        for x in c.x0..c.x1 {let px=x as f32+0.5;if px<x0||px>=x1{continue;}let u=u0+(u1-u0)*(px-x0)/(x1-x0);
+            let sample=if view.linear{sample_linear(&view,u,v)}else{let tx=((u*view.w as f32) as i32).clamp(0,view.w as i32-1);let ty=((v*view.h as f32) as i32).clamp(0,view.h as i32-1);texel(&view,(ty*view.w as i32+tx) as usize)};
+            let Some((r,g,b,a))=sample else{return;};target.blend((y*stride+x) as usize,(r*mr+127)/255,(g*mg+127)/255,(b*mb+127)/255,(a*ma+127)/255);
         }
     }
 }
@@ -2663,6 +2700,21 @@ mod tests {
     }
 
     #[test]
+    fn scaled_glyph_coverage_interpolates_without_bleeding_at_the_cell_edge() {
+        let mut ui = Ui::new();
+        assert!(ui.load_font_atlas(&density_two_font()));
+        let words = [draw_op::GLYPH_RUN_XFORM, 1 << 16, 0xffff_ffff,
+            xy_word(6, 0), xy_word(0, 6), xy_word(0, 0), 0];
+        let mut fb = framebuffer(1);
+        render_scaled(&ui, &words, &mut fb, 1);
+        // Four source samples [0,16,32,48] enlarged to six physical pixels.
+        // The first/last centers clamp to the edge; interior pixels interpolate.
+        for (x, expected) in [0, 8, 18, 29, 40, 48].iter().enumerate() {
+            assert_eq!(rgba(&fb, 1, x, 0)[0], *expected, "column {x}");
+        }
+    }
+
+    #[test]
     fn transformed_glyph_run_rotates_coverage_and_preserves_source_alpha() {
         let mut ui = Ui::new();
         assert!(ui.load_font_atlas(&density_two_font()));
@@ -2678,22 +2730,22 @@ mod tests {
         let mut fb = framebuffer(1);
         render_scaled(&ui, &words, &mut fb, 1);
 
-        // Source coverage rows [0..48] and [64..112] are rotated clockwise:
-        // the destination top row samples source rows 3 then 1. The text
-        // color's half alpha continues to modulate glyph coverage.
+        // Four neighboring samples contribute to each rotated/downscaled pixel.
+        // Interpolation is integer horizontal-then-vertical, followed by the
+        // text color's half-alpha modulation.
         let alpha = |coverage: u32| ((coverage * 128 + 127) / 255) as u8;
         assert_eq!(
             rgba(&fb, 1, 2, 1),
-            [alpha(208), alpha(208), alpha(208), 255]
+            [alpha(168), alpha(168), alpha(168), 255]
         );
-        assert_eq!(rgba(&fb, 1, 3, 1), [alpha(80), alpha(80), alpha(80), 255]);
+        assert_eq!(rgba(&fb, 1, 3, 1), [alpha(40), alpha(40), alpha(40), 255]);
         assert_eq!(
             rgba(&fb, 1, 2, 2),
-            [alpha(255), alpha(255), alpha(255), 255]
+            [alpha(203), alpha(203), alpha(203), 255]
         );
         assert_eq!(
             rgba(&fb, 1, 3, 2),
-            [alpha(112), alpha(112), alpha(112), 255]
+            [alpha(72), alpha(72), alpha(72), 255]
         );
         assert_eq!(rgba(&fb, 1, 4, 1), [0, 0, 0, 255]);
     }

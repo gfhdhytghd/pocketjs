@@ -900,6 +900,7 @@ export const WIRE_MARK_FLAG_ENDED = 1 << 0;
 
 // 0..6 regular / 7..13 bold (FONT_PX sizes), 14/15 the 54 px display pair,
 // 16..18 monospace regular (12/14/16 px — `font-mono`, code spans).
+// 19..28 intermediate sizes; 29..32 regular/bold 8px and 23px.
 export const MAX_FONT_SLOTS = 64;
 
 // ---------------------------------------------------------------------------
@@ -1346,19 +1347,19 @@ export function decodeStyleTable(bytes: Uint8Array): DecodedStyleTable {
 // New cores accept v2 as density=1; v3 separates raster coverage from stable
 // logical layout metrics so a 2x target can sharpen text without relayout.
 
-export const FONT_MAGIC = 0x41464344; // 'DCFA' LE
 // Version 4 retains the header and first 8 cmap bytes, then stores an f32
 // logical advance at cmap +8 (12-byte entries). This can preserve a physical
 // pixel advance divided by raster density. Coverage follows the expanded
 // cmap. Versions 2/3 retain their original integer metrics and byte layout.
 // Slots 33..63 may be explicitly bound to application font resources.
 
+export const FONT_MAGIC = 0x41464344; // 'DCFA' LE
 export const FONT_VERSION = 3;
-export const FONT_HEADER_SIZE = 16;
 export const FONT_RASTER_ADVANCE_VERSION = 4;
+export const FONT_HEADER_SIZE = 16;
 export const FONT_CMAP_ENTRY_SIZE = 8;
-export const FONT_FLAG_BOLD = 1 << 0;
 export const FONT_RASTER_ADVANCE_CMAP_ENTRY_SIZE = 12;
+export const FONT_FLAG_BOLD = 1 << 0;
 
 // ---------------------------------------------------------------------------
 // DRAWLIST op format  (core -> backend)
@@ -1567,3 +1568,7 @@ export const ANALOG_CENTER = 0x8080;
  *  the whole run — 1/hz s, hz at most 240). Frame content is a pure function
  *  of frame index — this is what makes byte-exact goldens possible. */
 export const FIXED_DT = 1 / 60;
+
+// TEX_QUAD_F32 (11 words): op 14, texture handle, float32 x0/y0/x1/y1,
+// float32 u0/v0/u1/v1, ABGR modulate. Host opt-in only. Bounds stay fractional;
+// sampling and destination coverage use physical pixel centers.

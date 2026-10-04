@@ -213,6 +213,16 @@ describe("text", () => {
     }
     expect(props(parseClassLiteral("text-[13px] font-bold")).get(PROP.fontSlot)).toBe(26);
   });
+  test("chart labels and title sizes append slots without moving existing atlases", () => {
+    for (const [px, regular, bold] of [[8,29,31],[23,30,32]]) {
+      expect(fontSlotFor(px,false)).toBe(regular);
+      expect(fontSlotFor(px,true)).toBe(bold);
+      expect(fontSlotInfo(regular)).toEqual({px,bold:false,mono:false});
+      expect(fontSlotInfo(bold)).toEqual({px,bold:true,mono:false});
+      expect(props(parseClassLiteral(`text-[${px}px]`)).get(PROP.fontSlot)).toBe(regular);
+    }
+    expect(()=>fontSlotInfo(33)).toThrow();
+  });
   test("font-bold alone defaults to 16px bold", () => {
     const m = props(parseClassLiteral("font-bold"));
     expect(m.get(PROP.fontSlot)).toBe(fontSlotFor(16, true));

@@ -20,3 +20,7 @@ export function runServicePumps(): void {
   // the next entry without a snapshot allocation on this per-frame path.
   for (const pump of pumps) pump();
 }
+
+// Hosts may deliver completed IO while visual frames are suspended. This entry
+// point performs no input processing, animation step, layout tick, or drawing.
+(globalThis as unknown as { __pocketPumpServices: () => void }).__pocketPumpServices = runServicePumps;

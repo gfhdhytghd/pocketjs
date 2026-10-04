@@ -446,6 +446,7 @@ pub mod draw_op {
     pub const ROUNDED_CLIP: u32 = 11;
     pub const GLYPH_RUN_XFORM: u32 = 12;
     pub const GLYPH_RUN_F32: u32 = 13;
+    pub const TEX_QUAD_F32: u32 = 14;
 }
 
 /// .pak container constants (byte-compatible with dreamcart's format;
