@@ -11,6 +11,7 @@
 mod dbg;
 mod pak;
 mod surface;
+pub mod glyph_raster;
 
 pub use pak::{PakEntry, find_pak, walk_pak};
 pub use surface::{LazyPakStats, PakEntryIntegrity, UiSurface};
