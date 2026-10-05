@@ -268,6 +268,9 @@ pub struct Ui {
     subpixel_images_supported: bool,
     /// Changes whenever raster-visible resource bytes or tables change.
     raster_revision: u64,
+    /// Changes only when the live tree can require a different set of font
+    /// slots. Lazy hosts use it to avoid an O(text-node count) scan per tick.
+    font_requirement_revision: u64,
     focused: i32,
     draw_list: DrawList,
     /// Virtual cursor sprite (spec ops 28/29, input.cursor capability):
@@ -356,6 +359,7 @@ impl Ui {
             subpixel_glyphs_supported: false,
             subpixel_images_supported: false,
             raster_revision: 1,
+            font_requirement_revision: 1,
             focused: 0,
             draw_list: DrawList::new(),
             cursor_tex: -1,
@@ -431,8 +435,17 @@ impl Ui {
         self.raster_revision
     }
 
+    /// Monotonic token for changes that can alter [`required_font_slots`](Self::required_font_slots).
+    pub fn font_requirement_revision(&self) -> u64 {
+        self.font_requirement_revision
+    }
+
     fn bump_raster_revision(&mut self) {
         self.raster_revision = self.raster_revision.wrapping_add(1);
+    }
+
+    fn bump_font_requirement_revision(&mut self) {
+        self.font_requirement_revision = self.font_requirement_revision.wrapping_add(1);
     }
 
     fn mark_layout_dirty(&mut self) {
@@ -530,6 +543,7 @@ impl Ui {
             self.tree.free_slot(slot);
         }
         self.mark_layout_dirty();
+        self.bump_font_requirement_revision();
     }
 
     /// Insert `child` under `parent` before `anchor` (0 = append). DOM move
@@ -540,6 +554,7 @@ impl Ui {
         }
         if self.tree.insert_before(parent, child, anchor) {
             self.mark_layout_dirty();
+            self.bump_font_requirement_revision();
         }
     }
 
@@ -548,6 +563,7 @@ impl Ui {
     pub fn remove_child(&mut self, parent: i32, child: i32) {
         if self.tree.remove_child(parent, child) {
             self.mark_layout_dirty();
+            self.bump_font_requirement_revision();
         }
     }
 
@@ -572,6 +588,7 @@ impl Ui {
         self.retarget(slot, &old, was_initialized);
         self.restart_timelines(slot);
         self.mark_layout_style(slot);
+        self.bump_font_requirement_revision();
     }
 
     /// Set a single dynamic prop. `value` carries the payload per
@@ -590,6 +607,9 @@ impl Ui {
         let node = &mut self.tree.slots[slot as usize];
         tree::Node::remove_entry(&mut node.anim_values, prop);
         tree::Node::put_entry(&mut node.overrides, prop, bits);
+        if prop == spec::prop::FONT_SLOT {
+            self.bump_font_requirement_revision();
+        }
         if spec::is_layout_dirtying(prop) {
             self.mark_layout_style(slot);
         }
@@ -611,6 +631,7 @@ impl Ui {
         // non-empty flip is structural: empty runs are excluded from the
         // taffy tree entirely, so the leaf has to (dis)appear.
         let root_slot = self.text_layout_root(slot);
+        let requirement_changed = self.tree.slots[slot as usize].text.is_empty() != text.is_empty();
         let mut run = alloc::string::String::new();
         self.tree.collect_run(root_slot, &mut run);
         let was_empty = run.is_empty();
@@ -637,6 +658,9 @@ impl Ui {
             if !fixed {
                 self.mark_layout_style(root_slot);
             }
+        }
+        if requirement_changed {
+            self.bump_font_requirement_revision();
         }
     }
 
@@ -975,6 +999,7 @@ impl Ui {
                 self.styles = t;
                 self.mark_layout_dirty();
                 self.bump_raster_revision();
+                self.bump_font_requirement_revision();
                 true
             }
             None => false,
@@ -1108,6 +1133,7 @@ impl Ui {
             self.retarget(slot, &old, true);
             self.mark_layout_style(slot);
         }
+        self.bump_font_requirement_revision();
     }
 
     /// Set the `active:` pressed state (same native variant machinery as
@@ -1133,6 +1159,7 @@ impl Ui {
         self.tree.slots[slot as usize].active = active;
         self.retarget(slot, &old, true);
         self.mark_layout_style(slot);
+        self.bump_font_requirement_revision();
     }
 
     // ---- virtual cursor (spec ops 27..29, input.cursor capability) ---------

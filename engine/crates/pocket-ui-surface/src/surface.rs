@@ -160,6 +160,8 @@ pub struct LazyPakStats {
 
 struct Inner {
     ui: Ui,
+    required_font_revision: u64,
+    required_font_slots: Vec<u8>,
     lazy_pak: Option<LazyPak>,
     /// Lazy entries remain here after `feed_pak`; styles, fonts, images, and
     /// sprites have already been ingested by the core.
@@ -257,7 +259,12 @@ fn request_font(inner: &mut Inner, slot: u8) -> bool {
 
 fn ensure_required_fonts(inner: &mut Inner) {
     install_prepared_fonts(inner);
-    let slots = inner.ui.required_font_slots();
+    let revision = inner.ui.font_requirement_revision();
+    if revision != inner.required_font_revision {
+        inner.required_font_slots = inner.ui.required_font_slots();
+        inner.required_font_revision = revision;
+    }
+    let slots = inner.required_font_slots.clone();
     for slot in slots {
         request_font(inner, slot);
     }
@@ -384,6 +391,8 @@ impl UiSurface {
         UiSurface {
             inner: Rc::new(RefCell::new(Inner {
                 ui,
+                required_font_revision: u64::MAX,
+                required_font_slots: Vec::new(),
                 lazy_pak: None,
                 tile_paks: HashMap::new(),
                 textures: Vec::new(),
@@ -1009,6 +1018,40 @@ mod tests {
         assert_eq!(prepared.slot, 7);
         assert_eq!(prepared.atlas.expect("valid atlas").slot, 7);
         drop(worker);
+    }
+
+    #[test]
+    fn required_font_scan_cache_tracks_relevant_core_mutations_only() {
+        let surface = UiSurface::new((32.0, 32.0));
+        surface.tick();
+        {
+            let inner = surface.inner.borrow();
+            assert_eq!(inner.required_font_revision, inner.ui.font_requirement_revision());
+            assert!(inner.required_font_slots.is_empty());
+        }
+        let text = surface.with_ui(|ui| {
+            let text = ui.create_node(pocketjs_core::spec::NodeType::Text as u8);
+            ui.set_text(text, "reader");
+            ui.set_prop(text, pocketjs_core::spec::prop::FONT_SLOT, 7.0);
+            ui.insert_before(pocketjs_core::spec::ROOT_ID, text, 0);
+            text
+        });
+        {
+            let inner = surface.inner.borrow();
+            assert_ne!(inner.required_font_revision, inner.ui.font_requirement_revision());
+        }
+        surface.tick();
+        let cached = {
+            let inner = surface.inner.borrow();
+            assert_eq!(inner.required_font_slots, vec![7]);
+            inner.required_font_revision
+        };
+        surface.with_ui(|ui| ui.set_prop(text, pocketjs_core::spec::prop::TRANSLATE_Y, 9.0));
+        surface.tick();
+        let inner = surface.inner.borrow();
+        assert_eq!(inner.required_font_revision, cached);
+        assert_eq!(inner.ui.font_requirement_revision(), cached);
+        assert_eq!(inner.required_font_slots, vec![7]);
     }
 
     #[test]

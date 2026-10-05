@@ -5133,3 +5133,23 @@ fn required_font_slots_use_the_styled_text_element_of_raw_text_children() {
     ui.insert_before(element, raw, 0);
     assert_eq!(ui.required_font_slots(), vec![19]);
 }
+
+#[test]
+fn font_requirement_revision_changes_only_for_relevant_tree_and_style_state() {
+    let mut ui = Ui::new();
+    let initial = ui.font_requirement_revision();
+    let text = ui.create_node(spec::NodeType::Text as u8);
+    assert_eq!(ui.font_requirement_revision(), initial);
+    ui.set_text(text, "first");
+    let content = ui.font_requirement_revision();
+    assert_ne!(content, initial);
+    ui.set_text(text, "second");
+    ui.set_prop(text, spec::prop::TRANSLATE_Y, 12.0);
+    assert_eq!(ui.font_requirement_revision(), content);
+    ui.set_prop(text, spec::prop::FONT_SLOT, 7.0);
+    let styled = ui.font_requirement_revision();
+    assert_ne!(styled, content);
+    ui.insert_before(spec::ROOT_ID, text, 0);
+    assert_ne!(ui.font_requirement_revision(), styled);
+    assert_eq!(ui.required_font_slots(), vec![7]);
+}
