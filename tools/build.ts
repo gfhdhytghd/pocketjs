@@ -11,7 +11,7 @@
 //         placeholder); pak.ts packs it all -> dist/<app>.pak.
 // pass 2  Bun.build (plugin serves the CACHED pass-1 transforms plus this
 //         build's in-memory generated styles, iife, target browser,
-//         minify false) -> dist/<app>.js.
+//         target-aware minification) -> dist/<app>.js.
 //
 // Flags:
 //   --framework=solid|vue-vapor|octane  select the framework for this build
@@ -22,6 +22,7 @@
 //   --font-slots-json=<json>     explicit application font resources in slots 33..63
 //   --font-regular=<path>        override the regular font source
 //   --font-bold=<path>           override the bold font source
+//   --minify                    minify the output IIFE (QuickJS production hosts)
 //   --outdir=<path>              write <app>.js/.pak here instead of dist/
 //                                (external repos build their apps against a
 //                                vendored PocketJS and keep outputs local)
@@ -91,6 +92,7 @@ let useConfig = true;
 let planPath: string | undefined;
 let densityFlag: number | undefined;
 let hzFlag: number | undefined;
+let minifyFlag = false;
 let projectRoot = process.cwd();
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
@@ -105,6 +107,7 @@ for (const a of args) {
   else if (a.startsWith("--outdir=")) DIST = resolvePath(a.slice("--outdir=".length)) + "/";
   else if (a.startsWith("--density=")) densityFlag = Number(a.slice("--density=".length));
   else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
+  else if (a === "--minify") minifyFlag = true;
   else if (!a.startsWith("-")) appArg = a;
 }
 
@@ -122,7 +125,7 @@ if (planPath) {
 }
 
 if (!appArg) {
-  console.error("usage: bun tools/build.ts <app.tsx | app name> [--plan=<resolved-plan.json>] [--framework=solid|vue-vapor|octane] [--extra-chars=...] [--density=N] [--hz=N]");
+  console.error("usage: bun tools/build.ts <app.tsx | app name> [--plan=<resolved-plan.json>] [--framework=solid|vue-vapor|octane] [--extra-chars=...] [--density=N] [--hz=N] [--minify]");
   process.exit(1);
 }
 
@@ -509,6 +512,12 @@ if (!existsSync(frameworkConfig.rendererPath)) {
 // jsxPlugin owns dependency identity as well as framework aliases. In
 // particular, external apps and renderer-solid.ts must share PocketJS's
 // browser-mode Solid runtime even when the app has its own node_modules.
+// Android/Wear hosts evaluate this IIFE in QuickJS during cold start. Their
+// production bundle is minified to reduce both APK IO and parser work; other
+// targets retain readable output for their established debugging workflows.
+const minifyForQuickJsStartup = buildPlan?.target.id === "android-watch"
+  || buildPlan?.target.id === "wearos-watch"
+  || minifyFlag;
 const result = await Bun.build({
   entrypoints: [entry],
   outdir: DIST,
@@ -532,7 +541,7 @@ const result = await Bun.build({
       ? { document: "globalThis.__pocketDocument" }
       : {}),
   },
-  minify: false,
+  minify: minifyForQuickJsStartup,
   sourcemap: "none",
   plugins: [jsxPlugin(framework, {
     entry,

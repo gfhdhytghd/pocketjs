@@ -597,7 +597,14 @@ function setSrc(node: NodeMirror, value: unknown): void {
   if (typeof value !== "string") {
     throw new Error("PocketJS: src must be a string key");
   }
-  const handle = textures.get(value);
+  let handle = textures.get(value);
+  if (handle === undefined && ops.loadPakImage) {
+    const loaded = ops.loadPakImage(value);
+    if (loaded >= 0) {
+      registerTexture(value, loaded);
+      handle = loaded;
+    }
+  }
   if (handle === undefined) {
     if (getHost().strict) {
       throw new Error(

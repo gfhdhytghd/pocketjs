@@ -390,8 +390,8 @@ literals, `style={{…}}` objects, or `animate()`.
 One FFI crossing per steady-state frame; DrawList ≤ ~40 sceGuDrawArray calls,
 ≤ ~2000 quads; per-frame vertex bytes ≈48 KB from the bump pool; layout-prop
 animations relayout that frame (prefer transforms); Solid effects only on
-interaction. Boot: unminified but tree-shaken bundle; all binary assets in the
-pak (base64-in-JS is the known QuickJS boot killer).
+interaction. Boot: tree-shaken bundle, minified on Android/Wear QuickJS hosts;
+all binary assets in the pak (base64-in-JS is the known QuickJS boot killer).
 
 ## What v1 explicitly punts
 

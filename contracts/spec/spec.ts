@@ -1499,6 +1499,7 @@ export const DRAW_OP = {
   roundedClip: 11,
   glyphRunXform: 12,
   glyphRunF32: 13,
+  texQuadF32: 14,
 } as const;
 
 // ---------------------------------------------------------------------------

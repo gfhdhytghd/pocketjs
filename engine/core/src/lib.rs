@@ -1789,6 +1789,30 @@ impl Ui {
         self.fonts.atlas(slot)
     }
 
+    /// Font slots referenced by live, non-empty text nodes. Hosts with a
+    /// seekable package can use this immediately before `tick()` to fault in
+    /// only the atlases needed by the current UI tree. The result is sorted
+    /// and de-duplicated so loading is deterministic even when many nodes use
+    /// the same style.
+    pub fn required_font_slots(&self) -> Vec<u8> {
+        let mut slots = Vec::new();
+        for node in &self.tree.slots {
+            if !node.alive
+                || node.node_type != spec::NodeType::Text as u8
+                || node.text.is_empty()
+                || node.parent == 0
+            {
+                continue;
+            }
+            let slot = style::resolve(node, &self.styles, true).font_slot as u8;
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        slots.sort_unstable();
+        slots
+    }
+
     // ---- internals -----------------------------------------------------------
 
     /// The taffy leaf affected by a text-node content update. Text children

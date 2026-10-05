@@ -345,9 +345,10 @@ A few settings are deliberate:
   packages. For Solid, the `node` condition would pull the SSR build (where
   reactive updates no‑op); Bun's default `development` condition can also pull
   dev builds and duplicate runtimes.
-- **`minify: false`** — the bundle ships unminified but tree‑shaken; base64 blobs
-  in JS are the known QuickJS boot killer, which is why all binary assets live in
-  the pak instead.
+- **Target-aware minification** — Android/Wear QuickJS bundles are minified to
+  reduce cold-start parser work. Other targets remain unminified but tree-shaken
+  for their established debugging workflows. Binary assets still live in the
+  pak rather than as base64 JS blobs.
 
 ```
   pass 2: dist/hero.js (128000 bytes)

@@ -404,7 +404,8 @@ styling surface before wiring up a local project.
    `styles.bin`, the font baker rasterizes an Inter atlas containing *only* the
    characters your app uses, images are decoded, and it's all packed into
    `dist/<app>.pak`.
-2. **Bundle.** Bun bundles the app (IIFE, targeting the browser, unminified) from
+2. **Bundle.** Bun bundles the app (IIFE, targeting the browser; minified for
+   Android/Wear QuickJS hosts and readable on other targets) from
    the cached pass-1 transforms into `dist/<app>.js`.
 
 Because styles and fonts are derived from your source, a class literal only

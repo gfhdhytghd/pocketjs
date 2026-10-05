@@ -16,6 +16,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::time::Instant;
 
 use anyhow::Result;
 use pocket_mod::Guest;
@@ -64,8 +65,36 @@ struct SpriteReg {
     step: u16,
 }
 
+struct LazyPak {
+    // SAFETY: feed_pak_mapped's caller guarantees these bytes outlive the
+    // UiSurface. Android satisfies that by destroying PodRuntime before
+    // unmapping the APK asset from its native Host.
+    bytes: &'static [u8],
+    entries: HashMap<String, (usize, usize)>,
+    directory_entries: usize,
+    directory_parse_micros: u64,
+    first_font_load_micros: Option<u64>,
+    loaded_fonts: usize,
+}
+
+impl LazyPak {
+    fn blob(&self, key: &str) -> Option<&'static [u8]> {
+        let &(start, end) = self.entries.get(key)?;
+        self.bytes.get(start..end)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LazyPakStats {
+    pub directory_entries: usize,
+    pub directory_parse_micros: u64,
+    pub first_font_load_micros: Option<u64>,
+    pub loaded_fonts: usize,
+}
+
 struct Inner {
     ui: Ui,
+    lazy_pak: Option<LazyPak>,
     /// Lazy entries remain here after `feed_pak`; styles, fonts, images, and
     /// sprites have already been ingested by the core.
     tile_paks: HashMap<String, Vec<u8>>,
@@ -89,6 +118,56 @@ struct Inner {
     /// not match their target (framework/src/host.ts assertNativeHostContract).
     host_id: String,
     host_abi: Option<u32>,
+}
+
+fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
+    if inner.ui.font_atlas(slot).is_some() {
+        return true;
+    }
+    let key = format!("ui:font.{slot}");
+    let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key)) else {
+        return false;
+    };
+    let began = Instant::now();
+    let loaded = inner.ui.load_font_atlas(blob);
+    let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    if loaded {
+        if let Some(pak) = inner.lazy_pak.as_mut() {
+            pak.loaded_fonts += 1;
+            if pak.first_font_load_micros.is_none() {
+                pak.first_font_load_micros = Some(elapsed);
+            }
+        }
+    } else {
+        log::warn!("pocket-ui: bad lazy font atlas {key}");
+    }
+    loaded
+}
+
+fn ensure_required_fonts(inner: &mut Inner) {
+    let slots = inner.ui.required_font_slots();
+    for slot in slots {
+        ensure_font(inner, slot);
+    }
+}
+
+fn ensure_image(inner: &mut Inner, name: &str) -> i32 {
+    if let Some((_, handle)) = inner.textures.iter().find(|(known, _)| known == name) {
+        return *handle;
+    }
+    let key = format!("ui:img.{name}");
+    let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key)) else {
+        return -1;
+    };
+    let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
+        log::warn!("pocket-ui: bad lazy image entry {key}");
+        return -1;
+    };
+    let handle = inner.ui.upload_texture(pixels, w, h, psm);
+    if handle >= 0 {
+        inner.textures.push((name.to_string(), handle));
+    }
+    handle
 }
 
 fn should_retain_lazy_entry(key: &str) -> bool {
@@ -185,6 +264,7 @@ impl UiSurface {
         UiSurface {
             inner: Rc::new(RefCell::new(Inner {
                 ui,
+                lazy_pak: None,
                 tile_paks: HashMap::new(),
                 textures: Vec::new(),
                 sprites: Vec::new(),
@@ -251,6 +331,7 @@ impl UiSurface {
     /// images/sprites upload as core textures. Call before `mount`.
     pub fn feed_pak(&self, pak: &[u8]) {
         let mut inner = self.inner.borrow_mut();
+        inner.lazy_pak = None;
         inner.tile_paks.clear();
         for entry in walk_pak(pak) {
             feed_entry(&mut inner, entry.key, entry.blob);
@@ -267,8 +348,78 @@ impl UiSurface {
         read_at: impl FnMut(usize, &mut [u8]) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
         let mut inner = self.inner.borrow_mut();
+        inner.lazy_pak = None;
         inner.tile_paks.clear();
         crate::pak::read_pak(length, read_at, |key, blob| feed_entry(&mut inner, key, blob))
+    }
+
+    /// Index a stable memory-mapped pak without copying entry payloads.
+    /// Styles and sprite registrations are the only startup payloads. Fonts,
+    /// standalone images, and tiles are faulted in from the mapping on first
+    /// use. Sprite atlases remain eager because their frame metadata and
+    /// texture handles are part of the immutable `ui.__sprites` mount table.
+    /// The caller must keep `pak` mapped and immutable until this UiSurface is
+    /// dropped.
+    ///
+    /// # Safety
+    ///
+    /// `pak` must remain readable and unchanged for the complete UiSurface
+    /// lifetime. Passing a shorter-lived mapping is undefined behavior.
+    pub unsafe fn feed_pak_mapped(&self, pak: &'static [u8]) {
+        let began = Instant::now();
+        let mut entries = HashMap::new();
+        let mut eager_sprites = Vec::new();
+        let mut directory_entries = 0usize;
+        for entry in walk_pak(pak) {
+            directory_entries += 1;
+            let start = entry.blob.as_ptr() as usize - pak.as_ptr() as usize;
+            let end = start + entry.blob.len();
+            if entry.key.starts_with("ui:sprite.") {
+                eager_sprites.push((entry.key.to_string(), start, end));
+            }
+            entries.insert(entry.key.to_string(), (start, end));
+        }
+        let directory_parse_micros =
+            began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let mut inner = self.inner.borrow_mut();
+        inner.tile_paks.clear();
+        inner.textures.clear();
+        inner.sprites.clear();
+        inner.lazy_pak = Some(LazyPak {
+            bytes: pak,
+            entries,
+            directory_entries,
+            directory_parse_micros,
+            first_font_load_micros: None,
+            loaded_fonts: 0,
+        });
+        if let Some(styles) = inner.lazy_pak.as_ref().and_then(|source| source.blob("ui:styles")) {
+            if !inner.ui.load_styles(styles) {
+                log::warn!("pocket-ui: bad styles.bin in mapped pak");
+            }
+        }
+        for (key, start, end) in eager_sprites {
+            feed_entry(&mut inner, &key, &pak[start..end]);
+        }
+    }
+
+    pub fn lazy_pak_stats(&self) -> LazyPakStats {
+        self.inner
+            .borrow()
+            .lazy_pak
+            .as_ref()
+            .map(|pak| LazyPakStats {
+                directory_entries: pak.directory_entries,
+                directory_parse_micros: pak.directory_parse_micros,
+                first_font_load_micros: pak.first_font_load_micros,
+                loaded_fonts: pak.loaded_fonts,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Ensure one mapped atlas is resident before a host reads its metrics.
+    pub fn ensure_font(&self, slot: u8) -> bool {
+        ensure_font(&mut self.inner.borrow_mut(), slot)
     }
 
     /// Register an installed Pocket System package before [`mount`](Self::mount).
@@ -296,7 +447,9 @@ impl UiSurface {
     /// Advance the core one fixed-dt frame (call once per host tick, after
     /// the guest turn, before rendering).
     pub fn tick(&self) {
-        self.inner.borrow_mut().ui.tick();
+        let mut inner = self.inner.borrow_mut();
+        ensure_required_fonts(&mut inner);
+        inner.ui.tick();
     }
 
     /// Install a native text measurer (docs/BACKENDS.md). Call before
@@ -509,18 +662,27 @@ impl UiSurface {
 
             let ui = self.inner.clone();
             op!("measureText", move |s: LossyString, slot: i32| {
-                ui.borrow_mut().ui.measure_text(&s.0, slot as u8) as f64
+                let mut inner = ui.borrow_mut();
+                ensure_font(&mut inner, slot as u8);
+                inner.ui.measure_text(&s.0, slot as u8) as f64
             });
 
             let ui = self.inner.clone();
             op!(
                 "wrapText",
                 move |s: LossyString, slot: i32, max_w: f64| -> Vec<u32> {
-                    ui.borrow_mut().ui.wrap_text(&s.0, slot as u8, max_w as f32)
+                    let mut inner = ui.borrow_mut();
+                    ensure_font(&mut inner, slot as u8);
+                    inner.ui.wrap_text(&s.0, slot as u8, max_w as f32)
                 }
             );
 
             // ---- streamed textures (spec ops 23..25) ---------------------
+            let ui = self.inner.clone();
+            op!("loadPakImage", move |name: LossyString| {
+                ensure_image(&mut ui.borrow_mut(), &name.0)
+            });
+
             let ui = self.inner.clone();
             op!("loadTileTexture", move |key: LossyString, index: i32| {
                 if index < 0 {
@@ -528,10 +690,13 @@ impl UiSurface {
                 }
                 let mut inner = ui.borrow_mut();
                 let inner = &mut *inner; // split borrow: pak read, core write
-                match inner.tile_paks.get(&key.0) {
-                    Some(blob) => inner.ui.upload_tileset_tile(blob, index as u32),
-                    None => -1,
+                if let Some(blob) = inner.tile_paks.get(&key.0) {
+                    return inner.ui.upload_tileset_tile(blob, index as u32);
                 }
+                let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key.0)) else {
+                    return -1;
+                };
+                inner.ui.upload_tileset_tile(blob, index as u32)
             });
 
             let ui = self.inner.clone();

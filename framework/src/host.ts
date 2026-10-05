@@ -156,6 +156,10 @@ export interface HostOps {
   /** Upload a self-contained IMG entry blob (framework/compiler/pak.ts layout, incl.
    *  PSM_T8 palette + RLE/filter flags). → handle or -1. */
   uploadImgEntry?(blob: Uint8Array): number;
+  /** Native seekable-pak hosts: fault one named `ui:img.<name>` entry into
+   *  the core on first `<Image src={name}>` use. Returns -1 when absent or
+   *  malformed. */
+  loadPakImage?(name: string): number;
 
   // -- host service channel + video plane (spec ops 30..37). Optional: only
   //    native hosts with a tethered companion process (PSPLINK usbhostfs,

@@ -5101,3 +5101,23 @@ fn rgba_frame_updates_preserve_handles_and_reject_stale_or_malformed_writes() {
     let other=ui.upload_texture(&[0,0],1,1,spec::psm::PSM_5650);assert!(!ui.update_texture_rgba(other,&[9,9]));
     ui.free_texture(handle);let reused=ui.upload_texture(&original,1,1,spec::psm::PSM_8888);assert_ne!(handle,reused);assert!(!ui.update_texture_rgba(handle,&[0,0,0,0]));assert_eq!(ui.texture(reused).unwrap().pixels,&original);
 }
+
+#[test]
+fn required_font_slots_include_only_attached_nonempty_text_and_are_deduplicated() {
+    let mut ui = Ui::new();
+    let detached = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(detached, "detached");
+    ui.set_prop(detached, spec::prop::FONT_SLOT, 9.0);
+    let first = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(first, "first");
+    ui.set_prop(first, spec::prop::FONT_SLOT, 7.0);
+    ui.insert_before(spec::ROOT_ID, first, 0);
+    let second = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(second, "second");
+    ui.set_prop(second, spec::prop::FONT_SLOT, 7.0);
+    ui.insert_before(spec::ROOT_ID, second, 0);
+    let empty = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(empty, spec::prop::FONT_SLOT, 5.0);
+    ui.insert_before(spec::ROOT_ID, empty, 0);
+    assert_eq!(ui.required_font_slots(), vec![7]);
+}

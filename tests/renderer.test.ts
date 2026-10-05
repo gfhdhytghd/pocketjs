@@ -635,6 +635,23 @@ describe("setProperty dispatch table [R]", () => {
     );
   });
 
+  test("src faults a native mapped-pak image on first use and caches it", () => {
+    let loads = 0;
+    host.ops.loadPakImage = (name: string) => {
+      loads++;
+      return name === "lazy.png" ? 91 : -1;
+    };
+    const first = createElement("image");
+    setProp(first, "src", "lazy.png", undefined);
+    const second = createElement("image");
+    setProp(second, "src", "lazy.png", undefined);
+    expect(loads).toBe(1);
+    expect(host.of("setImage")).toEqual([
+      ["setImage", first.id, 91],
+      ["setImage", second.id, 91],
+    ]);
+  });
+
   test("clearing src sends setImage(-1) — 0 is a real (first) texture handle", () => {
     registerTexture("logo.png", 0); // first upload => handle 0
     const el = createElement("image");
