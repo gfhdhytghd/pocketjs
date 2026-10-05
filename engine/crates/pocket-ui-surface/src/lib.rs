@@ -13,4 +13,4 @@ mod pak;
 mod surface;
 
 pub use pak::{PakEntry, find_pak, walk_pak};
-pub use surface::{LazyPakStats, UiSurface};
+pub use surface::{LazyPakStats, PakEntryIntegrity, UiSurface};

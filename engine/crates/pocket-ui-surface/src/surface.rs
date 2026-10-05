@@ -24,6 +24,7 @@ use anyhow::Result;
 use pocket_mod::Guest;
 use pocket_mod::qjs::{Coerced, Ctx, FromJs, Function, Object, TypedArray, Value};
 use pocketjs_core::Ui;
+use sha2::{Digest, Sha256};
 
 use crate::dbg::DbgMailbox;
 use crate::pak::walk_pak;
@@ -71,37 +72,49 @@ struct PreparedFont {
     slot: u8,
     atlas: Option<pocketjs_core::text::Atlas>,
     parse_micros: u64,
+    integrity_checked: bool,
+    integrity_ok: bool,
+    integrity_micros: u64,
+    bytes: usize,
 }
 
 /// One serial parser avoids page-faulting several multi-megabyte atlases at
 /// once. The result owns its bitmap, so installing it on the UI thread is a
 /// small move instead of another large copy.
 struct FontWorker {
-    requests: Option<mpsc::Sender<(u8, usize, usize)>>,
+    requests: Option<mpsc::Sender<(u8, usize, usize, Option<[u8; 32]>)>>,
     ready: mpsc::Receiver<PreparedFont>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl FontWorker {
     fn new(bytes: &'static [u8]) -> Option<Self> {
-        let (request_tx, request_rx) = mpsc::channel::<(u8, usize, usize)>();
+        let (request_tx, request_rx) = mpsc::channel::<(u8, usize, usize, Option<[u8; 32]>)>();
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("pocket-font".into())
             .spawn(move || {
-                while let Ok((slot, start, end)) = request_rx.recv() {
+                while let Ok((slot, start, end, expected)) = request_rx.recv() {
+                    let integrity_began = Instant::now();
+                    let integrity_ok = expected.is_none_or(|digest| {
+                        bytes.get(start..end).is_some_and(|blob| Sha256::digest(blob)[..] == digest)
+                    });
+                    let integrity_micros = integrity_began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                     let began = Instant::now();
-                    let atlas = bytes.get(start..end).and_then(pocketjs_core::text::Atlas::parse);
+                    let atlas = integrity_ok.then(|| bytes.get(start..end).and_then(pocketjs_core::text::Atlas::parse)).flatten();
                     let parse_micros = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    if ready_tx.send(PreparedFont { slot, atlas, parse_micros }).is_err() { break; }
+                    if ready_tx.send(PreparedFont {
+                        slot, atlas, parse_micros, integrity_checked: expected.is_some(), integrity_ok,
+                        integrity_micros, bytes: end.saturating_sub(start),
+                    }).is_err() { break; }
                 }
             })
             .ok()?;
         Some(Self { requests: Some(request_tx), ready: ready_rx, thread: Some(thread) })
     }
 
-    fn request(&self, slot: u8, start: usize, end: usize) -> bool {
-        self.requests.as_ref().is_some_and(|sender| sender.send((slot, start, end)).is_ok())
+    fn request(&self, slot: u8, start: usize, end: usize, expected: Option<[u8; 32]>) -> bool {
+        self.requests.as_ref().is_some_and(|sender| sender.send((slot, start, end, expected)).is_ok())
     }
 }
 
@@ -112,12 +125,28 @@ impl Drop for FontWorker {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PakEntryIntegrity {
+    pub key: String,
+    pub offset: usize,
+    pub bytes: usize,
+    pub sha256: [u8; 32],
+}
+
+struct LazyEntry {
+    start: usize,
+    end: usize,
+    expected_sha256: Option<[u8; 32]>,
+    verified: bool,
+    failed: bool,
+}
+
 struct LazyPak {
     // SAFETY: feed_pak_mapped's caller guarantees these bytes outlive the
     // UiSurface. Android satisfies that by destroying PodRuntime before
     // unmapping the APK asset from its native Host.
     bytes: &'static [u8],
-    entries: HashMap<String, (usize, usize)>,
+    entries: HashMap<String, LazyEntry>,
     directory_entries: usize,
     directory_parse_micros: u64,
     font_worker: Option<FontWorker>,
@@ -132,12 +161,53 @@ struct LazyPak {
     last_image_load_micros: u64,
     loaded_images: usize,
     resource_generation: u64,
+    verified_entries: usize,
+    verified_bytes: u64,
+    integrity_hash_micros: u64,
+    integrity_failures: usize,
 }
 
 impl LazyPak {
-    fn blob(&self, key: &str) -> Option<&'static [u8]> {
-        let &(start, end) = self.entries.get(key)?;
-        self.bytes.get(start..end)
+    fn entry_request(&self, key: &str) -> Option<(usize, usize, Option<[u8; 32]>)> {
+        let entry = self.entries.get(key)?;
+        (!entry.failed).then_some((
+            entry.start,
+            entry.end,
+            if entry.verified { None } else { entry.expected_sha256 },
+        ))
+    }
+
+    fn blob(&mut self, key: &str) -> Option<&'static [u8]> {
+        let (start, end, expected, needs_hash) = {
+            let entry = self.entries.get(key)?;
+            if entry.failed { return None; }
+            (entry.start, entry.end, entry.expected_sha256, !entry.verified)
+        };
+        let blob = self.bytes.get(start..end)?;
+        if needs_hash {
+            let began = Instant::now();
+            let ok = expected.is_none_or(|digest| Sha256::digest(blob)[..] == digest);
+            let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            self.record_integrity(key, ok, expected.is_some(), elapsed, blob.len());
+            if !ok { return None; }
+        }
+        Some(blob)
+    }
+
+    fn record_integrity(&mut self, key: &str, ok: bool, checked: bool, micros: u64, bytes: usize) {
+        if !checked { return; }
+        let Some(entry) = self.entries.get_mut(key) else { return; };
+        if entry.verified || entry.failed { return; }
+        self.integrity_hash_micros = self.integrity_hash_micros.saturating_add(micros);
+        if ok {
+            entry.verified = true;
+            self.verified_entries += 1;
+            self.verified_bytes = self.verified_bytes.saturating_add(bytes as u64);
+        } else {
+            entry.failed = true;
+            self.integrity_failures += 1;
+            log::error!("pocket-ui: pak entry integrity failure {key}");
+        }
     }
 }
 
@@ -156,6 +226,10 @@ pub struct LazyPakStats {
     pub last_image_load_micros: u64,
     pub loaded_images: usize,
     pub resource_generation: u64,
+    pub verified_entries: usize,
+    pub verified_bytes: u64,
+    pub integrity_hash_micros: u64,
+    pub integrity_failures: usize,
 }
 
 struct Inner {
@@ -205,7 +279,7 @@ fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
         return true;
     }
     let key = format!("ui:font.{slot}");
-    let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key)) else {
+    let Some(blob) = inner.lazy_pak.as_mut().and_then(|pak| pak.blob(&key)) else {
         return false;
     };
     let began = Instant::now();
@@ -226,7 +300,14 @@ fn install_prepared_fonts(inner: &mut Inner) {
     }
     for font in prepared {
         if let Some(pak) = inner.lazy_pak.as_mut() { pak.pending_fonts.remove(&font.slot); }
+        if let Some(pak) = inner.lazy_pak.as_mut() {
+            pak.record_integrity(
+                &format!("ui:font.{}", font.slot), font.integrity_ok, font.integrity_checked,
+                font.integrity_micros, font.bytes,
+            );
+        }
         if inner.ui.font_atlas(font.slot).is_some() { continue; }
+        if !font.integrity_ok { continue; }
         match font.atlas {
             Some(atlas) => {
                 if inner.ui.install_font_atlas(atlas) {
@@ -245,8 +326,8 @@ fn request_font(inner: &mut Inner, slot: u8) -> bool {
     let key = format!("ui:font.{slot}");
     let request = inner.lazy_pak.as_mut().and_then(|pak| {
         if pak.pending_fonts.contains(&slot) { return Some(true); }
-        let &(start, end) = pak.entries.get(&key)?;
-        let queued = pak.font_worker.as_ref().is_some_and(|worker| worker.request(slot, start, end));
+        let (start, end, expected) = pak.entry_request(&key)?;
+        let queued = pak.font_worker.as_ref().is_some_and(|worker| worker.request(slot, start, end, expected));
         if queued { pak.pending_fonts.insert(slot); }
         Some(queued)
     });
@@ -275,7 +356,7 @@ fn ensure_image(inner: &mut Inner, name: &str) -> i32 {
         return *handle;
     }
     let key = format!("ui:img.{name}");
-    let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key)) else {
+    let Some(blob) = inner.lazy_pak.as_mut().and_then(|pak| pak.blob(&key)) else {
         return -1;
     };
     let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
@@ -497,19 +578,61 @@ impl UiSurface {
     pub unsafe fn feed_pak_mapped(&self, pak: &'static [u8]) {
         let began = Instant::now();
         let mut entries = HashMap::new();
-        let mut eager_sprites = Vec::new();
         let mut directory_entries = 0usize;
         for entry in walk_pak(pak) {
             directory_entries += 1;
             let start = entry.blob.as_ptr() as usize - pak.as_ptr() as usize;
             let end = start + entry.blob.len();
-            if entry.key.starts_with("ui:sprite.") {
-                eager_sprites.push((entry.key.to_string(), start, end));
-            }
-            entries.insert(entry.key.to_string(), (start, end));
+            entries.insert(entry.key.to_string(), LazyEntry {
+                start, end, expected_sha256: None, verified: true, failed: false,
+            });
         }
         let directory_parse_micros =
             began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        unsafe { self.install_mapped_pak(pak, entries, directory_entries, directory_parse_micros) }
+            .expect("legacy mapped pak entries came from the same borrowed walker");
+    }
+
+    /// Install a mapped pak whose canonical directory and complete entry list
+    /// were matched against a trusted manifest. Every payload is SHA-256
+    /// checked before first use; eager styles/sprites are checked here.
+    ///
+    /// # Safety
+    ///
+    /// Same lifetime contract as [`feed_pak_mapped`](Self::feed_pak_mapped).
+    pub unsafe fn feed_pak_mapped_verified(
+        &self,
+        pak: &'static [u8],
+        integrity: Vec<PakEntryIntegrity>,
+        directory_parse_micros: u64,
+    ) -> Result<()> {
+        let mut entries = HashMap::with_capacity(integrity.len());
+        for item in integrity {
+            let end = item.offset.checked_add(item.bytes)
+                .ok_or_else(|| anyhow::anyhow!("pak entry range overflow: {}", item.key))?;
+            if end > pak.len() || item.key.is_empty() || entries.contains_key(&item.key) {
+                return Err(anyhow::anyhow!("invalid verified pak entry: {}", item.key));
+            }
+            entries.insert(item.key, LazyEntry {
+                start: item.offset, end, expected_sha256: Some(item.sha256),
+                verified: false, failed: false,
+            });
+        }
+        let count = entries.len();
+        unsafe { self.install_mapped_pak(pak, entries, count, directory_parse_micros) }
+    }
+
+    unsafe fn install_mapped_pak(
+        &self,
+        pak: &'static [u8],
+        entries: HashMap<String, LazyEntry>,
+        directory_entries: usize,
+        directory_parse_micros: u64,
+    ) -> Result<()> {
+        let eager_sprites: Vec<String> = entries.keys()
+            .filter(|key| key.starts_with("ui:sprite."))
+            .cloned()
+            .collect();
         let mut inner = self.inner.borrow_mut();
         inner.tile_paks.clear();
         inner.textures.clear();
@@ -531,15 +654,26 @@ impl UiSurface {
             last_image_load_micros: 0,
             loaded_images: 0,
             resource_generation: 0,
+            verified_entries: 0,
+            verified_bytes: 0,
+            integrity_hash_micros: 0,
+            integrity_failures: 0,
         });
-        if let Some(styles) = inner.lazy_pak.as_ref().and_then(|source| source.blob("ui:styles")) {
+        if let Some(styles) = inner.lazy_pak.as_mut().and_then(|source| source.blob("ui:styles")) {
             if !inner.ui.load_styles(styles) {
                 log::warn!("pocket-ui: bad styles.bin in mapped pak");
             }
+        } else if inner.lazy_pak.as_ref().is_some_and(|source| source.entries.contains_key("ui:styles")) {
+            return Err(anyhow::anyhow!("mapped pak styles failed integrity"));
         }
-        for (key, start, end) in eager_sprites {
-            feed_entry(&mut inner, &key, &pak[start..end]);
+        for key in eager_sprites {
+            let blob = inner.lazy_pak.as_mut().and_then(|source| source.blob(&key));
+            let Some(blob) = blob else {
+                return Err(anyhow::anyhow!("mapped pak sprite failed integrity: {key}"));
+            };
+            feed_entry(&mut inner, &key, blob);
         }
+        Ok(())
     }
 
     pub fn lazy_pak_stats(&self) -> LazyPakStats {
@@ -561,6 +695,10 @@ impl UiSurface {
                 last_image_load_micros: pak.last_image_load_micros,
                 loaded_images: pak.loaded_images,
                 resource_generation: pak.resource_generation,
+                verified_entries: pak.verified_entries,
+                verified_bytes: pak.verified_bytes,
+                integrity_hash_micros: pak.integrity_hash_micros,
+                integrity_failures: pak.integrity_failures,
             })
             .unwrap_or_default()
     }
@@ -841,7 +979,7 @@ impl UiSurface {
                 if let Some(blob) = inner.tile_paks.get(&key.0) {
                     return inner.ui.upload_tileset_tile(blob, index as u32);
                 }
-                let Some(blob) = inner.lazy_pak.as_ref().and_then(|pak| pak.blob(&key.0)) else {
+                let Some(blob) = inner.lazy_pak.as_mut().and_then(|pak| pak.blob(&key.0)) else {
                     return -1;
                 };
                 inner.ui.upload_tileset_tile(blob, index as u32)
@@ -1013,11 +1151,79 @@ mod tests {
         bytes.extend_from_slice(&[255; 80]);
         let bytes = Box::leak(bytes.into_boxed_slice());
         let worker = FontWorker::new(bytes).expect("font worker");
-        assert!(worker.request(7, 0, bytes.len()));
+        assert!(worker.request(7, 0, bytes.len(), None));
         let prepared = worker.ready.recv_timeout(std::time::Duration::from_secs(2)).expect("prepared font");
         assert_eq!(prepared.slot, 7);
         assert_eq!(prepared.atlas.expect("valid atlas").slot, 7);
+        assert!(worker.request(8, 0, bytes.len(), Some([0; 32])));
+        let rejected = worker.ready.recv_timeout(std::time::Duration::from_secs(2)).expect("rejected font");
+        assert_eq!(rejected.slot, 8);
+        assert!(rejected.integrity_checked);
+        assert!(!rejected.integrity_ok);
+        assert!(rejected.atlas.is_none());
         drop(worker);
+    }
+
+    #[test]
+    fn verified_lazy_image_and_tile_bytes_are_rejected_before_decode() {
+        let image = [1, 0, 1, 0, 3, 0, 0, 0, 255, 0, 0, 255];
+        let tile = b"tileset";
+        let image_sha: [u8; 32] = Sha256::digest(image).into();
+        let tile_sha: [u8; 32] = Sha256::digest(tile).into();
+        let mut bytes = Vec::from(image);
+        let tile_offset = bytes.len();
+        bytes.extend_from_slice(tile);
+        bytes[8] ^= 1;
+        bytes[tile_offset] ^= 1;
+        let bytes = Box::leak(bytes.into_boxed_slice());
+        let surface = UiSurface::new((16.0, 16.0));
+        unsafe {
+            surface.feed_pak_mapped_verified(bytes, vec![
+                PakEntryIntegrity { key: "ui:img.hero".into(), offset: 0, bytes: image.len(), sha256: image_sha },
+                PakEntryIntegrity { key: "ui:tile.map".into(), offset: tile_offset, bytes: tile.len(), sha256: tile_sha },
+            ], 1).unwrap();
+        }
+        let mut inner = surface.inner.borrow_mut();
+        assert_eq!(ensure_image(&mut inner, "hero"), -1);
+        assert!(inner.lazy_pak.as_mut().unwrap().blob("ui:tile.map").is_none());
+        drop(inner);
+        let stats = surface.lazy_pak_stats();
+        assert_eq!(stats.integrity_failures, 2);
+        assert_eq!(stats.verified_entries, 0);
+    }
+
+    #[test]
+    fn verified_lazy_image_hashes_once_and_eager_corruption_aborts_install() {
+        let image = [1, 0, 1, 0, 3, 0, 0, 0, 255, 0, 0, 255];
+        let image_sha: [u8; 32] = Sha256::digest(image).into();
+        let bytes = Box::leak(Vec::from(image).into_boxed_slice());
+        let surface = UiSurface::new((16.0, 16.0));
+        unsafe {
+            surface.feed_pak_mapped_verified(bytes, vec![PakEntryIntegrity {
+                key: "ui:img.hero".into(), offset: 0, bytes: image.len(), sha256: image_sha,
+            }], 1).unwrap();
+        }
+        let first = ensure_image(&mut surface.inner.borrow_mut(), "hero");
+        assert!(first >= 0);
+        assert_eq!(ensure_image(&mut surface.inner.borrow_mut(), "hero"), first);
+        let stats = surface.lazy_pak_stats();
+        assert_eq!(stats.verified_entries, 1);
+        assert_eq!(stats.verified_bytes, image.len() as u64);
+        assert_eq!(stats.integrity_failures, 0);
+
+        let original = b"styles";
+        let sha256: [u8; 32] = Sha256::digest(original).into();
+        let mut corrupted = original.to_vec();
+        corrupted[0] ^= 1;
+        let corrupted = Box::leak(corrupted.into_boxed_slice());
+        let surface = UiSurface::new((16.0, 16.0));
+        let error = unsafe {
+            surface.feed_pak_mapped_verified(corrupted, vec![PakEntryIntegrity {
+                key: "ui:styles".into(), offset: 0, bytes: original.len(), sha256,
+            }], 1).unwrap_err()
+        };
+        assert!(error.to_string().contains("styles failed integrity"));
+        assert_eq!(surface.lazy_pak_stats().integrity_failures, 1);
     }
 
     #[test]
