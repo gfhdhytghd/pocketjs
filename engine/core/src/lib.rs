@@ -1804,7 +1804,18 @@ impl Ui {
             {
                 continue;
             }
-            let slot = style::resolve(node, &self.styles, true).font_slot as u8;
+            // Text content usually lives in raw text children of a styled
+            // <Text> element; paint/layout use the outermost Text ancestor's
+            // style for the whole run (collect_run), so resolve that node.
+            let mut owner = node;
+            while let Some(parent) = self.tree.resolve(owner.parent) {
+                let candidate = &self.tree.slots[parent as usize];
+                if !candidate.alive || candidate.node_type != spec::NodeType::Text as u8 {
+                    break;
+                }
+                owner = candidate;
+            }
+            let slot = style::resolve(owner, &self.styles, true).font_slot as u8;
             if !slots.contains(&slot) {
                 slots.push(slot);
             }
