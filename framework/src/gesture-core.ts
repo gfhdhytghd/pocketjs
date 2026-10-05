@@ -34,8 +34,8 @@
 //
 // Determinism: the pump runs once per frame from the framework entry — after
 // effect delivery, before app frame hooks — so app code always observes this
-// frame's completed gesture output. Velocity is an integer position delta
-// over k fixed-dt frames (one IEEE division; bit-identical everywhere).
+// frame's completed gesture output. Velocity is a least-squares fit over
+// the latest 100 ms of virtual-frame position samples.
 // Long-press deadlines are virtual-frame counts derived from simulationHz().
 // Pinch spans on a locked axis are integers; the "any" axis span uses one
 // Math.sqrt, which IEEE 754 specifies exactly. On hosts without touch (PSP)
@@ -43,7 +43,7 @@
 // stay inert.
 //
 // Steady state allocates nothing: contact tracks are a fixed pool of 8
-// (the wire cap), position history lives in preallocated Int16Array rings,
+// (the wire cap), position history lives in preallocated Float64Array rings,
 // per-owner recognition state is a flag byte per pool slot, and pinch events
 // reuse one module-scratch record (valid only during the callback).
 //
@@ -51,6 +51,7 @@
 // Solid, gesture.vue-vapor.ts for Vue Vapor) re-export it and add the
 // scope-disposing createGesture() flavor of attachGesture().
 
+import { scrollConfiguration } from "./scroll-physics.ts";
 import { simulationHz, virtualFrame } from "./clock.ts";
 import type { SurfaceId } from "./display.ts";
 import { resolveTouchHit } from "./input.ts";
@@ -74,7 +75,7 @@ export interface GestureContact {
   /** Total travel since down. */
   readonly dx: number;
   readonly dy: number;
-  /** Travel THIS frame (what a finger-follow drag consumes). */
+  /** Travel this frame; the first pan callback excludes motion inside slop. */
   readonly fdx: number;
   readonly fdy: number;
   /** Velocity in logical px per VIRTUAL second (release velocity on up). */
@@ -176,10 +177,7 @@ export interface GestureHandle {
 }
 
 const MAX_TRACKS = 8; // the touch wire cap (touch.ts)
-const HIST = 8; // position history ring length
-const VELOCITY_WINDOW = 3; // frames spanned by the velocity estimate
-const DEFAULT_TAP_SLOP = 8;
-const DEFAULT_PAN_SLOP = 6;
+const HIST = 32; // position history ring length
 const DEFAULT_PINCH_SLOP = 10;
 const DEFAULT_LONG_PRESS_S = 0.5;
 
@@ -226,8 +224,8 @@ interface Track extends GestureContact {
   vy: number;
   downFrame: number;
   frames: number;
-  histX: Int16Array;
-  histY: Int16Array;
+  histX: Float64Array;
+  histY: Float64Array;
   histHead: number;
   histLen: number;
   owners: Recognizer[];
@@ -256,8 +254,8 @@ const tracks: Track[] = Array.from({ length: MAX_TRACKS }, (_, slot) => ({
   vy: 0,
   downFrame: 0,
   frames: 0,
-  histX: new Int16Array(HIST),
-  histY: new Int16Array(HIST),
+  histX: new Float64Array(HIST),
+  histY: new Float64Array(HIST),
   histHead: 0,
   histLen: 0,
   owners: [],
@@ -461,19 +459,21 @@ function updateTrack(t: Track, x: number, y: number): void {
   t.histY[t.histHead] = y;
   t.histHead = (t.histHead + 1) % HIST;
   if (t.histLen < HIST) t.histLen++;
-  const k = Math.min(VELOCITY_WINDOW, t.histLen - 1);
-  if (k <= 0) {
-    t.vx = 0;
-    t.vy = 0;
-    return;
-  }
-  // Integer px over k frames of 1/hz virtual seconds each — px per virtual
-  // second with a single exactly-specified IEEE division per axis.
+  // Linear least-squares velocity over the most recent 100 ms, including
+  // stationary frames so a held finger loses stale fling velocity.
   const hz = simulationHz();
-  const last = (t.histHead - 1 + HIST) % HIST;
-  const prev = (last - k + HIST) % HIST;
-  t.vx = ((t.histX[last] - t.histX[prev]) * hz) / k;
-  t.vy = ((t.histY[last] - t.histY[prev]) * hz) / k;
+  const n = Math.min(t.histLen, Math.floor(hz * 0.1) + 1);
+  let sumT = 0, sumTT = 0, sumX = 0, sumY = 0, sumTX = 0, sumTY = 0;
+  for (let j = 0; j < n; j++) {
+    const index = (t.histHead - 1 - j + HIST) % HIST;
+    const time = -j / hz;
+    sumT += time; sumTT += time * time;
+    sumX += t.histX[index]; sumY += t.histY[index];
+    sumTX += time * t.histX[index]; sumTY += time * t.histY[index];
+  }
+  const denominator = n * sumTT - sumT * sumT;
+  t.vx = denominator > 0 ? (n * sumTX - sumT * sumX) / denominator : 0;
+  t.vy = denominator > 0 ? (n * sumTY - sumT * sumY) / denominator : 0;
 }
 
 /** The two-contact pass. Runs BEFORE the per-contact pan pass so a forming
@@ -564,7 +564,7 @@ function recognize(t: Track): void {
     if (!(f & OBSERVING)) continue;
     if (moved) rec.opts.onMove?.(t);
     // Tap death is per-owner: each recognizer has its own slop.
-    const slop = rec.opts.tapSlop ?? DEFAULT_TAP_SLOP;
+    const slop = rec.opts.tapSlop ?? scrollConfiguration().touchSlop;
     if (!(f & TAP_DEAD) && (adx > slop || ady > slop)) {
       rec.flags[t.slot] |= TAP_DEAD;
     }
@@ -595,7 +595,7 @@ function recognize(t: Track): void {
       const f = rec.flags[t.slot];
       if (!(f & OBSERVING) || f & PANNING) continue;
       if (!rec.opts.onPanStart && !rec.opts.onPanMove && !rec.opts.onPanEnd) continue;
-      const slop = rec.opts.panSlop ?? DEFAULT_PAN_SLOP;
+      const slop = rec.opts.panSlop ?? scrollConfiguration().touchSlop;
       if (adx <= slop && ady <= slop) continue;
       const axis = rec.opts.axis ?? "any";
       if (axis === "y" ? ady < adx : axis === "x" ? adx < ady : false) {
@@ -610,6 +610,12 @@ function recognize(t: Track): void {
         // here — a vertical scroll still cannot turn a horizontal pager.
         continue;
       }
+      // Consume only the segment past the slop boundary on the first pan
+      // frame. Keep dx/dy intact for existing horizontal back gestures.
+      const travel = axis === "x" ? adx : axis === "y" ? ady : Math.max(adx, ady);
+      const fraction = travel > 0 ? Math.max(0, 1 - slop / travel) : 0;
+      t.fdx = t.dx * fraction;
+      t.fdy = t.dy * fraction;
       rec.flags[t.slot] |= PANNING | TAP_DEAD;
       rec.opts.onPanStart?.(t);
       claim(t, rec);

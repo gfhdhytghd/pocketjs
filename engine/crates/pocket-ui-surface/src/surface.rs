@@ -14,8 +14,10 @@
 //! host omits it and the framework defaults to 480x272).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -65,6 +67,51 @@ struct SpriteReg {
     step: u16,
 }
 
+struct PreparedFont {
+    slot: u8,
+    atlas: Option<pocketjs_core::text::Atlas>,
+    parse_micros: u64,
+}
+
+/// One serial parser avoids page-faulting several multi-megabyte atlases at
+/// once. The result owns its bitmap, so installing it on the UI thread is a
+/// small move instead of another large copy.
+struct FontWorker {
+    requests: Option<mpsc::Sender<(u8, usize, usize)>>,
+    ready: mpsc::Receiver<PreparedFont>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl FontWorker {
+    fn new(bytes: &'static [u8]) -> Option<Self> {
+        let (request_tx, request_rx) = mpsc::channel::<(u8, usize, usize)>();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("pocket-font".into())
+            .spawn(move || {
+                while let Ok((slot, start, end)) = request_rx.recv() {
+                    let began = Instant::now();
+                    let atlas = bytes.get(start..end).and_then(pocketjs_core::text::Atlas::parse);
+                    let parse_micros = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    if ready_tx.send(PreparedFont { slot, atlas, parse_micros }).is_err() { break; }
+                }
+            })
+            .ok()?;
+        Some(Self { requests: Some(request_tx), ready: ready_rx, thread: Some(thread) })
+    }
+
+    fn request(&self, slot: u8, start: usize, end: usize) -> bool {
+        self.requests.as_ref().is_some_and(|sender| sender.send((slot, start, end)).is_ok())
+    }
+}
+
+impl Drop for FontWorker {
+    fn drop(&mut self) {
+        self.requests.take();
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
+
 struct LazyPak {
     // SAFETY: feed_pak_mapped's caller guarantees these bytes outlive the
     // UiSurface. Android satisfies that by destroying PodRuntime before
@@ -73,8 +120,18 @@ struct LazyPak {
     entries: HashMap<String, (usize, usize)>,
     directory_entries: usize,
     directory_parse_micros: u64,
+    font_worker: Option<FontWorker>,
+    pending_fonts: HashSet<u8>,
     first_font_load_micros: Option<u64>,
+    total_font_load_micros: u64,
+    last_font_load_micros: u64,
+    last_font_slot: Option<u8>,
+    last_font_async: bool,
     loaded_fonts: usize,
+    total_image_load_micros: u64,
+    last_image_load_micros: u64,
+    loaded_images: usize,
+    resource_generation: u64,
 }
 
 impl LazyPak {
@@ -89,7 +146,16 @@ pub struct LazyPakStats {
     pub directory_entries: usize,
     pub directory_parse_micros: u64,
     pub first_font_load_micros: Option<u64>,
+    pub total_font_load_micros: u64,
+    pub last_font_load_micros: u64,
+    pub last_font_slot: Option<u8>,
+    pub last_font_async: bool,
     pub loaded_fonts: usize,
+    pub pending_fonts: usize,
+    pub total_image_load_micros: u64,
+    pub last_image_load_micros: u64,
+    pub loaded_images: usize,
+    pub resource_generation: u64,
 }
 
 struct Inner {
@@ -120,6 +186,18 @@ struct Inner {
     host_abi: Option<u32>,
 }
 
+fn record_font_load(inner: &mut Inner, slot: u8, elapsed: u64, asynchronous: bool) {
+    if let Some(pak) = inner.lazy_pak.as_mut() {
+        pak.loaded_fonts += 1;
+        pak.total_font_load_micros = pak.total_font_load_micros.saturating_add(elapsed);
+        pak.last_font_load_micros = elapsed;
+        pak.last_font_slot = Some(slot);
+        pak.last_font_async = asynchronous;
+        pak.resource_generation = pak.resource_generation.wrapping_add(1);
+        if pak.first_font_load_micros.is_none() { pak.first_font_load_micros = Some(elapsed); }
+    }
+}
+
 fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
     if inner.ui.font_atlas(slot).is_some() {
         return true;
@@ -132,22 +210,56 @@ fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
     let loaded = inner.ui.load_font_atlas(blob);
     let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     if loaded {
-        if let Some(pak) = inner.lazy_pak.as_mut() {
-            pak.loaded_fonts += 1;
-            if pak.first_font_load_micros.is_none() {
-                pak.first_font_load_micros = Some(elapsed);
-            }
-        }
+        record_font_load(inner, slot, elapsed, false);
     } else {
         log::warn!("pocket-ui: bad lazy font atlas {key}");
     }
     loaded
 }
 
+fn install_prepared_fonts(inner: &mut Inner) {
+    let mut prepared = Vec::new();
+    if let Some(worker) = inner.lazy_pak.as_ref().and_then(|pak| pak.font_worker.as_ref()) {
+        while let Ok(font) = worker.ready.try_recv() { prepared.push(font); }
+    }
+    for font in prepared {
+        if let Some(pak) = inner.lazy_pak.as_mut() { pak.pending_fonts.remove(&font.slot); }
+        if inner.ui.font_atlas(font.slot).is_some() { continue; }
+        match font.atlas {
+            Some(atlas) => {
+                if inner.ui.install_font_atlas(atlas) {
+                    record_font_load(inner, font.slot, font.parse_micros, true);
+                } else {
+                    log::warn!("pocket-ui: bad lazy font atlas ui:font.{}", font.slot);
+                }
+            }
+            None => log::warn!("pocket-ui: bad lazy font atlas ui:font.{}", font.slot),
+        }
+    }
+}
+
+fn request_font(inner: &mut Inner, slot: u8) -> bool {
+    if inner.ui.font_atlas(slot).is_some() { return true; }
+    let key = format!("ui:font.{slot}");
+    let request = inner.lazy_pak.as_mut().and_then(|pak| {
+        if pak.pending_fonts.contains(&slot) { return Some(true); }
+        let &(start, end) = pak.entries.get(&key)?;
+        let queued = pak.font_worker.as_ref().is_some_and(|worker| worker.request(slot, start, end));
+        if queued { pak.pending_fonts.insert(slot); }
+        Some(queued)
+    });
+    match request {
+        Some(true) => false,
+        Some(false) => ensure_font(inner, slot),
+        None => false,
+    }
+}
+
 fn ensure_required_fonts(inner: &mut Inner) {
+    install_prepared_fonts(inner);
     let slots = inner.ui.required_font_slots();
     for slot in slots {
-        ensure_font(inner, slot);
+        request_font(inner, slot);
     }
 }
 
@@ -163,9 +275,17 @@ fn ensure_image(inner: &mut Inner, name: &str) -> i32 {
         log::warn!("pocket-ui: bad lazy image entry {key}");
         return -1;
     };
+    let began = Instant::now();
     let handle = inner.ui.upload_texture(pixels, w, h, psm);
+    let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     if handle >= 0 {
         inner.textures.push((name.to_string(), handle));
+        if let Some(pak) = inner.lazy_pak.as_mut() {
+            pak.loaded_images += 1;
+            pak.total_image_load_micros = pak.total_image_load_micros.saturating_add(elapsed);
+            pak.last_image_load_micros = elapsed;
+            pak.resource_generation = pak.resource_generation.wrapping_add(1);
+        }
     }
     handle
 }
@@ -390,8 +510,18 @@ impl UiSurface {
             entries,
             directory_entries,
             directory_parse_micros,
+            font_worker: FontWorker::new(pak),
+            pending_fonts: HashSet::new(),
             first_font_load_micros: None,
+            total_font_load_micros: 0,
+            last_font_load_micros: 0,
+            last_font_slot: None,
+            last_font_async: false,
             loaded_fonts: 0,
+            total_image_load_micros: 0,
+            last_image_load_micros: 0,
+            loaded_images: 0,
+            resource_generation: 0,
         });
         if let Some(styles) = inner.lazy_pak.as_ref().and_then(|source| source.blob("ui:styles")) {
             if !inner.ui.load_styles(styles) {
@@ -412,7 +542,16 @@ impl UiSurface {
                 directory_entries: pak.directory_entries,
                 directory_parse_micros: pak.directory_parse_micros,
                 first_font_load_micros: pak.first_font_load_micros,
+                total_font_load_micros: pak.total_font_load_micros,
+                last_font_load_micros: pak.last_font_load_micros,
+                last_font_slot: pak.last_font_slot,
+                last_font_async: pak.last_font_async,
                 loaded_fonts: pak.loaded_fonts,
+                pending_fonts: pak.pending_fonts.len(),
+                total_image_load_micros: pak.total_image_load_micros,
+                last_image_load_micros: pak.last_image_load_micros,
+                loaded_images: pak.loaded_images,
+                resource_generation: pak.resource_generation,
             })
             .unwrap_or_default()
     }
@@ -851,6 +990,26 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_worker_parses_owned_atlas_and_joins_before_mapping_release() {
+        use pocketjs_core::spec::font_atlas as fa;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&fa::MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&fa::VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&[8, 10, 7, 12, 7, 0, 1, 0]);
+        bytes.extend_from_slice(&('A' as u32).to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 8, 0]);
+        bytes.extend_from_slice(&[255; 80]);
+        let bytes = Box::leak(bytes.into_boxed_slice());
+        let worker = FontWorker::new(bytes).expect("font worker");
+        assert!(worker.request(7, 0, bytes.len()));
+        let prepared = worker.ready.recv_timeout(std::time::Duration::from_secs(2)).expect("prepared font");
+        assert_eq!(prepared.slot, 7);
+        assert_eq!(prepared.atlas.expect("valid atlas").slot, 7);
+        drop(worker);
+    }
 
     #[test]
     fn sampled_upload_preserves_linear_hint_and_rejects_invalid_sampling() {

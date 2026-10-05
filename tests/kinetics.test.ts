@@ -41,7 +41,7 @@ describe("fling", () => {
     const s = createScroller({ max: () => 10_000 });
     fling(s, 600);
     const t = trace(s);
-    expect(t.length).toBeGreaterThan(30);
+    expect(t.length).toBe(23); // Android 600 dp/s: 381.1 ms, quantized to 60 Hz
     for (let i = 1; i < t.length; i++) {
       expect(t[i]).toBeGreaterThanOrEqual(t[i - 1]); // never reverses
       // Deltas shrink every frame — except the final one, where the settle

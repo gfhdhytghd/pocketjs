@@ -281,14 +281,15 @@ impl Fonts {
 
     /// Parse + register an atlas at the slot in its header.
     pub fn load(&mut self, bytes: &[u8]) -> bool {
-        match Atlas::parse(bytes) {
-            Some(a) => {
-                let slot = a.slot as usize;
-                self.slots[slot] = Some(a);
-                true
-            }
-            None => false,
-        }
+        Atlas::parse(bytes).is_some_and(|atlas| self.install(atlas))
+    }
+
+    /// Register an atlas that was parsed off-thread.
+    pub fn install(&mut self, atlas: Atlas) -> bool {
+        let slot = atlas.slot as usize;
+        let Some(target) = self.slots.get_mut(slot) else { return false; };
+        *target = Some(atlas);
+        true
     }
 
     #[inline]

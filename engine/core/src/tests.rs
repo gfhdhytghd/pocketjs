@@ -5121,3 +5121,15 @@ fn required_font_slots_include_only_attached_nonempty_text_and_are_deduplicated(
     ui.insert_before(spec::ROOT_ID, empty, 0);
     assert_eq!(ui.required_font_slots(), vec![7]);
 }
+
+#[test]
+fn required_font_slots_use_the_styled_text_element_of_raw_text_children() {
+    let mut ui = Ui::new();
+    let element = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_prop(element, spec::prop::FONT_SLOT, 19.0);
+    ui.insert_before(spec::ROOT_ID, element, 0);
+    let raw = ui.create_node(spec::NodeType::Text as u8);
+    ui.set_text(raw, "点击进入我的");
+    ui.insert_before(element, raw, 0);
+    assert_eq!(ui.required_font_slots(), vec![19]);
+}
