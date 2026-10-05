@@ -132,8 +132,9 @@ describe("velocity", () => {
     pump([[1, 100, 100]]);
     pump([[1, 104, 100]]);
     pump([[1, 108, 100]]);
-    pump([[1, 112, 100]]); // k = 3 window is full
-    expect(seen[seen.length - 1]).toEqual({ vx: 240, vy: 0 });
+    pump([[1, 112, 100]]); // four samples on a constant-velocity line
+    expect(seen.at(-1)!.vx).toBeCloseTo(240, 8);
+    expect(seen.at(-1)!.vy).toBeCloseTo(0, 8);
   });
 
   test("scales with simulationHz (px per VIRTUAL second)", () => {
@@ -145,7 +146,7 @@ describe("velocity", () => {
     pump([[1, 100, 120]]);
     pump([[1, 100, 130]]);
     // 30 px over 3 frames of 1/30 s each = 300 px/s.
-    expect(seen[seen.length - 1]).toBe(300);
+    expect(seen[seen.length - 1]).toBeCloseTo(300, 8);
   });
 
   test("release velocity reaches onPanEnd", () => {
@@ -156,7 +157,8 @@ describe("velocity", () => {
     pump([[1, 100, 120]]);
     pump([[1, 100, 130]]);
     pump([]);
-    expect(ends).toEqual([600]);
+    expect(ends).toHaveLength(1);
+    expect(ends[0]).toBeCloseTo(600, 8);
   });
 });
 
@@ -176,16 +178,15 @@ describe("pan", () => {
       onDown: () => log.push("pan:down"),
     });
     pump([[1, 100, 100]]);
-    pump([[1, 100, 107]]); // dy 7 > panSlop 6 → pan claims
+    pump([[1, 100, 107]]); // dy 7 stays inside the 8 dp slop
     pump([[1, 100, 117]]);
     pump([]);
     expect(log).toEqual([
       "pan:down",
       "tap:down",
-      "pan:start 7",
+      "pan:start 17",
       "tap:cancel", // losers cancel at claim time, before further pan events
-      "pan:move 7",
-      "pan:move 10",
+      "pan:move 9",
       "pan:end",
     ]);
   });

@@ -3,7 +3,7 @@
 // The scroller owns a content offset and integrates it through six states:
 //   tracking  finger-follow (gesture pan feeds drag deltas; out-of-bounds
 //             travel is rubber-banded with the classic iOS curve)
-//   fling     exponential decay from the release velocity
+//   fling     Android spline decay from the release velocity
 //   spring    edge bounce-back — semi-implicit Euler with the engine's
 //             Spring constants (K=170, C=26), CARRYING the incoming velocity
 //             (a fling that crosses an edge keeps its momentum into the
@@ -21,14 +21,9 @@
 // paint-only — one setProp per moving frame, no relayout) and call
 // `s.step()` once per frame from onFrame.
 //
-// Determinism: fling and spring integrate PER CORE TICK (ticksPerFrame()
-// iterations of fixed 1/60 s), so a 30 Hz world's trajectory is the 60 Hz
-// trajectory subsampled (the clock contract). Chase is per-FRAME by design —
-// hz-sensitive, matching shipped apps/im behavior exactly. Every formula is
-// IEEE + − * / with literal constants: no Math.pow, no transcendentals —
-// trajectories are bit-identical on every host. Decay rates are per-tick
-// literals (0.998/ms and 0.99/ms at 16.667 ms, pre-baked).
+// Fling and spring advance per core tick for frame-rate subsampling.
 
+import { scrollConfiguration, splineFling, splineSample } from "./scroll-physics.ts";
 import { SCREEN_H } from "../../contracts/spec/spec.ts";
 import { simulationHz, ticksPerFrame, TICKS_PER_SECOND } from "./clock.ts";
 
@@ -46,8 +41,8 @@ export interface ScrollerOptions {
   initial?: number;
   /** Max rubber-band travel in px; 0 = hard clamp at the edges. */
   overscroll?: number;
-  /** Fling decay preset: "normal" ≡ iOS 0.998/ms, "fast" ≡ 0.99/ms. */
-  decay?: "normal" | "fast";
+  /** Default Android spline; explicit normal/fast retain legacy exponential presets. */
+  decay?: "normal" | "fast" | "android";
   /** Applied at endDrag: receives the projected rest position and release
    *  velocity, returns the position to tween to (paging, row alignment). */
   snap?: ((projectedRest: number, velocity: number) => number) | null;
@@ -137,6 +132,9 @@ export const plainCell: ScrollerCell = (initial) => {
 };
 
 export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): Scroller {
+  const config = scrollConfiguration();
+  const android = opts.decay === undefined || opts.decay === "android";
+  let flingFrom = 0, flingDistance = 0, flingDuration = 0, flingTicks = 0;
   const extent = opts.extent ?? (() => SCREEN_H);
   const overscroll = opts.overscroll ?? DEFAULT_OVERSCROLL;
   const decay = opts.decay === "fast" ? DECAY_FAST : DECAY_NORMAL;
@@ -189,7 +187,14 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
     state = tweenTo === pos ? "idle" : "tween";
   }
 
+  function limitedVelocity(value: number): number {
+    return Number.isFinite(value) ? Math.max(-config.maximumFlingVelocity, Math.min(config.maximumFlingVelocity, value)) : 0;
+  }
+
   function projectFling(v0: number): number {
+    v0 = limitedVelocity(v0);
+    if (Math.abs(v0) < config.minimumFlingVelocity) return pos;
+    if (android) return pos + splineFling(v0, config.logicalPixelsPerDp).distance;
     // Geometric series of per-tick steps: Σ v·D^n·dt = v·dt·D/(1−D).
     return pos + (v0 * TICK_DT * decay) / (1 - decay);
   }
@@ -216,6 +221,8 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
 
     endDrag(releaseVelocity: number): void {
       if (state !== "tracking") return;
+      releaseVelocity = limitedVelocity(releaseVelocity);
+      if (Math.abs(releaseVelocity) < config.minimumFlingVelocity) releaseVelocity = 0;
       const m = opts.max();
       if (pos < 0 || pos > m) {
         springBound = pos < 0 ? 0 : m;
@@ -230,8 +237,10 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
         startTween(to, durMs);
         return;
       }
-      if (releaseVelocity > FLING_MIN_V || releaseVelocity < -FLING_MIN_V) {
+      if (releaseVelocity !== 0) {
         v = releaseVelocity;
+        const spline = splineFling(v, config.logicalPixelsPerDp);
+        flingFrom = pos; flingDistance = spline.distance; flingDuration = spline.duration; flingTicks = 0;
         state = "fling";
         return;
       }
@@ -271,6 +280,7 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
     },
 
     rebase(delta: number): void {
+      flingFrom += delta;
       dragPos += delta;
       target += delta;
       springBound += delta;
@@ -329,16 +339,24 @@ export function createScrollerWith(cell: ScrollerCell, opts: ScrollerOptions): S
       const ticks = ticksPerFrame();
       for (let i = 0; i < ticks; i++) {
         if (state === "fling") {
-          v *= decay;
-          p += v * TICK_DT;
+          if (android) {
+            const elapsed = ++flingTicks * TICK_DT;
+            const sample = splineSample(elapsed / flingDuration);
+            p = flingFrom + flingDistance * sample.position;
+            v = flingDistance / flingDuration * sample.slope;
+          } else {
+            v *= decay;
+            p += v * TICK_DT;
+          }
           const m = opts.max();
           if (p < 0 || p > m) {
+            if (overscroll <= 0) { settle(clampRange(p)); return; }
             // Carry the momentum into the edge spring mid-tick.
             springBound = p < 0 ? 0 : m;
             state = "spring";
             continue;
           }
-          if (v < FLING_MIN_V && v > -FLING_MIN_V) {
+          if (android ? flingTicks * TICK_DT >= flingDuration : (v < FLING_MIN_V && v > -FLING_MIN_V)) {
             settle(p);
             return;
           }
