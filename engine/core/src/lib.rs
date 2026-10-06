@@ -237,6 +237,23 @@ struct AuxiliarySurface {
     inspect_drawn: Option<(f32, f32, f32, f32)>,
 }
 
+/// Ownership snapshot, computed only on request. Capacity is distinct from
+/// live bytes; these fields are not process RSS or allocator bookkeeping.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiMemoryStats {
+    pub nodes: usize,
+    pub node_slots: usize,
+    pub node_capacity: usize,
+    pub node_arena_bytes: usize,
+    pub node_payload_capacity_bytes: usize,
+    pub textures: usize,
+    pub texture_slots: usize,
+    pub texture_capacity: usize,
+    pub texture_bytes: usize,
+    pub texture_capacity_bytes: usize,
+    pub font_bitmap_bytes: usize,
+}
+
 /// The retained UI core. One per AppInstance, with an optional independent
 /// auxiliary output root sharing the same resources and frame clock.
 pub struct Ui {
@@ -326,6 +343,34 @@ impl Default for Ui {
 }
 
 impl Ui {
+    pub fn memory_stats(&self) -> UiMemoryStats {
+        let mut stats = UiMemoryStats {
+            nodes: self.tree.slots.iter().filter(|node| node.alive).count(),
+            node_slots: self.tree.slots.len(),
+            node_capacity: self.tree.slots.capacity(),
+            node_arena_bytes: self.tree.slots.capacity() * core::mem::size_of::<tree::Node>(),
+            texture_slots: self.textures.len(),
+            texture_capacity: self.textures.capacity(),
+            ..UiMemoryStats::default()
+        };
+        for node in &self.tree.slots {
+            stats.node_payload_capacity_bytes += node.text.capacity()
+                + node.children.capacity() * core::mem::size_of::<i32>()
+                + (node.overrides.capacity() + node.anim_values.capacity()) * core::mem::size_of::<(u8, u32)>();
+        }
+        for slot in &self.textures {
+            if let Some(texture) = &slot.tex {
+                stats.textures += 1;
+                stats.texture_bytes += texture.byte_len + texture.palette.as_ref().map_or(0, |data| data.len() * 16);
+                stats.texture_capacity_bytes += texture.data.capacity() * 16 + texture.palette.as_ref().map_or(0, |data| data.capacity() * 16);
+            }
+        }
+        for slot in 0..spec::MAX_FONT_SLOTS {
+            stats.font_bitmap_bytes += self.fonts.atlas(slot as u8).map_or(0, |atlas| atlas.bitmap.len());
+        }
+        stats
+    }
+
     /// Create a core with the pre-created root node (`spec::ROOT_ID`,
     /// full-screen flex column) already in the tree.
     pub fn new() -> Self {

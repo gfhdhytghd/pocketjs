@@ -12,6 +12,8 @@ export { __setAnalog, analogRaw, analogX, analogY } from "./analog.ts";
 type FrameCallback = (buttons: number) => void;
 
 const callbacks = new Set<FrameCallback>();
+/** No per-frame accounting; read the live registry on demand. */
+export const frameResourceCounts = () => ({callbacks:callbacks.size});
 let buttonHandlerBlockDepth = 0;
 
 export function resetFrameHooks(): void {

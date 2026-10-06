@@ -54,6 +54,12 @@ impl Guest {
         Ok(Guest { rt, ctx })
     }
 
+    /// Demand-only QuickJS JS_ComputeMemoryUsage. Call between guest turns;
+    /// this does not run GC or alter the allocation threshold.
+    pub fn memory_usage(&self) -> qjs::runtime::MemoryUsage {
+        self.rt.memory_usage()
+    }
+
     /// Run `f` with the realm's [`Ctx`]. Surface crates use this to build
     /// per-tick event payloads or to reach guest globals the helpers below
     /// don't cover.

@@ -14,6 +14,7 @@ import {
   insertNode,
   isTextNode,
   missCounters,
+  nativeTreeResourceCounts,
   registerSprite,
   registerTexture,
   release,
@@ -40,6 +41,7 @@ export {
   insertNode,
   isTextNode,
   missCounters,
+  nativeTreeResourceCounts,
   registerSprite,
   registerTexture,
   release,
@@ -109,3 +111,5 @@ export function createRenderRoot(root: NodeMirror) {
 export function applySpread(node: NodeMirror, props: HostProps): void {
   spread(node, props, false);
 }
+
+export {frameResourceCounts} from "./frame.ts";

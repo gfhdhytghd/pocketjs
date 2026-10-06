@@ -357,6 +357,12 @@ export function resetSprites(): void {
 const sweepSet = new Set<NodeMirror>();
 const retained = new Set<NodeMirror>();
 
+/** Demand-only registry counts. Names, node text and styles are excluded. */
+export function nativeTreeResourceCounts() {
+  return {roots:nativeRoots.size, retained:retained.size, sweep:sweepSet.size,
+    textures:textures.size, sprites:sprites.size};
+}
+
 /** Keep a detached subtree alive across frames (skip the sweep). */
 export function retain(node: NodeMirror): void {
   retained.add(node);
