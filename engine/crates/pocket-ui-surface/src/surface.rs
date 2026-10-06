@@ -301,6 +301,7 @@ fn record_font_load(inner: &mut Inner, slot: u8, elapsed: u64, asynchronous: boo
 }
 
 fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
+    install_prepared_fonts(inner);
     if inner.ui.font_atlas(slot).is_some() {
         return true;
     }
@@ -780,6 +781,18 @@ impl UiSurface {
                 integrity_failures: pak.integrity_failures,
             })
             .unwrap_or_default()
+    }
+
+    /// Check a startup hint without reading or hashing its payload.
+    pub fn has_font_resource(&self, slot: u8) -> bool {
+        let inner = self.inner.borrow();
+        inner.ui.font_atlas(slot).is_some() || inner.lazy_pak.as_ref()
+            .is_some_and(|pak| pak.entries.contains_key(&format!("ui:font.{slot}")))
+    }
+
+    /// Queue atlas preparation without blocking the guest startup turn.
+    pub fn request_font(&self, slot: u8) {
+        request_font(&mut self.inner.borrow_mut(), slot);
     }
 
     /// Ensure one mapped atlas is resident before a host reads its metrics.
