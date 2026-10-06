@@ -35,6 +35,9 @@ import {
 } from "../../contracts/spec/spec.ts";
 import { fileURLToPath } from "node:url";
 import { resolve, join } from "node:path";
+import { createHash } from "node:crypto";
+import { deflateRawSync } from "node:zlib";
+import { readFileSync } from "node:fs";
 import { fontSlotInfo } from "./tailwind.ts";
 
 const FONTS_DIR = resolve(fileURLToPath(new URL("../../assets/fonts/", import.meta.url)));
@@ -54,6 +57,8 @@ export interface BakedAtlas {
   cellH: number;
   coverageW: number;
   coverageH: number;
+  /** Opt-in runtime metadata references one shared, authenticated TTF entry. */
+  source?: { key: string; path: string };
 }
 
 export interface FontSlotResource {
@@ -90,7 +95,14 @@ export interface BakeOptions {
   regularTtf?: string;
   boldTtf?: string;
   monoTtf?: string;
+  glyphCache?: { warmChars: string; preseedScanned?: boolean };
 }
+
+export const RUNTIME_FONT_VERSION = 5;
+export const RUNTIME_FONT_HEADER_BYTES = 64;
+export const RUNTIME_FONT_CMAP_BYTES = 16;
+export const RUNTIME_FONT_SEED_BUDGET = 256 * 1024;
+export const COMPRESSED_FONT_SEED_BUDGET = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Outline -> coverage cell rasterizer
@@ -301,6 +313,7 @@ export function bakeSlot(
   chars: number[],
   rasterDensity = 1,
   rasterAdvances = false,
+  runtime?: { sourceSha256: string; warmChars: string; compressed?: boolean },
 ): BakedAtlas {
   rasterDensity = checkedRasterDensity(rasterDensity);
   const upm = font.unitsPerEm;
@@ -324,6 +337,7 @@ export function bakeSlot(
      *  right by this many px so the cell holds all their ink; renderers place
      *  the cell at penX - xoff. */
     xoff: number;
+    ttfGid: number;
   }
   const glyphs: G[] = [];
   for (const cp of chars) {
@@ -357,7 +371,7 @@ export function bakeSlot(
         p.y *= rasterDensity;
       }
     }
-    glyphs.push({ cp, contours, advance, maxX, xoff });
+    glyphs.push({ cp, contours, advance, maxX, xoff, ttfGid: gi });
   }
 
   const tofuW = Math.max(4, Math.round(px * 0.55));
@@ -370,6 +384,43 @@ export function bakeSlot(
   if (glyphCount > 0xffff) throw new Error("PocketJS bake-font: too many glyphs");
   const coverageW = cellW * rasterDensity;
   const coverageH = cellH * rasterDensity;
+  if (runtime) {
+    if (rasterDensity > 4 || !/^[a-f0-9]{64}$/.test(runtime.sourceSha256)) throw new Error("Invalid runtime font density/source digest");
+    const cellBytes = coverageW * coverageH;
+    const wanted = new Set<number>([0]);
+    const byCp = new Map(glyphs.map((g, i) => [g.cp, i + 1]));
+    // Explicit parity/prewarm chars have priority over ASCII within the bound.
+    const chars = [...runtime.warmChars, ...Array.from({length:95},(_,i)=>String.fromCodePoint(32+i))];
+    for (const ch of chars) {
+      const gid = byCp.get(ch.codePointAt(0)!);
+      if (gid !== undefined && (runtime.compressed || (wanted.size + 1) * cellBytes <= RUNTIME_FONT_SEED_BUDGET)) wanted.add(gid);
+    }
+    if (cellBytes > RUNTIME_FONT_SEED_BUDGET) throw new Error("Runtime font cell exceeds seed budget");
+    const [tofuCoverage,tofuAdvance]=tofu(cellW,cellH,baseline,px,rasterDensity);
+    const records:Array<{gid:number;codec:number;bytes:Uint8Array}>=[];let seedBytes=0;
+    for(const gid of wanted) {
+      const cell=gid===0?tofuCoverage:rasterize(glyphs[gid-1].contours,coverageW,coverageH);
+      const compressed=runtime.compressed&&gid!==0;
+      const bytes=compressed?deflateRawSync(cell):cell;
+      if(seedBytes+bytes.length>(runtime.compressed?COMPRESSED_FONT_SEED_BUDGET:RUNTIME_FONT_SEED_BUDGET)) continue;
+      records.push({gid,codec:compressed?1:0,bytes});seedBytes+=bytes.length;
+    }
+    records.sort((a,b)=>a.gid-b.gid);
+    const size=RUNTIME_FONT_HEADER_BYTES+glyphCount*RUNTIME_FONT_CMAP_BYTES+records.reduce((sum,r)=>sum+(runtime.compressed?8:4)+r.bytes.length,0);
+    const out = new Uint8Array(size), dv = new DataView(out.buffer);
+    dv.setUint32(0,FONT_MAGIC,true);dv.setUint16(4,runtime.compressed?6:RUNTIME_FONT_VERSION,true);dv.setUint16(6,glyphCount,true);
+    out.set([cellW,cellH,baseline,lineHeight,slot,bold?FONT_FLAG_BOLD:0,rasterDensity,0],8);
+    out.set(Buffer.from(runtime.sourceSha256,"hex"),16);dv.setFloat64(48,px,true);dv.setUint32(56,records.length,true);
+    const entries = glyphs.map((g,i)=>({cp:g.cp,gid:i+1,advance:g.advance,xoff:g.xoff,ttfGid:g.ttfGid}));
+    entries.push({cp:TOFU_CODEPOINT,gid:0,advance:tofuAdvance,xoff:0,ttfGid:0});entries.sort((a,b)=>a.cp-b.cp);
+    let offset=RUNTIME_FONT_HEADER_BYTES;
+    for(const e of entries){dv.setUint32(offset,e.cp,true);dv.setUint16(offset+4,e.gid,true);
+      out[offset+6]=Math.round(e.advance);out[offset+7]=e.xoff;dv.setFloat32(offset+8,e.advance,true);dv.setUint16(offset+12,e.ttfGid,true);offset+=RUNTIME_FONT_CMAP_BYTES;}
+    for(const r of records){dv.setUint16(offset,r.gid,true);dv.setUint16(offset+2,r.codec,true);
+      if(runtime.compressed){dv.setUint32(offset+4,r.bytes.length,true);offset+=8;}else{offset+=4;}
+      out.set(r.bytes,offset);offset+=r.bytes.length;}
+    return {slot,px,bold,rasterDensity,bytes:out,glyphCount,cellW,cellH,coverageW,coverageH};
+  }
   const coverageBytes = glyphCount * coverageH * coverageW;
   if (!Number.isSafeInteger(coverageBytes)) {
     throw new RangeError("PocketJS bake-font: atlas coverage is too large");
@@ -442,6 +493,7 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
   const cps = new Set<number>();
   for (let c = 32; c <= 126; c++) cps.add(c); // ASCII always [R]
   for (const cp of opts.codepoints) if (cp >= 32 && cp !== 127) cps.add(cp);
+  const scannedChars=[...cps].map(cp=>String.fromCodePoint(cp)).join("");
   for (const ch of opts.extraChars ?? "") {
     const cp = ch.codePointAt(0)!;
     if (cp >= 32 && cp !== 127) cps.add(cp);
@@ -456,6 +508,16 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
   const resources = validateFontSlots(opts.fontSlots ?? []);
   const resourceMap = new Map(resources.map(resource => [resource.slot, resource]));
   const loadedResources = new Map<string, Font>();
+  const sourceDigests=new Map<string,string>();
+  const runtimeOptions=(path:string)=>{
+    if(!opts.glyphCache)return;
+    let digest=sourceDigests.get(path);
+    if(!digest){digest=createHash("sha256").update(readFileSync(path)).digest("hex");sourceDigests.set(path,digest);}
+    return {sourceSha256:digest,warmChars:opts.glyphCache.warmChars+(opts.glyphCache.preseedScanned?scannedChars:""),compressed:opts.glyphCache.preseedScanned};
+  };
+  const attachSource=(atlas:BakedAtlas,path:string,runtime:ReturnType<typeof runtimeOptions>)=>{
+    if(runtime)atlas.source={key:`ui:font-source.${runtime.sourceSha256}`,path};return atlas;
+  };
   const results: BakedAtlas[] = [];
   for (const slot of [...new Set([...opts.slots, ...resourceMap.keys()])].sort((a, b) => a - b)) {
     if (slot < 0 || slot >= MAX_FONT_SLOTS) {
@@ -465,7 +527,8 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
     if (resource) {
       let font = loadedResources.get(resource.path);
       if (!font) { font = await loadFont(resource.path); loadedResources.set(resource.path, font); }
-      results.push(bakeSlot(font, slot, resource.px, resource.bold ?? false, chars, rasterDensity, resource.rasterAdvances ?? false));
+      const runtime=runtimeOptions(resource.path);
+      results.push(attachSource(bakeSlot(font, slot, resource.px, resource.bold ?? false, chars, rasterDensity, resource.rasterAdvances ?? false,runtime),resource.path,runtime));
       continue;
     }
     const { px, bold, mono } = fontSlotInfo(slot);
@@ -477,7 +540,9 @@ export async function bakeAtlases(opts: BakeOptions): Promise<BakedAtlas[]> {
           ? (opts.boldTtf ?? DEFAULT_BOLD)
           : (opts.regularTtf ?? DEFAULT_REGULAR),
     );
-    results.push(bakeSlot(fonts[key]!, slot, px, bold, chars, rasterDensity));
+    const path=mono?(opts.monoTtf??DEFAULT_MONO):bold?(opts.boldTtf??DEFAULT_BOLD):(opts.regularTtf??DEFAULT_REGULAR);
+    const runtime=runtimeOptions(path);
+    results.push(attachSource(bakeSlot(fonts[key]!, slot, px, bold, chars, rasterDensity,false,runtime),path,runtime));
   }
   return results;
 }

@@ -1862,6 +1862,25 @@ impl Ui {
         slots
     }
 
+    /// Unique mounted glyphs for asynchronous coverage prewarming. Scan only
+    /// when the existing font requirement revision changes.
+    pub fn required_font_glyphs(&self)->Vec<(u8,u16)> {
+        let mut glyphs=Vec::new();
+        for node in &self.tree.slots {
+            if !node.alive||node.node_type!=spec::NodeType::Text as u8||node.text.is_empty()||node.parent==0 {continue;}
+            let mut owner=node;
+            while let Some(parent)=self.tree.resolve(owner.parent) {
+                let candidate=&self.tree.slots[parent as usize];
+                if !candidate.alive||candidate.node_type!=spec::NodeType::Text as u8 {break;} owner=candidate;
+            }
+            let slot=style::resolve(owner,&self.styles,true).font_slot as u8;
+            if let Some(atlas)=self.font_atlas(slot) {
+                for ch in node.text.chars() {glyphs.push((slot,atlas.lookup(ch as u32).map_or(0,|e|e.0)));}
+            }
+        }
+        glyphs.sort_unstable();glyphs.dedup();glyphs
+    }
+
     // ---- internals -----------------------------------------------------------
 
     /// The taffy leaf affected by a text-node content update. Text children

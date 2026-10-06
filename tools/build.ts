@@ -84,6 +84,7 @@ let extraChars = "";
 let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
 let fontSlots: FontSlotResource[] = [];
+let glyphCache: { warmChars: string;preseedScanned?:boolean } | undefined;
 let appArg = "";
 let frameworkFlag: string | undefined;
 let configPath = join(ROOT, "pocket.config.ts");
@@ -98,6 +99,12 @@ for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-slots-json=")) fontSlots = validateFontSlots(JSON.parse(a.slice("--font-slots-json=".length)));
+  else if (a.startsWith("--glyph-cache-json=")) {
+    const option=JSON.parse(a.slice("--glyph-cache-json=".length));
+    if(!option||typeof option!=="object"||typeof option.warmChars!=="string"||option.warmChars.length>12288)throw new Error("glyph cache requires warmChars string <=12288 code units");
+    if(option.preseedScanned!==undefined&&typeof option.preseedScanned!=="boolean")throw new Error("Invalid glyph-cache preseedScanned");
+    glyphCache={warmChars:option.warmChars,preseedScanned:option.preseedScanned};
+  }
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
   else if (a.startsWith("--config=")) { configPath = resolvePath(ROOT, a.slice("--config=".length)); configFlagged = true; }
@@ -326,7 +333,7 @@ const fontCacheKey = createHash("sha256")
   .update(readFileSync(join(ROOT, "contracts/spec/spec.ts")))
   .update(readFileSync(join(ROOT, "bun.lock")))
   .update(readFileSync(DEFAULT_MONO))
-  .update(JSON.stringify({ codepoints: [...codepoints].sort((a, b) => a - b), slots: allFontSlots, extraChars, rasterDensity, regular: regularFontPath ?? DEFAULT_REGULAR, bold: boldFontPath ?? DEFAULT_BOLD, mono: DEFAULT_MONO }))
+  .update(JSON.stringify({ codepoints: [...codepoints].sort((a, b) => a - b), slots: allFontSlots, extraChars, rasterDensity, glyphCache, regular: regularFontPath ?? DEFAULT_REGULAR, bold: boldFontPath ?? DEFAULT_BOLD, mono: DEFAULT_MONO }))
   .update(readFileSync(regularFontPath ?? DEFAULT_REGULAR))
   .update(readFileSync(boldFontPath ?? DEFAULT_BOLD))
   .update(JSON.stringify(fontSlots.map(resource => ({...resource,
@@ -356,7 +363,7 @@ if (existsSync(fontCachePath)) {
   } catch { /* a truncated cache entry is simply rebuilt */ }
 }
 if (!atlases) {
-  atlases = await bakeAtlases({ codepoints, slots: styles.usedFontSlots, fontSlots, extraChars, rasterDensity, regularTtf: regularFontPath, boldTtf: boldFontPath });
+  atlases = await bakeAtlases({ codepoints, slots: styles.usedFontSlots, fontSlots, extraChars, rasterDensity, regularTtf: regularFontPath, boldTtf: boldFontPath, glyphCache });
   mkdirSync(fontCacheDir, { recursive: true });
   const temp = `${fontCachePath}.tmp-${process.pid}-${Date.now()}`;
   const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
@@ -375,6 +382,9 @@ const blobs: PakBlob[] = [
   { key: KEY_STYLES, dtype: PAK_DTYPE.u8, data: styles.bin },
   ...atlases.map((a) => ({ key: keyFont(a.slot), dtype: PAK_DTYPE.u8, data: a.bytes })),
 ];
+const fontSources=new Map<string,string>();
+for(const atlas of atlases)if(atlas.source)fontSources.set(atlas.source.key,atlas.source.path);
+for(const [key,path] of fontSources)blobs.push({key,dtype:PAK_DTYPE.u8,data:new Uint8Array(readFileSync(path))});
 const appDir = dirname(entry);
 // Optional per-app sprite manifest: images listed here are baked as animated
 // sprite-atlas entries (ui:sprite.<name>) instead of static images.

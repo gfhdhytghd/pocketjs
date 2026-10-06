@@ -715,7 +715,7 @@ impl Renderer {
             if gid >= atlas.glyph_count {
                 continue;
             }
-            let rows = atlas.glyph_rows(gid);
+            let rows = atlas.glyph_coverage(gid);
             let x0 = (gx * scale).max(global_rect.x as i32);
             let y0 = (gy * scale).max(global_rect.y as i32);
             let x1 = ((gx + cell_w) * scale).min((global_rect.x + global_rect.w) as i32);

@@ -425,7 +425,7 @@ impl GpuiRenderer {
                 Some(image) => image.clone(),
                 None => {
                     let (cw, ch) = (atlas.coverage_width(), atlas.coverage_height());
-                    let rows = atlas.glyph_rows(gid);
+                    let rows = atlas.glyph_coverage(gid);
                     let tint = abgr(color);
                     let (r, g, b) = (
                         (tint.r * 255.0) as u8,

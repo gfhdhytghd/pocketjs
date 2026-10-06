@@ -13,3 +13,4 @@ anyhow = { workspace = true }
 log = { workspace = true }
 sha2 = "0.10.9"
 ttf-parser = "0.25.1"
+miniz_oxide = "0.8.9"

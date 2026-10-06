@@ -441,7 +441,7 @@ impl Renderer {
         let coverage_h = atlas.coverage_height();
         let mut alpha = vec![0u8; (texture_w as usize).checked_mul(texture_h as usize)?];
         for glyph in 0..atlas.glyph_count {
-            let source = atlas.glyph_rows(glyph);
+            let source = atlas.glyph_coverage(glyph);
             let x = (glyph as u32 % columns) * coverage_w;
             let y = (glyph as u32 / columns) * coverage_h;
             for row in 0..coverage_h as usize {

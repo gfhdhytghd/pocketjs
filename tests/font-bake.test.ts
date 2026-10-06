@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { inflateRawSync } from "node:zlib";
 import { parse as parseFont } from "opentype.js";
 import { bakeAtlases, validateFontSlots, bakeSlot, DEFAULT_REGULAR } from "../framework/compiler/bake-font.ts";
 import {
@@ -209,4 +210,42 @@ describe("application font resources", () => {
     for (const value of [null,{},[{...good,slot:2}],[good,good],[{...good,slot:64}],[{...good,px:NaN}],[{...good,px:129}],[{...good,rasterAdvances:"true"}]])
       expect(() => validateFontSlots(value)).toThrow();
   });
+});
+
+describe("runtime glyph metadata",()=>{
+  test("preserves the full cmap and fractional advances, and seeds exact original cells",()=>{
+    const legacy=bakeSlot(font,33,14,false,[...codepoints,0x43],2,true);
+    const dynamic=bakeSlot(font,33,14,false,[...codepoints,0x43],2,true,{sourceSha256:"ab".repeat(32),warmChars:"î"});
+    const old=new DataView(legacy.bytes.buffer),now=new DataView(dynamic.bytes.buffer);
+    expect(now.getUint16(4,true)).toBe(5);expect(dynamic.bytes.slice(8,15)).toEqual(legacy.bytes.slice(8,15));
+    for(let i=0;i<legacy.glyphCount;i++) {
+      expect(dynamic.bytes.slice(64+i*16,64+i*16+12)).toEqual(legacy.bytes.slice(16+i*12,16+(i+1)*12));
+      expect(now.getUint16(64+i*16+14,true)).toBe(0);
+    }
+    const cell=dynamic.coverageW*dynamic.coverageH;let offset=64+dynamic.glyphCount*16;
+    for(let i=0;i<now.getUint32(56,true);i++) {const gid=now.getUint16(offset,true);offset+=4;
+      expect(dynamic.bytes.slice(offset,offset+cell)).toEqual(legacy.bytes.slice(16+legacy.glyphCount*12+gid*cell,16+legacy.glyphCount*12+(gid+1)*cell));offset+=cell;
+    }
+    expect(offset).toBe(dynamic.bytes.length);
+  });
+  test("font source keys are shared across sizes and legacy bakes remain available",async()=>{
+    const dynamic=await bakeAtlases({codepoints:[65],slots:[0,1],regularTtf:DEFAULT_REGULAR,glyphCache:{warmChars:"A"}});
+    expect(dynamic[0].source?.key).toMatch(/^ui:font-source\.[a-f0-9]{64}$/);
+    expect(dynamic[0].source?.key).toBe(dynamic[1].source?.key);
+    const legacy=await bakeAtlases({codepoints:[65],slots:[0],regularTtf:DEFAULT_REGULAR});
+    expect(legacy[0].source).toBeUndefined();expect(new DataView(legacy[0].bytes.buffer).getUint16(4,true)).toBe(3);
+  });
+});
+
+test("compressed warm glyphs keep exact pixels without retaining decoded bitmaps",()=>{
+  const old=bakeSlot(font,33,14,false,codepoints,2,true);
+  const now=bakeSlot(font,33,14,false,codepoints,2,true,{sourceSha256:"ab".repeat(32),warmChars:"î",compressed:true});
+  const view=new DataView(now.bytes.buffer);expect(view.getUint16(4,true)).toBe(6);
+  const cell=now.coverageW*now.coverageH;let offset=64+now.glyphCount*16;
+  for(let i=0;i<view.getUint32(56,true);i++) {
+    const gid=view.getUint16(offset,true),codec=view.getUint16(offset+2,true),len=view.getUint32(offset+4,true);offset+=8;
+    const data=now.bytes.slice(offset,offset+len),decoded=codec?new Uint8Array(inflateRawSync(data)):data;
+    expect(decoded).toEqual(old.bytes.slice(16+old.glyphCount*12+gid*cell,16+old.glyphCount*12+(gid+1)*cell));offset+=len;
+  }
+  expect(offset).toBe(now.bytes.length);expect(now.bytes.length).toBeLessThan(old.bytes.length);
 });

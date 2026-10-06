@@ -1340,7 +1340,7 @@ fn glyph_run<T: RenderTarget>(
         if x0 >= x1 || y0 >= y1 {
             continue;
         }
-        let rows = atlas.glyph_rows(gid);
+        let rows = atlas.glyph_coverage(gid);
         for py in y0..y1 {
             // Density-2 Android rendering is the common case: the atlas and
             // output use the same integer scale. Avoid two integer divisions
@@ -1423,7 +1423,7 @@ fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
         let x1 = (-crate::layout::floorf(-xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)) as i32).min(clip.x1);
         let y0 = (crate::layout::floorf(ys.iter().copied().fold(f32::INFINITY, f32::min)) as i32).max(clip.y0);
         let y1 = (-crate::layout::floorf(-ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)) as i32).min(clip.y1);
-        let rows = atlas.glyph_rows(gid);
+        let rows = atlas.glyph_coverage(gid);
         for py in y0..y1 {
             for px in x0..x1 {
                 let dx = px as f32 + 0.5 - gx;
@@ -1431,7 +1431,7 @@ fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
                 let u = (dx * vy - dy * vx) * inv_det;
                 let v = (ux * dy - uy * dx) * inv_det;
                 if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) { continue; }
-                let cov = sample_glyph_coverage(rows, coverage_w, coverage_h, bpr, u, v);
+                let cov = sample_glyph_coverage(&rows, coverage_w, coverage_h, bpr, u, v);
                 if cov != 0 {
                     let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
                     target.blend((py * stride + px) as usize, r, g, b, alpha);

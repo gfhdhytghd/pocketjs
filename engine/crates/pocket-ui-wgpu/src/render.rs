@@ -740,7 +740,7 @@ impl UiRenderer {
         for gid in 0..atlas.glyph_count {
             let gx = (gid as u32 % cols) * cov_w;
             let gy = (gid as u32 / cols) * cov_h;
-            let rows_bytes = atlas.glyph_rows(gid);
+            let rows_bytes = atlas.glyph_coverage(gid);
             let bpr = atlas.bytes_per_row();
             for y in 0..cov_h {
                 let src = &rows_bytes[(y as usize) * bpr..][..cov_w as usize];

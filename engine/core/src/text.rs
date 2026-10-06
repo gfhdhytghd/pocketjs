@@ -9,8 +9,37 @@
 //! breaks only on explicit '\n'. Measurement is the max line width (sum of
 //! advances + tracking per glyph) by lines x line height.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use core::cell::Cell;
+#[cfg(feature="std")]
+use std::{collections::BTreeMap, sync::Arc};
+
+#[cfg(feature="std")]
+pub type GlyphProvider=Arc<dyn Fn(u16)->Option<Arc<[u8]>>+Send+Sync>;
+#[cfg(feature="std")]
+pub struct RuntimeAtlasInfo {
+    pub source_sha256:[u8;32],
+    pub px:f64,
+    pub cache_epoch:u64,
+    pub seed_bytes:usize,
+    /// Indexed by the original virtual atlas gid; gid 0 remains synthetic tofu.
+    pub ttf_glyphs:Vec<u16>,
+    pub seeds:BTreeMap<u16,Arc<[u8]>>,
+    pub compressed_seeds:Arc<BTreeMap<u16,Arc<[u8]>>>,
+    pub provider:Option<GlyphProvider>,
+}
+
+/// One immutable cell. Shared runtime cells remain valid across LRU eviction.
+pub enum GlyphRows<'a> {
+    Borrowed(&'a [u8]),
+    #[cfg(feature="std")]
+    Shared(Arc<[u8]>),
+}
+impl core::ops::Deref for GlyphRows<'_> {
+    type Target=[u8];
+    fn deref(&self)->&[u8] {match self {Self::Borrowed(v)=>v,
+        #[cfg(feature="std")] Self::Shared(v)=>v,}}
+}
 
 use crate::spec;
 
@@ -63,6 +92,8 @@ pub struct Atlas {
     /// Coverage cells: glyphCount x (cellH*density) x (cellW*density)
     /// alpha bytes, left-to-right.
     pub bitmap: Vec<u8>,
+    #[cfg(feature="std")]
+    pub runtime:Option<RuntimeAtlasInfo>,
 }
 
 impl Atlas {
@@ -74,13 +105,15 @@ impl Atlas {
             return None;
         }
         let version = rd_u16(bytes, 4)?;
+        let dynamic=version==5||version==6;
+        if dynamic && !cfg!(feature="std") {return None;}
         // Atlas v2 used bytes 14..15 as reserved and had one coverage sample
         // per logical pixel. Keep loading it so old packs remain usable.
         let raster_density = if version == 2 {
             1
-        } else if version == fa::VERSION || version == fa::RASTER_ADVANCE_VERSION {
+        } else if version == fa::VERSION || version == fa::RASTER_ADVANCE_VERSION || dynamic {
             let density = *bytes.get(14)?;
-            if density == 0 {
+            if density == 0 || (dynamic && density>4) {
                 return None;
             }
             density
@@ -97,28 +130,31 @@ impl Atlas {
         if slot as usize >= spec::MAX_FONT_SLOTS || glyph_count == 0 || cell_w == 0 || cell_h == 0 {
             return None;
         }
-        let cmap_off = fa::HEADER_SIZE;
-        let cmap_entry_size = if version == fa::RASTER_ADVANCE_VERSION { fa::RASTER_ADVANCE_CMAP_ENTRY_SIZE } else { fa::CMAP_ENTRY_SIZE };
+        let cmap_off = if dynamic {64}else{fa::HEADER_SIZE};
+        let cmap_entry_size = if dynamic {16}else if version == fa::RASTER_ADVANCE_VERSION { fa::RASTER_ADVANCE_CMAP_ENTRY_SIZE } else { fa::CMAP_ENTRY_SIZE };
         let bitmap_off = (glyph_count as usize)
             .checked_mul(cmap_entry_size)?
             .checked_add(cmap_off)?;
         let coverage_w = (cell_w as usize).checked_mul(raster_density as usize)?;
         let coverage_h = (cell_h as usize).checked_mul(raster_density as usize)?;
-        let bitmap_len = (glyph_count as usize)
+        let bitmap_len = if dynamic {0}else{(glyph_count as usize)
             .checked_mul(coverage_h)?
-            .checked_mul(coverage_w)?;
+            .checked_mul(coverage_w)?};
         let bitmap_end = bitmap_off.checked_add(bitmap_len)?;
-        if bytes.len() < bitmap_end {
+        if !dynamic && bytes.len() < bitmap_end {
             return None;
         }
         let mut cmap = Vec::with_capacity(glyph_count as usize);
+        #[cfg(feature="std")]
+        let mut ttf_glyphs=if dynamic {vec![0;glyph_count as usize]}else{Vec::new()};
+        let mut seen=if dynamic {vec![false;glyph_count as usize]}else{Vec::new()};
         for i in 0..glyph_count as usize {
             let o = cmap_off + i * cmap_entry_size;
             let gid = rd_u16(bytes, o + 4)?;
             if gid >= glyph_count {
                 return None;
             }
-            let advance_px = if version == fa::RASTER_ADVANCE_VERSION {
+            let advance_px = if version == fa::RASTER_ADVANCE_VERSION || dynamic {
                 f32::from_bits(rd_u32(bytes, o + 8)?)
             } else { *bytes.get(o + 6)? as f32 };
             if !advance_px.is_finite() || !(0.0..=255.0).contains(&advance_px) { return None; }
@@ -129,6 +165,43 @@ impl Atlas {
                 advance_px,
                 xoff: *bytes.get(o + 7)?,
             });
+            if dynamic {
+                let cp=rd_u32(bytes,o)?;
+                if char::from_u32(cp).is_none()||seen[gid as usize]||rd_u16(bytes,o+14)?!=0
+                    ||(i>0&&cmap[i-1].codepoint>=cp)||(gid==0&&cp!=0xfffd) {return None;}
+                seen[gid as usize]=true;
+                #[cfg(feature="std")] {ttf_glyphs[gid as usize]=rd_u16(bytes,o+12)?;}
+            }
+        }
+        #[cfg(feature="std")]
+        if dynamic {
+            if bytes.get(15)?!=&0||bytes.get(60..64)?!=[0;4] {return None;}
+            let source_sha256=bytes.get(16..48)?.try_into().ok()?;
+            let px=f64::from_le_bytes(bytes.get(48..56)?.try_into().ok()?);
+            if !px.is_finite()||!(1.0..=128.0).contains(&px) {return None;}
+            let count=rd_u32(bytes,56)? as usize;let cell_bytes=coverage_w.checked_mul(coverage_h)?;
+            if count==0||count>glyph_count as usize {return None;}
+            let compressed=version==6;
+            if !compressed && count.checked_mul(cell_bytes)?>256*1024 {return None;}
+            let mut seeds:BTreeMap<u16,Arc<[u8]>>=BTreeMap::new();
+            let mut compressed_seeds:BTreeMap<u16,Arc<[u8]>>=BTreeMap::new();
+            let mut previous=None;let mut o=bitmap_off;let mut total=0usize;
+            for _ in 0..count {
+                let gid=rd_u16(bytes,o)?;let codec=rd_u16(bytes,o+2)?;
+                if gid>=glyph_count||previous.is_some_and(|p|gid<=p)||codec>u16::from(compressed)||(gid==0&&codec!=0) {return None;}
+                let size=if compressed {rd_u32(bytes,o+4)? as usize}else{cell_bytes};
+                if (codec==0&&size!=cell_bytes)||(codec==1&&(size==0||size>cell_bytes.checked_add(64)?)) {return None;}
+                total=total.checked_add(size)?;
+                if total>if compressed {4*1024*1024}else{256*1024} {return None;}
+                o=o.checked_add(if compressed {8}else{4})?;
+                let cell:Arc<[u8]>=Arc::from(bytes.get(o..o.checked_add(size)?)?);
+                if codec==0 {seeds.insert(gid,cell);}else{compressed_seeds.insert(gid,cell);}
+                previous=Some(gid);o=o.checked_add(size)?;
+            }
+            if o!=bytes.len() {return None;}
+            let tofu=seeds.get(&0)?.to_vec();
+            return Some(Atlas {cell_w,cell_h,baseline,line_height,raster_density,slot,flags,glyph_count,cmap,bitmap:tofu,
+                runtime:Some(RuntimeAtlasInfo{source_sha256,px,cache_epoch:0,seed_bytes:total,ttf_glyphs,seeds,compressed_seeds:Arc::new(compressed_seeds),provider:None})});
         }
         let mut bitmap = Vec::with_capacity(bitmap_len);
         bitmap.extend_from_slice(&bytes[bitmap_off..bitmap_end]);
@@ -143,6 +216,7 @@ impl Atlas {
             glyph_count,
             cmap,
             bitmap,
+            #[cfg(feature="std")] runtime:None,
         })
     }
 
@@ -151,6 +225,8 @@ impl Atlas {
     pub fn lookup(&self, codepoint: u32) -> Option<(u16, u8)> {
         self.lookup_entry(codepoint).map(|e| (e.gid, e.advance))
     }
+
+    pub fn codepoints(&self)->impl Iterator<Item=u32> + '_ { self.cmap.iter().map(|e|e.codepoint) }
 
     /// Full cmap entry for a codepoint (gid + advance + xoff).
     pub fn lookup_entry(&self, codepoint: u32) -> Option<&CmapEntry> {
@@ -179,7 +255,19 @@ impl Atlas {
     pub fn glyph_rows(&self, gid: u16) -> &[u8] {
         let per_glyph = self.coverage_height() as usize * self.bytes_per_row();
         let start = gid as usize * per_glyph;
-        &self.bitmap[start..start + per_glyph]
+        // Legacy raw-bitmap accessor. Runtime fonts use glyph_coverage instead.
+        self.bitmap.get(start..start+per_glyph).unwrap_or(&[])
+    }
+
+    /// Runtime provider or seed, retaining ownership during sampling.
+    pub fn glyph_coverage(&self,gid:u16)->GlyphRows<'_> {
+        #[cfg(feature="std")]
+        if let Some(runtime)=&self.runtime {
+            if let Some(cell)=runtime.seeds.get(&gid) {return GlyphRows::Shared(cell.clone());}
+            if let Some(cell)=runtime.provider.as_ref().and_then(|provider|provider(gid)) {return GlyphRows::Shared(cell);}
+            return GlyphRows::Borrowed(&self.bitmap);
+        }
+        GlyphRows::Borrowed(self.glyph_rows(gid))
     }
 
     /// Average one logical pixel's density×density coverage samples. This is
@@ -190,7 +278,7 @@ impl Atlas {
             return 0;
         }
         let density = self.raster_density as usize;
-        let rows = self.glyph_rows(gid);
+        let rows = self.glyph_coverage(gid);
         let bpr = self.bytes_per_row();
         let x0 = x as usize * density;
         let y0 = y as usize * density;
@@ -286,6 +374,8 @@ impl Fonts {
 
     /// Register an atlas that was parsed off-thread.
     pub fn install(&mut self, atlas: Atlas) -> bool {
+        #[cfg(feature="std")]
+        if atlas.runtime.as_ref().is_some_and(|runtime|runtime.provider.is_none()) {return false;}
         let slot = atlas.slot as usize;
         let Some(target) = self.slots.get_mut(slot) else { return false; };
         *target = Some(atlas);

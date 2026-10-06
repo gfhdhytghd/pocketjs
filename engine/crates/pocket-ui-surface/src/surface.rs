@@ -16,7 +16,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, atomic::{AtomicU64,Ordering}};
+use crate::glyph_cache::{Sources,Source,source_key};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -76,50 +77,73 @@ struct PreparedFont {
     integrity_ok: bool,
     integrity_micros: u64,
     bytes: usize,
+    source_result: Option<(String,bool,u64,usize)>,
 }
+
+enum FontRequest {Font(u8,usize,usize,Option<[u8;32]>),Verify([u8;32],Source),Warm(u64,Vec<(pocketjs_core::text::GlyphProvider,u16)>)}
 
 /// One serial parser avoids page-faulting several multi-megabyte atlases at
 /// once. The result owns its bitmap, so installing it on the UI thread is a
 /// small move instead of another large copy.
 struct FontWorker {
-    requests: Option<mpsc::Sender<(u8, usize, usize, Option<[u8; 32]>)>>,
+    requests: Option<mpsc::SyncSender<FontRequest>>,
     ready: mpsc::Receiver<PreparedFont>,
+    warm_generation:Arc<AtomicU64>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl FontWorker {
-    fn new(bytes: &'static [u8]) -> Option<Self> {
-        let (request_tx, request_rx) = mpsc::channel::<(u8, usize, usize, Option<[u8; 32]>)>();
+    fn new(bytes: &'static [u8], entries: HashMap<String,(usize,usize,Option<[u8;32]>)>, sources:Arc<Sources>) -> Option<Self> {
+        let (request_tx, request_rx) = mpsc::sync_channel::<FontRequest>(8);
         let (ready_tx, ready_rx) = mpsc::channel();
+        let warm_generation=Arc::new(AtomicU64::new(0));let generation=warm_generation.clone();
         let thread = std::thread::Builder::new()
             .name("pocket-font".into())
             .spawn(move || {
-                while let Ok((slot, start, end, expected)) = request_rx.recv() {
+                while let Ok(request) = request_rx.recv() {
+                    let (slot,start,end,expected)=match request {
+                        FontRequest::Font(s,a,b,e)=>(s,a,b,e),
+                        FontRequest::Verify(hash,source)=>{sources.verified(hash,source);continue;}
+                        FontRequest::Warm(expected,glyphs)=>{for (provider,gid) in glyphs {if generation.load(Ordering::Relaxed)!=expected {break;}provider(gid);}continue;}
+                    };
                     let integrity_began = Instant::now();
                     let integrity_ok = expected.is_none_or(|digest| {
                         bytes.get(start..end).is_some_and(|blob| Sha256::digest(blob)[..] == digest)
                     });
                     let integrity_micros = integrity_began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                     let began = Instant::now();
-                    let atlas = integrity_ok.then(|| bytes.get(start..end).and_then(pocketjs_core::text::Atlas::parse)).flatten();
+                    let mut atlas = integrity_ok.then(|| bytes.get(start..end).and_then(pocketjs_core::text::Atlas::parse)).flatten();
+                    let mut source_result=None;
+                    if let Some(a)=atlas.as_mut() {if let Some(info)=&a.runtime {
+                        let key=source_key(&info.source_sha256);let hash=info.source_sha256;
+                        let began=Instant::now();
+                        let bound=entries.get(&key).is_some_and(|&(start,end,expected)| {
+                            if expected.is_some_and(|digest|digest!=hash) {return false;}
+                            bytes.get(start..end).is_some_and(|blob|sources.bind(a,Source::Mapped(blob)))
+                        });
+                        let len=entries.get(&key).map_or(0,|e|e.1-e.0);
+                        source_result=Some((key,bound,began.elapsed().as_micros() as u64,len));
+                        if !bound {atlas=None;}
+                    }}
                     let parse_micros = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
                     if ready_tx.send(PreparedFont {
                         slot, atlas, parse_micros, integrity_checked: expected.is_some(), integrity_ok,
-                        integrity_micros, bytes: end.saturating_sub(start),
+                        integrity_micros, bytes: end.saturating_sub(start), source_result,
                     }).is_err() { break; }
                 }
             })
             .ok()?;
-        Some(Self { requests: Some(request_tx), ready: ready_rx, thread: Some(thread) })
+        Some(Self { requests: Some(request_tx), ready: ready_rx, warm_generation, thread: Some(thread) })
     }
 
     fn request(&self, slot: u8, start: usize, end: usize, expected: Option<[u8; 32]>) -> bool {
-        self.requests.as_ref().is_some_and(|sender| sender.send((slot, start, end, expected)).is_ok())
+        self.requests.as_ref().is_some_and(|sender| sender.try_send(FontRequest::Font(slot, start, end, expected)).is_ok())
     }
 }
 
 impl Drop for FontWorker {
     fn drop(&mut self) {
+        self.warm_generation.fetch_add(1,Ordering::Relaxed);
         self.requests.take();
         if let Some(thread) = self.thread.take() { let _ = thread.join(); }
     }
@@ -236,6 +260,8 @@ struct Inner {
     ui: Ui,
     required_font_revision: u64,
     required_font_slots: Vec<u8>,
+    sources:Arc<Sources>,
+    warm_revision:u64,
     lazy_pak: Option<LazyPak>,
     /// Lazy entries remain here after `feed_pak`; styles, fonts, images, and
     /// sprites have already been ingested by the core.
@@ -283,7 +309,20 @@ fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
         return false;
     };
     let began = Instant::now();
-    let loaded = inner.ui.load_font_atlas(blob);
+    let atlas=pocketjs_core::text::Atlas::parse(blob).and_then(|mut a| {
+        if let Some(info)=&a.runtime {
+            let key=source_key(&info.source_sha256);
+            let pak=inner.lazy_pak.as_ref()?;let (start,end,expected)=pak.entry_request(&key)?;
+            if expected.is_some_and(|digest|digest!=info.source_sha256) {return None;}
+            let source=pak.bytes.get(start..end)?;
+            let hash=info.source_sha256;
+            if !inner.sources.bind_lazy(&mut a,Source::Mapped(source)) {return None;}
+            if let Some(sender)=pak.font_worker.as_ref().and_then(|w|w.requests.as_ref()) {
+                let _=sender.try_send(FontRequest::Verify(hash,Source::Mapped(source)));
+            }
+        } Some(a)
+    });
+    let loaded=atlas.is_some_and(|a|inner.ui.install_font_atlas(a));
     let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     if loaded {
         record_font_load(inner, slot, elapsed, false);
@@ -293,7 +332,12 @@ fn ensure_font(inner: &mut Inner, slot: u8) -> bool {
     loaded
 }
 
+fn record_source_integrity(inner:&mut Inner) {
+    for (key,ok,micros,bytes) in inner.sources.take_events() {if let Some(pak)=inner.lazy_pak.as_mut() {pak.record_integrity(&key,ok,true,micros,bytes);}}
+}
+
 fn install_prepared_fonts(inner: &mut Inner) {
+    record_source_integrity(inner);
     let mut prepared = Vec::new();
     if let Some(worker) = inner.lazy_pak.as_ref().and_then(|pak| pak.font_worker.as_ref()) {
         while let Ok(font) = worker.ready.try_recv() { prepared.push(font); }
@@ -306,12 +350,16 @@ fn install_prepared_fonts(inner: &mut Inner) {
                 font.integrity_micros, font.bytes,
             );
         }
+        if let Some((key,ok,micros,bytes))=font.source_result {if let Some(pak)=inner.lazy_pak.as_mut() {
+            pak.record_integrity(&key,ok,true,micros,bytes);
+        }}
         if inner.ui.font_atlas(font.slot).is_some() { continue; }
         if !font.integrity_ok { continue; }
         match font.atlas {
             Some(atlas) => {
                 if inner.ui.install_font_atlas(atlas) {
                     record_font_load(inner, font.slot, font.parse_micros, true);
+                    inner.warm_revision=u64::MAX;
                 } else {
                     log::warn!("pocket-ui: bad lazy font atlas ui:font.{}", font.slot);
                 }
@@ -346,8 +394,19 @@ fn ensure_required_fonts(inner: &mut Inner) {
         inner.required_font_revision = revision;
     }
     let slots = inner.required_font_slots.clone();
-    for slot in slots {
-        request_font(inner, slot);
+    for slot in slots {request_font(inner,slot);}
+    if revision!=inner.warm_revision {
+        let glyphs=inner.ui.required_font_glyphs().into_iter().filter_map(|(slot,gid)| {
+            let info=inner.ui.font_atlas(slot)?.runtime.as_ref()?;
+            if info.seeds.contains_key(&gid) {return None;}
+            Some((info.provider.as_ref()?.clone(),gid))
+        }).take(1024).collect::<Vec<_>>();
+        if let Some(sender)=inner.lazy_pak.as_ref().and_then(|p|p.font_worker.as_ref()).and_then(|w|w.requests.as_ref()) {
+            let worker=inner.lazy_pak.as_ref().unwrap().font_worker.as_ref().unwrap();
+            let expected=worker.warm_generation.fetch_add(1,Ordering::Relaxed)+1;
+            if sender.try_send(FontRequest::Warm(expected,glyphs)).is_err() {return;}
+        }
+        inner.warm_revision=revision;
     }
 }
 
@@ -386,17 +445,32 @@ fn should_retain_lazy_entry(key: &str) -> bool {
             || key.starts_with("ui:sprite."))
 }
 
+fn finish_owned_fonts(inner:&mut Inner) {
+    let keys:Vec<_>=inner.tile_paks.keys().filter(|key|key.starts_with("ui:font.")).cloned().collect();
+    for key in keys {
+        if let Some(blob)=inner.tile_paks.remove(&key) {
+            if let Some(mut atlas)=pocketjs_core::text::Atlas::parse(&blob) {
+                let source=atlas.runtime.as_ref().and_then(|i|inner.sources.source(&i.source_sha256));
+                if source.is_some_and(|source|inner.sources.bind(&mut atlas,source)) {inner.ui.install_font_atlas(atlas);}
+            }
+        }
+    }
+}
+
 fn feed_entry(inner: &mut Inner, key: &str, blob: &[u8]) {
-    if should_retain_lazy_entry(key) {
+    if let Some(hash)=key.strip_prefix("ui:font-source.") {
+        if hash.len()==64&&hash.bytes().all(|b|b.is_ascii_hexdigit()) {let mut digest=[0;32];let parsed=(0..32).all(|i|u8::from_str_radix(&hash[i*2..i*2+2],16).map(|b|digest[i]=b).is_ok());
+            if parsed {inner.sources.verified(digest,Source::Owned(Arc::from(blob)));}
+        }
+    } else if should_retain_lazy_entry(key) {
         inner.tile_paks.insert(key.to_string(), blob.to_vec());
     } else if key == "ui:styles" {
         if !inner.ui.load_styles(blob) {
             log::warn!("pocket-ui: bad styles.bin in pak");
         }
     } else if key.starts_with("ui:font.") {
-        if !inner.ui.load_font_atlas(blob) {
-            log::warn!("pocket-ui: bad font atlas {}", key);
-        }
+        if matches!(blob.get(4..6),Some([5,0]|[6,0])) {inner.tile_paks.insert(key.to_string(),blob.to_vec());}
+        else if !inner.ui.load_font_atlas(blob) {log::warn!("pocket-ui: bad font atlas {}",key);}
     } else if let Some(name) = key.strip_prefix("ui:img.") {
         // IMG entry: 8-byte header {u16 w, u16 h, u8 psm, 3B pad} + pixels.
         let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
@@ -474,6 +548,8 @@ impl UiSurface {
                 ui,
                 required_font_revision: u64::MAX,
                 required_font_slots: Vec::new(),
+                sources:Arc::new(Sources::default()),
+                warm_revision:u64::MAX,
                 lazy_pak: None,
                 tile_paks: HashMap::new(),
                 textures: Vec::new(),
@@ -546,6 +622,7 @@ impl UiSurface {
         for entry in walk_pak(pak) {
             feed_entry(&mut inner, entry.key, entry.blob);
         }
+        finish_owned_fonts(&mut inner);
     }
 
     /// Same tolerant entry semantics as `feed_pak`, without holding the entire
@@ -560,7 +637,9 @@ impl UiSurface {
         let mut inner = self.inner.borrow_mut();
         inner.lazy_pak = None;
         inner.tile_paks.clear();
-        crate::pak::read_pak(length, read_at, |key, blob| feed_entry(&mut inner, key, blob))
+        crate::pak::read_pak(length, read_at, |key, blob| feed_entry(&mut inner, key, blob))?;
+        finish_owned_fonts(&mut inner);
+        Ok(())
     }
 
     /// Index a stable memory-mapped pak without copying entry payloads.
@@ -639,10 +718,10 @@ impl UiSurface {
         inner.sprites.clear();
         inner.lazy_pak = Some(LazyPak {
             bytes: pak,
-            entries,
             directory_entries,
             directory_parse_micros,
-            font_worker: FontWorker::new(pak),
+            font_worker: FontWorker::new(pak, entries.iter().map(|(key,e)|(key.clone(),(e.start,e.end,e.expected_sha256))).collect(),inner.sources.clone()),
+            entries,
             pending_fonts: HashSet::new(),
             first_font_load_micros: None,
             total_font_load_micros: 0,
@@ -704,6 +783,13 @@ impl UiSurface {
     }
 
     /// Ensure one mapped atlas is resident before a host reads its metrics.
+    pub fn glyph_cache_stats(&self)->(crate::glyph_cache::Stats,usize,usize) {
+        let mut inner=self.inner.borrow_mut();record_source_integrity(&mut inner);let stats=inner.sources.cache.stats();
+        let source_bytes=inner.sources.source_bytes();
+        let seeds=(0..64).filter_map(|slot|inner.ui.font_atlas(slot)).filter_map(|a|a.runtime.as_ref()).map(|i|i.seed_bytes).sum();
+        (stats,source_bytes,seeds)
+    }
+
     pub fn ensure_font(&self, slot: u8) -> bool {
         ensure_font(&mut self.inner.borrow_mut(), slot)
     }
@@ -1138,6 +1224,84 @@ fn decode_pix_header(blob: &[u8], pixels_off: usize) -> Option<(u32, u32, u32, &
 mod tests {
     use super::*;
 
+    const TEST_TTF:&[u8]=include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");
+    fn dynamic_test_font(slot:u8)->Vec<u8> {
+        let hash:[u8;32]=Sha256::digest(TEST_TTF).into();
+        let ttf_gid=ttf_parser::Face::parse(TEST_TTF,0).unwrap().glyph_index('A').unwrap().0;
+        let mut out=Vec::new();out.extend_from_slice(&pocketjs_core::spec::font_atlas::MAGIC.to_le_bytes());
+        out.extend_from_slice(&5u16.to_le_bytes());out.extend_from_slice(&2u16.to_le_bytes());out.extend_from_slice(&[8,12,10,14,slot,0,1,0]);
+        out.extend_from_slice(&hash);out.extend_from_slice(&12f64.to_le_bytes());out.extend_from_slice(&1u32.to_le_bytes());out.extend_from_slice(&0u32.to_le_bytes());
+        for (cp,gid,ttf) in [(65u32,1u16,ttf_gid),(0xfffdu32,0u16,0u16)] {
+            out.extend_from_slice(&cp.to_le_bytes());out.extend_from_slice(&gid.to_le_bytes());out.extend_from_slice(&[8,0]);out.extend_from_slice(&8.5f32.to_le_bytes());out.extend_from_slice(&ttf.to_le_bytes());out.extend_from_slice(&0u16.to_le_bytes());
+        }
+        out.extend_from_slice(&[0;4]);out.extend_from_slice(&[7;96]);out
+    }
+    fn dynamic_test_mapping(corrupt_source:bool,corrupt_metadata:bool)->(Vec<u8>,Vec<PakEntryIntegrity>) {
+        let hash:[u8;32]=Sha256::digest(TEST_TTF).into();let mut entries=Vec::new();let mut bytes=Vec::new();
+        for slot in [2,3] {let font=dynamic_test_font(slot);entries.push(PakEntryIntegrity{key:format!("ui:font.{slot}"),offset:bytes.len(),bytes:font.len(),sha256:Sha256::digest(&font).into()});bytes.extend_from_slice(&font);}
+        entries.push(PakEntryIntegrity{key:source_key(&hash),offset:bytes.len(),bytes:TEST_TTF.len(),sha256:hash});
+        let source_at=bytes.len();bytes.extend_from_slice(TEST_TTF);
+        if corrupt_source {bytes[source_at]^=1;}if corrupt_metadata {bytes[64]^=1;}(bytes,entries)
+    }
+    fn compressed_test_font()->Vec<u8> {
+        let old=dynamic_test_font(2);let gid=ttf_parser::Face::parse(TEST_TTF,0).unwrap().glyph_index('A').unwrap().0;
+        let coverage=crate::glyph_raster::rasterize(TEST_TTF,gid,12.0,8,12,10,0,1).unwrap();
+        let compressed=miniz_oxide::deflate::compress_to_vec(&coverage,6);
+        let mut font=old[..96].to_vec();font[4..6].copy_from_slice(&6u16.to_le_bytes());font[56..60].copy_from_slice(&2u32.to_le_bytes());
+        font.extend_from_slice(&[0;4]);font.extend_from_slice(&96u32.to_le_bytes());font.extend_from_slice(&[7;96]);
+        font.extend_from_slice(&1u16.to_le_bytes());font.extend_from_slice(&1u16.to_le_bytes());font.extend_from_slice(&(compressed.len() as u32).to_le_bytes());font.extend_from_slice(&compressed);font
+    }
+    #[test]
+    fn compressed_seed_needs_no_ttf_and_is_bounded_by_the_shared_lru() {
+        let bytes=compressed_test_font();let mut atlas=pocketjs_core::text::Atlas::parse(&bytes).unwrap();let sources=Arc::new(Sources::default());
+        // Deliberately unavailable source: a compressed seed is independently
+        // authenticated by the metadata and must not touch source bytes.
+        assert!(sources.bind_lazy(&mut atlas,Source::Owned(Arc::from(&b"not a font"[..]))));
+        assert!(atlas.glyph_coverage(1).iter().any(|v|*v>0));assert_eq!(sources.source_count(),0);
+        assert_eq!(sources.cache.stats().bytes,96);assert_eq!(atlas.runtime.as_ref().unwrap().seeds.len(),1);
+        let pinned=atlas.glyph_coverage(1);for gid in 0..4 {sources.cache.test_fill((99,gid),4*1024*1024);}
+        assert_eq!(pinned.len(),96);assert_eq!(&*atlas.glyph_coverage(1),&*pinned);
+        // A malicious compressed expansion cannot allocate more than one cell.
+        let mut broken=bytes[..208].to_vec();let bomb=miniz_oxide::deflate::compress_to_vec(&vec![1;10000],6);
+        broken[204..208].copy_from_slice(&(bomb.len() as u32).to_le_bytes());broken.extend_from_slice(&bomb);
+        let mut invalid=pocketjs_core::text::Atlas::parse(&broken).unwrap();assert!(sources.bind_lazy(&mut invalid,Source::Owned(Arc::from(&b"not a font"[..]))));
+        assert_eq!(&*invalid.glyph_coverage(1),invalid.glyph_rows(0));
+    }
+
+    #[test]
+    fn runtime_source_and_metadata_are_verified_before_installation() {
+        for (source,metadata) in [(true,false),(false,true)] {
+            let (bytes,entries)=dynamic_test_mapping(source,metadata);let bytes=Box::leak(bytes.into_boxed_slice());let surface=UiSurface::new((16.0,16.0));
+            unsafe {surface.feed_pak_mapped_verified(bytes,entries,0).unwrap();}
+            if source {assert!(surface.ensure_font(2));surface.with_ui(|ui| {let a=ui.font_atlas(2).unwrap();assert_eq!(a.glyph_coverage(0)[0],7);assert_eq!(&*a.glyph_coverage(1),a.glyph_rows(0));});record_source_integrity(&mut surface.inner.borrow_mut());}
+            else {assert!(!surface.ensure_font(2));assert!(surface.with_ui(|ui|ui.font_atlas(2).is_none()));}
+            assert_eq!(surface.lazy_pak_stats().integrity_failures,1);
+        }
+    }
+    #[test]
+    fn worker_installs_two_slots_with_one_authenticated_shared_source() {
+        let (bytes,entries)=dynamic_test_mapping(false,false);let bytes=Box::leak(bytes.into_boxed_slice());let surface=UiSurface::new((16.0,16.0));
+        unsafe {surface.feed_pak_mapped_verified(bytes,entries,0).unwrap();}
+        {let mut inner=surface.inner.borrow_mut();assert!(!request_font(&mut inner,2));assert!(!request_font(&mut inner,3));}
+        for _ in 0..1000 {install_prepared_fonts(&mut surface.inner.borrow_mut());if surface.with_ui(|ui|ui.font_atlas(3).is_some()) {break;} std::thread::sleep(std::time::Duration::from_millis(1));}
+        surface.with_ui(|ui| {for slot in [2,3] {let a=ui.font_atlas(slot).unwrap();assert_eq!(a.glyph_coverage(0)[0],7);assert!(a.glyph_coverage(1).iter().any(|v|*v>0));assert_eq!(ui.measure_text("AA",slot),17.0);}});
+        let stats=surface.lazy_pak_stats();assert_eq!(stats.integrity_failures,0);assert_eq!(stats.verified_entries,3);
+        assert_eq!(surface.glyph_cache_stats().1,TEST_TTF.len());
+    }
+    #[test]
+    fn owned_font_entries_may_precede_the_source_and_bad_dynamic_headers_fail_closed() {
+        let inner=Arc::new(Sources::default());
+        let surface=UiSurface::new((16.0,16.0));let font=dynamic_test_font(2);let hash:[u8;32]=Sha256::digest(TEST_TTF).into();
+        {let mut i=surface.inner.borrow_mut();feed_entry(&mut i,"ui:font.2",&font);feed_entry(&mut i,&source_key(&hash),TEST_TTF);finish_owned_fonts(&mut i);}
+        assert!(surface.with_ui(|ui|ui.font_atlas(2).is_some()));
+        // Truncation, duplicate virtual gids, invalid fractional advance,
+        // unsorted cmap, invalid source gid and noncanonical seed record.
+        for length in 0..font.len() {assert!(pocketjs_core::text::Atlas::parse(&font[..length]).is_none());}
+        for offset in [60,78,84,98] {let mut broken=font.clone();broken[offset]^=1;assert!(pocketjs_core::text::Atlas::parse(&broken).is_none());}
+        let mut invalid_gid=font.clone();invalid_gid[76..78].copy_from_slice(&u16::MAX.to_le_bytes());let mut atlas=pocketjs_core::text::Atlas::parse(&invalid_gid).unwrap();
+        assert!(!inner.bind(&mut atlas,Source::Owned(Arc::from(TEST_TTF))));
+    }
+
     #[test]
     fn font_worker_parses_owned_atlas_and_joins_before_mapping_release() {
         use pocketjs_core::spec::font_atlas as fa;
@@ -1150,7 +1314,7 @@ mod tests {
         bytes.extend_from_slice(&[0, 0, 8, 0]);
         bytes.extend_from_slice(&[255; 80]);
         let bytes = Box::leak(bytes.into_boxed_slice());
-        let worker = FontWorker::new(bytes).expect("font worker");
+        let worker = FontWorker::new(bytes,HashMap::new(),Arc::new(Sources::default())).expect("font worker");
         assert!(worker.request(7, 0, bytes.len(), None));
         let prepared = worker.ready.recv_timeout(std::time::Duration::from_secs(2)).expect("prepared font");
         assert_eq!(prepared.slot, 7);
