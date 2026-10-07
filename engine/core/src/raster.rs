@@ -1787,6 +1787,7 @@ mod tests {
         assert!(ui.install_font_atlas(atlas));
         let handle=ui.upload_texture(&[10,20,30,40],1,1,spec::psm::PSM_8888);
         let pinned=ui.render_resources();
+        let old_font_epoch=pinned.font_epoch(slot);
         let old_address=pinned.texture(handle).unwrap().pixels.as_ptr();
         assert_eq!(old_address,ui.texture(handle).unwrap().pixels.as_ptr(),"pin does not copy pixels");
         assert!(ui.update_texture_rgba(handle,&[90,80,70,60]));
@@ -1795,6 +1796,7 @@ mod tests {
         let mut replacement=crate::text::Atlas::parse(&density_two_font()).unwrap();
         replacement.bitmap.fill(127);
         assert!(ui.install_font_atlas(replacement));
+        assert_ne!(ui.render_resources().font_epoch(slot),old_font_epoch);
         assert!(pinned.font_atlas(slot).unwrap().bitmap.iter().all(|v|*v==63));
         ui.free_texture(handle);
         drop(ui);

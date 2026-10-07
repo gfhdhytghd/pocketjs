@@ -325,6 +325,8 @@ pub struct Fonts {
     /// cmap-miss counter (Cell: measurement is `&self` per the pinned `Ui`
     /// signature but a miss must still count).
     pub misses: Cell<u32>,
+    #[cfg(feature="std")]
+    versions: [u64; spec::MAX_FONT_SLOTS],
     /// Native measurer; when present, tracking-0 runs measure through it
     /// (and draw.rs emits TEXT_RUN instead of GLYPH_RUN for them). Tracked
     /// runs keep the baked path on BOTH sides so a node's measured metrics
@@ -345,6 +347,8 @@ impl Fonts {
         Fonts {
             slots: core::array::from_fn(|_| None),
             misses: Cell::new(0),
+            #[cfg(feature="std")]
+            versions: [0; spec::MAX_FONT_SLOTS],
             native: None,
             wrap_native: None,
         }
@@ -352,6 +356,9 @@ impl Fonts {
 
     #[cfg(feature = "std")]
     pub(crate) fn snapshot(&self) -> [Option<crate::SharedResource<Atlas>>; spec::MAX_FONT_SLOTS] { self.slots.clone() }
+
+    #[cfg(feature="std")]
+    pub(crate) fn versions(&self) -> [u64; spec::MAX_FONT_SLOTS] { self.versions }
 
     /// Install (or clear) the native measurer. Callers relayout afterwards —
     /// every text leaf's metrics change provider.
@@ -382,6 +389,8 @@ impl Fonts {
         let slot = atlas.slot as usize;
         let Some(target) = self.slots.get_mut(slot) else { return false; };
         *target = Some(crate::SharedResource::new(atlas));
+        #[cfg(feature="std")]
+        { self.versions[slot] = self.versions[slot].wrapping_add(1); }
         true
     }
 

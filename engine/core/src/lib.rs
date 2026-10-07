@@ -2106,15 +2106,23 @@ pub struct RenderResources {
     viewport: (f32, f32),
     textures: Vec<TexSlot>,
     fonts: [Option<SharedResource<text::Atlas>>; spec::MAX_FONT_SLOTS],
+    font_versions: [u64; spec::MAX_FONT_SLOTS],
 }
 #[cfg(feature = "std")]
 impl Ui {
+    pub fn font_resource_versions(&self) -> [u64; spec::MAX_FONT_SLOTS] { self.fonts.versions() }
     pub fn render_resources(&self) -> RenderResources {
-        RenderResources { viewport: self.viewport(), textures: self.textures.clone(), fonts: self.fonts.snapshot() }
+        RenderResources { viewport: self.viewport(), textures: self.textures.clone(), fonts: self.fonts.snapshot(), font_versions: self.fonts.versions() }
     }
 }
 #[cfg(feature = "std")]
 impl RenderResources {
+    /// Runtime atlases retain their provider epoch; static atlases get a
+    /// versioned page-cache identity too, so same-slot replacement is safe.
+    pub fn font_epoch(&self, slot: u8) -> u64 {
+        let Some(atlas)=self.fonts.get(slot as usize).and_then(|f|f.as_ref()) else {return 0;};
+        atlas.runtime.as_ref().map_or((1u64<<63)|self.font_versions[slot as usize],|r|r.cache_epoch)
+    }
     pub fn texture_revision(&self, handle: i32) -> Option<u64> {
         let slot = tex_resolve(&self.textures, handle)?;
         Some(self.textures[slot as usize].tex.as_ref()?.revision)
