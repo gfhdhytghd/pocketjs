@@ -48,6 +48,8 @@ impl Guest {
     }
 
     fn from_runtime(rt: Runtime) -> Result<Guest> {
+        #[cfg(feature = "memory-diagnostics")]
+        rt.set_dump_flags(0); // diagnostic builds also require an explicit trace request
         let ctx = Context::full(&rt)?;
         ctx.with(|ctx| install_console(&ctx))
             .map_err(|e| anyhow!("pocket-mod: installing console: {e}"))?;
@@ -59,6 +61,17 @@ impl Guest {
     pub fn memory_usage(&self) -> qjs::runtime::MemoryUsage {
         self.rt.memory_usage()
     }
+
+    /// Explicit diagnostic-only collection, never called by the guest turn.
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn debug_run_gc(&self) { self.rt.run_gc(); }
+
+    pub fn gc_threshold(&self) -> usize {
+        self.ctx.with(|ctx| unsafe { qjs::qjs::JS_GetGCThreshold(qjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr())) as usize })
+    }
+
+    #[cfg(feature = "memory-diagnostics")]
+    pub fn debug_trace_gc(&self) { self.rt.set_dump_flags(qjs::qjs::JS_DUMP_GC as u64); }
 
     /// Run `f` with the realm's [`Ctx`]. Surface crates use this to build
     /// per-tick event payloads or to reach guest globals the helpers below

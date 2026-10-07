@@ -113,3 +113,5 @@ export function applySpread(node: NodeMirror, props: HostProps): void {
 }
 
 export {frameResourceCounts} from "./frame.ts";
+
+export {clockResourceCounts} from "./clock.ts";

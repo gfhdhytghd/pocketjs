@@ -2,6 +2,7 @@
 
 import { transformAsync, type PluginObj } from "@babel/core";
 import type { ParserOptions } from "@babel/parser";
+import {solidConditionalProps} from "./solid-props.ts";
 import solidPreset from "babel-preset-solid";
 import tsPreset from "@babel/preset-typescript"; // untyped - see framework/compiler/ambient.d.ts
 import { transformVueJsxVapor } from "vue-jsx-vapor/api";
@@ -489,6 +490,7 @@ export async function transformFile(
   const collected: Collected = { classStrings: [], textCodepoints: new Set() };
   const opts = transformOptions(framework);
   const plugins = [
+    ...(framework === "solid" ? [solidConditionalProps] : []),
     ...(options.features === undefined ? [] : [makeFeatureFolder(options.features)]),
     makeCollector(collected, framework),
   ];

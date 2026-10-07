@@ -359,7 +359,10 @@ const retained = new Set<NodeMirror>();
 
 /** Demand-only registry counts. Names, node text and styles are excluded. */
 export function nativeTreeResourceCounts() {
-  return {roots:nativeRoots.size, retained:retained.size, sweep:sweepSet.size,
+  const seen=new Set<NodeMirror>();
+  const visit=(node:NodeMirror)=>{if(seen.has(node))return;seen.add(node);for(const child of node.children)visit(child);};
+  for(const node of nativeRoots)visit(node);for(const node of retained)visit(node);for(const node of sweepSet)visit(node);
+  return {mirrors:seen.size, roots:nativeRoots.size, retained:retained.size, sweep:sweepSet.size,
     textures:textures.size, sprites:sprites.size};
 }
 

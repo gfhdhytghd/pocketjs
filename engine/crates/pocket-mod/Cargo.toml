@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Guest hosting for the Pocket runtime family: one QuickJS realm, mounted surfaces, one guest turn per tick (docs/RUNTIMES.md)"
 
+[features]
+memory-diagnostics = ["rquickjs/dump-gc"]
+
 [dependencies]
 pocketjs-core = { workspace = true }
 rquickjs = { workspace = true }

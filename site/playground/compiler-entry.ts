@@ -10,6 +10,7 @@
 // images are rasterized with a <canvas> instead of the node PNG/SVG decoders.
 
 import { transformAsync, type PluginObj } from "@babel/core";
+import {solidConditionalProps} from "../../framework/compiler/solid-props.ts";
 import solidPreset from "babel-preset-solid";
 import tsPreset from "@babel/preset-typescript";
 import { transformVueJsxVapor } from "vue-jsx-vapor/api";
@@ -237,7 +238,7 @@ export async function transformAppSource(
         [tsPreset, {}],
       ],
       parserOpts: { plugins: ["jsx"] },
-      plugins: [collectorPlugin(collected, framework)],
+      plugins: [solidConditionalProps, collectorPlugin(collected, framework)],
       babelrc: false,
       configFile: false,
       sourceMaps: false,

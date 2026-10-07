@@ -58,6 +58,8 @@ interface Timer {
   cb: () => void;
 }
 let timers: Timer[] = [];
+/** Demand-only diagnostic; no scheduling or per-frame sampling. */
+export const clockResourceCounts=()=>({timers:timers.length});
 
 /** Snap an arbitrary rate to the nearest exact divisor of TICKS_PER_SECOND. */
 export function normalizeHz(raw: number): number {

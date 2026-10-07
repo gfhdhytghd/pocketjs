@@ -276,6 +276,13 @@ const pinchScratch = {
   fdspan: 0,
 };
 
+/** Demand-only bounded contact/history ownership. */
+export function gestureResourceCounts() {
+ return {contacts:liveCount,recognizers:recognizers.length,
+  velocitySamples:tracks.reduce((n,t)=>n+(t.used?t.histLen:0),0),
+  contactOwners:tracks.reduce((n,t)=>n+t.owners.length,0)};
+}
+
 function withinSubtree(node: NodeMirror, ancestor: NodeMirror): boolean {
   let n: NodeMirror | null = node;
   while (n) {

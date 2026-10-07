@@ -118,6 +118,14 @@ const state: DevtoolsState = {
   hostCalls: 0,
 };
 
+/** Demand-only flight recorder gauges; no diagnostic sample history. */
+export function devtoolsResourceCounts() {
+ let touchRecords=0,touchWords=0;
+ for(const contacts of state.tapeTouch??[]){if(contacts){touchRecords++;touchWords+=contacts.length;}}
+ return {enabled:state.transport?1:0,tapeFrames:state.tapeLen,touchRecords,touchWords,
+  replayFrames:state.replayMasks?.length??0};
+}
+
 // ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
