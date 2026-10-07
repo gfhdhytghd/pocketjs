@@ -321,7 +321,7 @@ pub type WrapFn = alloc::boxed::Box<dyn Fn(&str, u8, f32) -> alloc::vec::Vec<u32
 
 /// The per-core atlas registry.
 pub struct Fonts {
-    slots: [Option<Atlas>; spec::MAX_FONT_SLOTS],
+    slots: [Option<crate::SharedResource<Atlas>>; spec::MAX_FONT_SLOTS],
     /// cmap-miss counter (Cell: measurement is `&self` per the pinned `Ui`
     /// signature but a miss must still count).
     pub misses: Cell<u32>,
@@ -349,6 +349,9 @@ impl Fonts {
             wrap_native: None,
         }
     }
+
+    #[cfg(feature = "std")]
+    pub(crate) fn snapshot(&self) -> [Option<crate::SharedResource<Atlas>>; spec::MAX_FONT_SLOTS] { self.slots.clone() }
 
     /// Install (or clear) the native measurer. Callers relayout afterwards —
     /// every text leaf's metrics change provider.
@@ -378,13 +381,13 @@ impl Fonts {
         if atlas.runtime.as_ref().is_some_and(|runtime|runtime.provider.is_none()) {return false;}
         let slot = atlas.slot as usize;
         let Some(target) = self.slots.get_mut(slot) else { return false; };
-        *target = Some(atlas);
+        *target = Some(crate::SharedResource::new(atlas));
         true
     }
 
     #[inline]
     pub fn atlas(&self, slot: u8) -> Option<&Atlas> {
-        self.slots.get(slot as usize)?.as_ref()
+        self.slots.get(slot as usize)?.as_deref()
     }
 
     /// (gid, advance, xoff) for a codepoint; a miss resolves to gid 0 (tofu,

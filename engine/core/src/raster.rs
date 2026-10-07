@@ -41,7 +41,7 @@ use crate::damage::{
     DamageError, DamagePlan, DamagePolicy, DamageRect, DamageTarget, DamageTracker,
 };
 use crate::spec::{self, draw_op};
-use crate::{TexView, Ui};
+use crate::{TexView, Ui, RasterResources};
 
 pub const MAX_RENDER_SCALE: u32 = 4;
 const DAMAGE_SIGNATURE_RGBA8: u64 = u32::from_be_bytes(*b"RGBA") as u64;
@@ -714,7 +714,7 @@ pub fn render_scaled_rgb565_incremental<const MAX_REGIONS: usize>(
 }
 
 fn render_scaled_impl<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     words: &[u32],
     target: &mut T,
     scale: u32,
@@ -775,7 +775,7 @@ fn render_scaled_incremental_impl<T: RenderTarget, const MAX_REGIONS: usize>(
     Ok(plan)
 }
 
-fn target_geometry<T: RenderTarget>(ui: &Ui, target: &T, scale: u32) -> (i32, i32, Clip) {
+fn target_geometry<T: RenderTarget>(ui: &impl RasterResources, target: &T, scale: u32) -> (i32, i32, Clip) {
     assert!(
         (1..=MAX_RENDER_SCALE).contains(&scale),
         "render scale must be 1 through 4"
@@ -805,7 +805,7 @@ fn target_geometry<T: RenderTarget>(ui: &Ui, target: &T, scale: u32) -> (i32, i3
 
 #[allow(clippy::too_many_arguments)]
 fn render_damage_regions<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     words: &[u32],
     target: &mut T,
     width: i32,
@@ -844,7 +844,7 @@ fn clear_rect<T: RenderTarget>(target: &mut T, stride: i32, rect: Clip) {
 }
 
 fn render_scaled_clipped<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     words: &[u32],
     target: &mut T,
     width: i32,
@@ -1304,7 +1304,7 @@ pub fn coverage_index(
 
 #[allow(clippy::too_many_arguments)]
 fn glyph_run<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     target: &mut T,
     stride: i32,
     output_scale: i32,
@@ -1379,7 +1379,7 @@ fn glyph_run<T: RenderTarget>(
 /// Vulkan's triangle coverage without double blending the shared diagonal.
 #[allow(clippy::too_many_arguments)]
 fn glyph_run_xform<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     target: &mut T,
     stride: i32,
     output_scale: i32,
@@ -1401,7 +1401,7 @@ fn glyph_run_xform<T: RenderTarget>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn glyph_cells<T: RenderTarget>(ui: &Ui, target: &mut T, stride: i32,
+fn glyph_cells<T: RenderTarget>(ui: &impl RasterResources, target: &mut T, stride: i32,
     clip: Clip, slot: u8, color: u32, axes: [f32; 4],
     glyphs: impl Iterator<Item=(f32, f32, u16)>) {
     let Some(atlas) = ui.font_atlas(slot) else { return; };
@@ -1585,7 +1585,7 @@ fn sample_linear(view: &TexView, u: f32, v: f32) -> Option<(u32, u32, u32, u32)>
 //      bilinear when the texture carries the linear flag) --------------------
 
 fn tex_tri<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     target: &mut T,
     stride: i32,
     scale: i32,
@@ -1670,7 +1670,7 @@ fn tex_tri<T: RenderTarget>(
 //      carries the linear flag) --------------------------------------------------------
 
 fn tex_quad<T: RenderTarget>(
-    ui: &Ui,
+    ui: &impl RasterResources,
     target: &mut T,
     stride: i32,
     scale: i32,
@@ -1734,7 +1734,7 @@ fn tex_quad<T: RenderTarget>(
     }
 }
 
-fn tex_quad_f32<T:RenderTarget>(ui:&Ui,target:&mut T,stride:i32,scale:i32,clip:Clip,p:&[u32]) {
+fn tex_quad_f32<T:RenderTarget>(ui: &impl RasterResources,target:&mut T,stride:i32,scale:i32,clip:Clip,p:&[u32]) {
     let [x0,y0,x1,y1]=[p[1],p[2],p[3],p[4]].map(|v|f32::from_bits(v)*scale as f32);
     let [u0,v0,u1,v1]=[p[5],p[6],p[7],p[8]].map(f32::from_bits);
     if ![x0,y0,x1,y1,u0,v0,u1,v1].iter().all(|v|v.is_finite()&&v.abs()<=16777216.0)||x1<=x0||y1<=y0{return;}
@@ -1774,6 +1774,35 @@ mod tests {
         let width = spec::SCREEN_W as usize * scale as usize;
         let offset = (y * width + x) * 4;
         fb[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn immutable_resources_pin_font_and_texture_revisions() {
+        use crate::RasterResources;
+        let mut ui=Ui::new_with_raster_density(2);
+        ui.set_viewport(24.0,12.0);
+        let mut atlas=crate::text::Atlas::parse(&density_two_font()).unwrap();
+        let slot=atlas.slot;
+        atlas.bitmap.fill(63);
+        assert!(ui.install_font_atlas(atlas));
+        let handle=ui.upload_texture(&[10,20,30,40],1,1,spec::psm::PSM_8888);
+        let pinned=ui.render_resources();
+        let old_address=pinned.texture(handle).unwrap().pixels.as_ptr();
+        assert_eq!(old_address,ui.texture(handle).unwrap().pixels.as_ptr(),"pin does not copy pixels");
+        assert!(ui.update_texture_rgba(handle,&[90,80,70,60]));
+        assert_eq!(pinned.texture(handle).unwrap().pixels,&[10,20,30,40]);
+        assert_eq!(ui.texture(handle).unwrap().pixels,&[90,80,70,60]);
+        let mut replacement=crate::text::Atlas::parse(&density_two_font()).unwrap();
+        replacement.bitmap.fill(127);
+        assert!(ui.install_font_atlas(replacement));
+        assert!(pinned.font_atlas(slot).unwrap().bitmap.iter().all(|v|*v==63));
+        ui.free_texture(handle);
+        drop(ui);
+        // The snapshot is Send + Sync and contains no Ui/tree callback state.
+        std::thread::spawn(move || {
+            assert_eq!(pinned.texture(handle).unwrap().pixels,&[10,20,30,40]);
+            assert!(pinned.font_atlas(slot).unwrap().bitmap.iter().all(|v|*v==63));
+        }).join().unwrap();
     }
 
     #[test]
@@ -2749,4 +2778,11 @@ mod tests {
         );
         assert_eq!(rgba(&fb, 1, 4, 1), [0, 0, 0, 255]);
     }
+}
+
+/// Execute immutable resources with exactly the live transparent raster math.
+#[cfg(feature = "std")]
+pub fn render_snapshot_transparent(resources: &crate::RenderResources, words: &[u32], fb: &mut [u8], scale: u32) {
+    let mut target = PremultipliedRgbaTarget { bytes: fb };
+    render_scaled_impl(resources, words, &mut target, scale, true);
 }

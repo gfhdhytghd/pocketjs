@@ -67,6 +67,12 @@ pub const MAX_TICK_HZ: u32 = 240;
 /// One uploaded texture. Pixels are copied into 16-byte-aligned storage so
 /// the PSP GE can sample them directly (the wasm rasterizer reads them via
 /// `Ui::texture`).
+#[cfg(feature = "std")]
+use std::sync::Arc as SharedResource;
+#[cfg(not(feature = "std"))]
+use alloc::rc::Rc as SharedResource;
+
+#[derive(Clone)]
 pub struct Texture {
     /// 16-byte-aligned backing store (`u128` chunks).
     data: Vec<u128>,
@@ -135,9 +141,10 @@ pub struct TexView<'a> {
 /// One texture slot. `gen` tags outstanding handles (bumped on free, so a
 /// stale handle held by JS or a still-mounted image node resolves to nothing
 /// and draws nothing); `tex` is the live texture (None = free slot).
+#[derive(Clone)]
 pub struct TexSlot {
     gen: u16,
-    tex: Option<Texture>,
+    tex: Option<SharedResource<Texture>>,
 }
 
 /// Texture-handle generations live in bits TEX_SLOT_BITS..31 — bit 31 must
@@ -184,7 +191,7 @@ pub(crate) fn tex_alloc(slots: &mut Vec<TexSlot>, free: &mut Vec<u32>, tex: Text
         }
     };
     let s = &mut slots[slot as usize];
-    s.tex = Some(tex);
+    s.tex = Some(SharedResource::new(tex));
     make_tex_handle(s.gen, slot)
 }
 
@@ -852,7 +859,9 @@ impl Ui {
         if pixels.len() != tex.byte_len {
             return false;
         }
-        let Some(pal) = tex.palette.as_mut() else { return false };
+        if tex.palette.is_none() { return false; }
+        let tex = SharedResource::make_mut(tex);
+        let pal = tex.palette.as_mut().unwrap();
         unsafe {
             core::ptr::copy_nonoverlapping(
                 palette.as_ptr(),
@@ -876,6 +885,7 @@ impl Ui {
         let Some(slot) = tex_resolve(&self.textures, handle) else { return false };
         let Some(tex) = self.textures[slot as usize].tex.as_mut() else { return false };
         if tex.psm != spec::psm::PSM_8888 || pixels.len() != tex.byte_len { return false; }
+        let tex = SharedResource::make_mut(tex);
         unsafe { core::ptr::copy_nonoverlapping(pixels.as_ptr(), tex.data.as_mut_ptr() as *mut u8, tex.byte_len); }
         tex.revision = tex.revision.wrapping_add(1);
         self.bump_raster_revision();
@@ -1830,7 +1840,7 @@ impl Ui {
     /// — a freed texture "draws nothing" through exactly this path.
     pub fn texture(&self, handle: i32) -> Option<TexView<'_>> {
         let slot = tex_resolve(&self.textures, handle)?;
-        self.textures[slot as usize].tex.as_ref().map(Texture::view)
+        self.textures[slot as usize].tex.as_ref().map(|texture| texture.view())
     }
 
     /// Content revision of a live texture. Generation-tagged handles catch
@@ -2088,3 +2098,45 @@ fn prop_bits(kind: u8, value: f64) -> u32 {
 
 #[cfg(test)]
 mod tests;
+
+/// Read-only resources for executing an already committed DrawList.
+/// Snapshots pin texture revisions and font providers without copying pixels.
+#[cfg(feature = "std")]
+pub struct RenderResources {
+    viewport: (f32, f32),
+    textures: Vec<TexSlot>,
+    fonts: [Option<SharedResource<text::Atlas>>; spec::MAX_FONT_SLOTS],
+}
+#[cfg(feature = "std")]
+impl Ui {
+    pub fn render_resources(&self) -> RenderResources {
+        RenderResources { viewport: self.viewport(), textures: self.textures.clone(), fonts: self.fonts.snapshot() }
+    }
+}
+#[cfg(feature = "std")]
+impl RenderResources {
+    pub fn texture_revision(&self, handle: i32) -> Option<u64> {
+        let slot = tex_resolve(&self.textures, handle)?;
+        Some(self.textures[slot as usize].tex.as_ref()?.revision)
+    }
+}
+/// Minimal resource interface shared by live and immutable software backends.
+pub trait RasterResources {
+    fn viewport(&self) -> (f32, f32);
+    fn texture(&self, handle: i32) -> Option<TexView<'_>>;
+    fn font_atlas(&self, slot: u8) -> Option<&text::Atlas>;
+}
+impl RasterResources for Ui {
+    fn viewport(&self) -> (f32, f32) { self.viewport() }
+    fn texture(&self, handle: i32) -> Option<TexView<'_>> { self.texture(handle) }
+    fn font_atlas(&self, slot: u8) -> Option<&text::Atlas> { self.font_atlas(slot) }
+}
+#[cfg(feature = "std")]
+impl RasterResources for RenderResources {
+    fn viewport(&self) -> (f32, f32) { self.viewport }
+    fn texture(&self, handle: i32) -> Option<TexView<'_>> {
+        let slot = tex_resolve(&self.textures, handle)?;
+        Some(self.textures[slot as usize].tex.as_ref()?.view())
+    }
+    fn font_atlas(&self, slot: u8) -> Option<&text::Atlas> { self.fonts.get(slot as usize)?.as_deref() }
+}
