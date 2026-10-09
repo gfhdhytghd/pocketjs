@@ -1320,24 +1320,33 @@ fn glyph_run<T: RenderTarget>(
     if a == 0 {
         return;
     }
-    let cell_w = atlas.cell_w as i32 * output_scale;
-    let cell_h = atlas.cell_h as i32 * output_scale;
     let atlas_density = atlas.raster_density as i32;
-    let coverage_w = atlas.coverage_width() as i32;
-    let coverage_h = atlas.coverage_height() as i32;
-    let bpr = atlas.bytes_per_row();
     for pair in glyphs.chunks_exact(2) {
         let (gx, gy) = xy(pair[0], output_scale);
         let gid = (pair[1] & 0xffff) as u16;
-        if gid >= atlas.glyph_count {
+        if u32::from(gid) >= atlas.available_glyph_count() {
             continue;
         }
+        let (w,h)=atlas.glyph_size(gid);
+        let (cell_w,cell_h)=(w as i32*output_scale,h as i32*output_scale);
+        let (coverage_w,coverage_h)=(w as i32*atlas_density,h as i32*atlas_density);
+        let bpr=coverage_w as usize;
         // Cell-vs-clip pixel window (partial glyphs at scissor edges clip here).
         let x0 = gx.max(clip.x0);
         let x1 = (gx + cell_w).min(clip.x1);
         let y0 = gy.max(clip.y0);
         let y1 = (gy + cell_h).min(clip.y1);
         if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        #[cfg(feature="std")]
+        if let Some(color)=atlas.glyph_color(gid) {
+            for py in y0..y1 { for px in x0..x1 {
+                let sy=coverage_index(py-gy,output_scale,atlas_density,coverage_h);
+                let sx=coverage_index(px-gx,output_scale,atlas_density,coverage_w);
+                let p=&color[(sy*bpr+sx)*4..];
+                target.blend((py*stride+px)as usize,u32::from(p[0]),u32::from(p[1]),u32::from(p[2]),(a*u32::from(p[3])+127)/255);
+            }}
             continue;
         }
         let rows = atlas.glyph_coverage(gid);
@@ -1407,15 +1416,15 @@ fn glyph_cells<T: RenderTarget>(ui: &impl RasterResources, target: &mut T, strid
     let Some(atlas) = ui.font_atlas(slot) else { return; };
     let (r, g, b, a) = channels(color);
     if a == 0 || !axes.iter().all(|v| v.is_finite()) { return; }
-    let [ux, uy, vx, vy] = axes;
-    let det = ux * vy - uy * vx;
-    if det == 0.0 || !det.is_finite() { return; }
-    let coverage_w = atlas.coverage_width() as i32;
-    let coverage_h = atlas.coverage_height() as i32;
-    let bpr = atlas.bytes_per_row();
-    let inv_det = 1.0 / det;
     for (gx, gy, gid) in glyphs {
-        if gid >= atlas.glyph_count { continue; }
+        if u32::from(gid) >= atlas.available_glyph_count() { continue; }
+        let (w,h)=atlas.glyph_size(gid);
+        let sx=w as f32/atlas.cell_w as f32;let sy=h as f32/atlas.cell_h as f32;
+        let [ux,uy,vx,vy]=[axes[0]*sx,axes[1]*sx,axes[2]*sy,axes[3]*sy];
+        let det=ux*vy-uy*vx;if det==0.0||!det.is_finite() {return;}
+        let inv_det=1.0/det;
+        let (coverage_w,coverage_h)=((w*atlas.raster_density as u32)as i32,(h*atlas.raster_density as u32)as i32);
+        let bpr=coverage_w as usize;
         let xs = [gx, gx+ux, gx+vx, gx+ux+vx];
         let ys = [gy, gy+uy, gy+vy, gy+uy+vy];
         if !xs.iter().chain(ys.iter()).all(|v| v.is_finite()) { continue; }
@@ -1424,6 +1433,8 @@ fn glyph_cells<T: RenderTarget>(ui: &impl RasterResources, target: &mut T, strid
         let y0 = (crate::layout::floorf(ys.iter().copied().fold(f32::INFINITY, f32::min)) as i32).max(clip.y0);
         let y1 = (-crate::layout::floorf(-ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)) as i32).min(clip.y1);
         let rows = atlas.glyph_coverage(gid);
+        #[cfg(feature="std")]
+        let color=atlas.glyph_color(gid);
         for py in y0..y1 {
             for px in x0..x1 {
                 let dx = px as f32 + 0.5 - gx;
@@ -1431,6 +1442,11 @@ fn glyph_cells<T: RenderTarget>(ui: &impl RasterResources, target: &mut T, strid
                 let u = (dx * vy - dy * vx) * inv_det;
                 let v = (ux * dy - uy * dx) * inv_det;
                 if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) { continue; }
+                #[cfg(feature="std")]
+                if let Some(color)=&color {
+                    let p:[u32;4]=core::array::from_fn(|channel|sample_glyph_channel(color,coverage_w,coverage_h,bpr*4,u,v,4,channel));
+                    target.blend((py*stride+px)as usize,p[0],p[1],p[2],(a*p[3]+127)/255);continue;
+                }
                 let cov = sample_glyph_coverage(&rows, coverage_w, coverage_h, bpr, u, v);
                 if cov != 0 {
                     let alpha = if a == 255 { cov } else { (a * cov + 127) / 255 };
@@ -1446,6 +1462,11 @@ fn glyph_cells<T: RenderTarget>(ui: &impl RasterResources, target: &mut T, strid
 /// half texel repeats the edge instead of mixing in the next column/row.
 #[inline]
 fn sample_glyph_coverage(rows: &[u8], width: i32, height: i32, stride: usize, u: f32, v: f32) -> u32 {
+    sample_glyph_channel(rows,width,height,stride,u,v,1,0)
+}
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn sample_glyph_channel(rows: &[u8], width: i32, height: i32, stride: usize, u: f32, v: f32,pixel_stride:usize,channel:usize) -> u32 {
     let uf = ((u * width as f32 * 256.0) as i32 - 128).max(0);
     let vf = ((v * height as f32 * 256.0) as i32 - 128).max(0);
     let x0 = (uf >> 8).min(width - 1) as usize;
@@ -1455,8 +1476,8 @@ fn sample_glyph_coverage(rows: &[u8], width: i32, height: i32, stride: usize, u:
     let fx = (uf & 255) as u32;
     let fy = (vf & 255) as u32;
     let lerp = |a: u8, b: u8| (a as u32 * (256 - fx) + b as u32 * fx) >> 8;
-    let top = lerp(rows[y0 * stride + x0], rows[y0 * stride + x1]);
-    let bottom = lerp(rows[y1 * stride + x0], rows[y1 * stride + x1]);
+    let top = lerp(rows[y0 * stride + x0*pixel_stride+channel], rows[y0 * stride + x1*pixel_stride+channel]);
+    let bottom = lerp(rows[y1 * stride + x0*pixel_stride+channel], rows[y1 * stride + x1*pixel_stride+channel]);
     (top * (256 - fy) + bottom * fy) >> 8
 }
 

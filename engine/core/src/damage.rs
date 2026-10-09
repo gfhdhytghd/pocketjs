@@ -558,15 +558,16 @@ fn glyph_run_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect {
     let mut bounds = DamageRect::empty();
     for glyph in words[3..].chunks_exact(2) {
         let gid = (glyph[1] & 0xffff) as u16;
-        if gid >= atlas.glyph_count {
+        if u32::from(gid) >= atlas.available_glyph_count() {
             continue;
         }
         let (x, y) = xy(glyph[0]);
+        let (gw,gh)=atlas.glyph_size(gid);
         bounds = bounds.union(DamageRect::new(
             x,
             y,
-            x + atlas.cell_w as i32,
-            y + atlas.cell_h as i32,
+            x + gw as i32,
+            y + gh as i32,
         ));
     }
     bounds.intersect(clip)
@@ -585,20 +586,19 @@ fn glyph_run_xform_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRec
     let mut bounds = DamageRect::empty();
     for glyph in words[5..].chunks_exact(2) {
         let gid = (glyph[1] & 0xffff) as u16;
-        if gid >= atlas.glyph_count {
+        if u32::from(gid) >= atlas.available_glyph_count() {
             continue;
         }
         let (x, y) = xy(glyph[0]);
-        let corners = [
-            (x, y),
-            (x + ux, y + uy),
-            (x + vx, y + vy),
-            (x + ux + vx, y + uy + vy),
-        ];
-        let min_x = corners.iter().map(|p| p.0).min().unwrap();
-        let max_x = corners.iter().map(|p| p.0).max().unwrap();
-        let min_y = corners.iter().map(|p| p.1).min().unwrap();
-        let max_y = corners.iter().map(|p| p.1).max().unwrap();
+        let (gw,gh)=atlas.glyph_size(gid);
+        let sx=gw as f32/atlas.cell_w as f32;let sy=gh as f32/atlas.cell_h as f32;
+        let (ux,uy,vx,vy)=(ux as f32*sx,uy as f32*sx,vx as f32*sy,vy as f32*sy);
+        let (x,y)=(x as f32,y as f32);
+        let corners=[(x,y),(x+ux,y+uy),(x+vx,y+vy),(x+ux+vx,y+uy+vy)];
+        let min_x=crate::layout::floorf(corners.iter().map(|p|p.0).fold(f32::INFINITY,f32::min))as i32;
+        let max_x=-crate::layout::floorf(-corners.iter().map(|p|p.0).fold(f32::NEG_INFINITY,f32::max))as i32;
+        let min_y=crate::layout::floorf(corners.iter().map(|p|p.1).fold(f32::INFINITY,f32::min))as i32;
+        let max_y=-crate::layout::floorf(-corners.iter().map(|p|p.1).fold(f32::NEG_INFINITY,f32::max))as i32;
         bounds = bounds.union(DamageRect::new(min_x, min_y, max_x, max_y));
     }
     bounds.intersect(clip)
@@ -610,7 +610,10 @@ fn glyph_run_f32_bounds(ui: &Ui, words: &[u32], clip: DamageRect) -> DamageRect 
     let [ux, uy, vx, vy] = [words[3], words[4], words[5], words[6]].map(f32::from_bits);
     let mut bounds = DamageRect::empty();
     for glyph in words[7..].chunks_exact(3) {
-        if (glyph[2] & 0xffff) >= atlas.glyph_count as u32 { continue; }
+        if (glyph[2] & 0xffff) >= atlas.available_glyph_count() { continue; }
+        let (gw,gh)=atlas.glyph_size((glyph[2]&0xffff)as u16);
+        let [ux,uy,vx,vy]=[ux*gw as f32/atlas.cell_w as f32,uy*gw as f32/atlas.cell_w as f32,
+            vx*gh as f32/atlas.cell_h as f32,vy*gh as f32/atlas.cell_h as f32];
         let (x, y) = (f32::from_bits(glyph[0]), f32::from_bits(glyph[1]));
         let xs = [x, x + ux, x + vx, x + ux + vx];
         let ys = [y, y + uy, y + vy, y + uy + vy];

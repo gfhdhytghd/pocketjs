@@ -5,6 +5,26 @@ use alloc::vec::Vec;
 
 use crate::{Ui, spec, style};
 
+#[test]
+fn fallback_overhang_renders_without_resizing_the_text_layout_or_tinting_color_fonts() {
+    for subpixel in [false,true] {
+        let mut ui=Ui::new();ui.set_viewport(80.0,80.0);ui.set_subpixel_glyphs_supported(subpixel);
+        ui.set_system_font_fallback(std::sync::Arc::new(|_,m| {
+            let n=(m.cell_w*m.cell_h*u32::from(m.density).pow(2))as usize;
+            Some(crate::text::SystemGlyph {advance:3.0,xoff:0.0,yoff:0.0,
+                coverage:vec![255;n].into(),color:Some((0..n).flat_map(|_|[217,23,91,255]).collect::<Vec<_>>().into())})
+        }));
+        assert!(ui.load_font_atlas(&encode_atlas(0,1,1,1,1,1,&[(0xfffd,0,1)])));
+        let node=ui.create_node(spec::NodeType::Text as u8);
+        ui.set_prop(node,spec::prop::FONT_SLOT,0.0);ui.set_prop(node,spec::prop::WIDTH,3.0);ui.set_prop(node,spec::prop::TEXT_COLOR,0xff00ff00u32 as f64);
+        ui.set_text(node,"😀");ui.insert_before(spec::ROOT_ID,node,0);ui.tick();
+        let words=ui.draw().words.clone();let layout=ui.layout_of(node).unwrap();assert_eq!((layout.2,layout.3),(3.0,1.0));
+        let mut pixels=vec![0;80*80*4];crate::raster::render(&ui,&words,&mut pixels);
+        assert_eq!(&pixels[(5*80+5)*4..(5*80+5)*4+4],&[217,23,91,255]);
+        assert_eq!(&pixels[(6*80+6)*4..(6*80+6)*4+4],&[0,0,0,255]);
+    }
+}
+
 // ---- binary blob builders (bytes hand-assembled per spec.ts formats) --------
 
 struct StyleSpec {

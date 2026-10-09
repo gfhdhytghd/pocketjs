@@ -1956,6 +1956,7 @@ name = "pocketjs-core"
 version = "0.1.0"
 dependencies = [
  "taffy",
+ "unicode-segmentation",
 ]
 
 [[package]]

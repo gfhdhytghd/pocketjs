@@ -1710,6 +1710,11 @@ impl Ui {
         self.mark_layout_dirty();
     }
 
+    #[cfg(feature="std")]
+    pub fn set_system_font_fallback(&mut self, provider: text::SystemGlyphProvider) {
+        self.fonts.set_system_fallback(provider);
+    }
+
     /// Install (or clear) a native line wrapper (text::WrapFn) next to the
     /// measurer — OP wrapText then returns the host's break positions.
     /// A pure query: no layout state depends on it.
