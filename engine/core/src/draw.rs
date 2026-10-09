@@ -2993,6 +2993,8 @@ impl<'a> Walker<'a> {
                 dl.words.extend(axes.map(f32::to_bits));
                 let mut n = 0u32;
                 for g in &scratch {
+                    let (gw,gh)=atlas.glyph_size(g.gid);
+                    let axes=[world.a*gw as f32,world.b*gw as f32,world.c*gh as f32,world.d*gh as f32];
                     let (x, y) = world.apply(g.x, g.y);
                     let xs = [x, x + axes[0], x + axes[2], x + axes[0] + axes[2]];
                     let ys = [y, y + axes[1], y + axes[3], y + axes[1] + axes[3]];
@@ -3052,6 +3054,9 @@ impl<'a> Walker<'a> {
             let (sx, sy) = world.apply(g.x, g.y);
             let (rx, ry) = (roundf(sx), roundf(sy));
             if oriented {
+                let (gw,gh)=atlas.glyph_size(g.gid);
+                let axis_x=(axis_x.0*gw as f32/cell_w,axis_x.1*gw as f32/cell_w);
+                let axis_y=(axis_y.0*gh as f32/cell_h,axis_y.1*gh as f32/cell_h);
                 let corners = [
                     (rx, ry),
                     (rx + axis_x.0, ry + axis_x.1),
@@ -3095,7 +3100,8 @@ impl<'a> Walker<'a> {
             if rx < 0.0 || ry < 0.0 || rx > self.screen.0 || ry > self.screen.1 {
                 continue;
             }
-            if rx + cell_w <= clip.x0 || rx >= clip.x1 || ry + cell_h <= clip.y0 || ry >= clip.y1 {
+            let (gw,gh)=atlas.glyph_size(g.gid);
+            if rx + gw as f32 <= clip.x0 || rx >= clip.x1 || ry + gh as f32 <= clip.y0 || ry >= clip.y1 {
                 continue;
             }
             if n == u16::MAX as u32 {

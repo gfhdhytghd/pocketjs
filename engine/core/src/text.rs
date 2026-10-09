@@ -42,6 +42,13 @@ impl core::ops::Deref for GlyphRows<'_> {
 }
 
 use crate::spec;
+#[cfg(feature="std")]
+use unicode_segmentation::UnicodeSegmentation;
+#[cfg(feature="std")]
+#[path="text_fallback.rs"]
+mod fallback;
+#[cfg(feature="std")]
+pub use fallback::{SystemFontMetrics, SystemGlyph, SystemGlyphProvider};
 
 #[inline]
 fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
@@ -94,6 +101,8 @@ pub struct Atlas {
     pub bitmap: Vec<u8>,
     #[cfg(feature="std")]
     pub runtime:Option<RuntimeAtlasInfo>,
+    #[cfg(feature="std")]
+    fallback: Option<fallback::Fallback>,
 }
 
 impl Atlas {
@@ -201,7 +210,7 @@ impl Atlas {
             if o!=bytes.len() {return None;}
             let tofu=seeds.get(&0)?.to_vec();
             return Some(Atlas {cell_w,cell_h,baseline,line_height,raster_density,slot,flags,glyph_count,cmap,bitmap:tofu,
-                runtime:Some(RuntimeAtlasInfo{source_sha256,px,cache_epoch:0,seed_bytes:total,ttf_glyphs,seeds,compressed_seeds:Arc::new(compressed_seeds),provider:None})});
+                fallback:None, runtime:Some(RuntimeAtlasInfo{source_sha256,px,cache_epoch:0,seed_bytes:total,ttf_glyphs,seeds,compressed_seeds:Arc::new(compressed_seeds),provider:None})});
         }
         let mut bitmap = Vec::with_capacity(bitmap_len);
         bitmap.extend_from_slice(&bytes[bitmap_off..bitmap_end]);
@@ -217,6 +226,7 @@ impl Atlas {
             cmap,
             bitmap,
             #[cfg(feature="std")] runtime:None,
+            #[cfg(feature="std")] fallback:None,
         })
     }
 
@@ -262,6 +272,16 @@ impl Atlas {
     /// Runtime provider or seed, retaining ownership during sampling.
     pub fn glyph_coverage(&self,gid:u16)->GlyphRows<'_> {
         #[cfg(feature="std")]
+        if gid >= self.glyph_count {
+            if let Some(cell)=self.fallback.as_ref().and_then(|f|f.pixels(gid,false)) {return GlyphRows::Shared(cell);}
+            let (w,h)=self.glyph_size(gid);
+            let stride=w as usize*self.raster_density as usize;
+            let mut padded=vec![0;stride*h as usize*self.raster_density as usize];
+            let tofu=self.glyph_coverage(0);let old=self.bytes_per_row();
+            for (y,row) in tofu.chunks_exact(old).enumerate() {padded[y*stride..y*stride+old].copy_from_slice(row);}
+            return GlyphRows::Shared(padded.into());
+        }
+        #[cfg(feature="std")]
         if let Some(runtime)=&self.runtime {
             if let Some(cell)=runtime.seeds.get(&gid) {return GlyphRows::Shared(cell.clone());}
             if let Some(cell)=runtime.provider.as_ref().and_then(|provider|provider(gid)) {return GlyphRows::Shared(cell);}
@@ -270,16 +290,38 @@ impl Atlas {
         GlyphRows::Borrowed(self.glyph_rows(gid))
     }
 
+    /// Includes append-only host fallback gids, shared with render snapshots.
+    pub fn available_glyph_count(&self) -> u32 {
+        #[cfg(feature="std")]
+        if let Some(f)=&self.fallback { return f.count(); }
+        u32::from(self.glyph_count)
+    }
+
+    /// Logical cell size; missing-glyph overhang does not enlarge primary cells.
+    pub fn glyph_size(&self,_gid:u16)->(u32,u32) {
+        #[cfg(feature="std")]
+        if _gid>=self.glyph_count {
+            if let Some(f)=&self.fallback { return f.size(); }
+        }
+        (self.cell_w,self.cell_h)
+    }
+
+    #[cfg(feature="std")]
+    pub fn glyph_color(&self, gid:u16) -> Option<Arc<[u8]>> {
+        self.fallback.as_ref().and_then(|f|f.pixels(gid,true))
+    }
+
     /// Average one logical pixel's density×density coverage samples. This is
     /// the reference reduction for logical-resolution software/CPU fallback
     /// renderers; density 1 returns the original byte exactly.
     pub fn logical_coverage(&self, gid: u16, x: u32, y: u32) -> u8 {
-        if gid >= self.glyph_count || x >= self.cell_w || y >= self.cell_h {
+        let (w,h)=self.glyph_size(gid);
+        if u32::from(gid) >= self.available_glyph_count() || x >= w || y >= h {
             return 0;
         }
         let density = self.raster_density as usize;
         let rows = self.glyph_coverage(gid);
-        let bpr = self.bytes_per_row();
+        let bpr = w as usize*density;
         let x0 = x as usize * density;
         let y0 = y as usize * density;
         let mut sum = 0u32;
@@ -334,6 +376,8 @@ pub struct Fonts {
     native: Option<MeasureFn>,
     /// Native line wrapper (OP wrapText); absent = greedy over `measure_run`.
     wrap_native: Option<WrapFn>,
+    #[cfg(feature="std")]
+    fallback: Option<SystemGlyphProvider>,
 }
 
 impl Default for Fonts {
@@ -351,6 +395,7 @@ impl Fonts {
             versions: [0; spec::MAX_FONT_SLOTS],
             native: None,
             wrap_native: None,
+            #[cfg(feature="std")] fallback: None,
         }
     }
 
@@ -385,9 +430,13 @@ impl Fonts {
     /// Register an atlas that was parsed off-thread.
     pub fn install(&mut self, atlas: Atlas) -> bool {
         #[cfg(feature="std")]
+        let mut atlas=atlas;
+        #[cfg(feature="std")]
         if atlas.runtime.as_ref().is_some_and(|runtime|runtime.provider.is_none()) {return false;}
         let slot = atlas.slot as usize;
         let Some(target) = self.slots.get_mut(slot) else { return false; };
+        #[cfg(feature="std")]
+        if let Some(provider)=&self.fallback { atlas.fallback=Some(fallback::Fallback::new(&atlas,provider.clone())); }
         *target = Some(crate::SharedResource::new(atlas));
         #[cfg(feature="std")]
         { self.versions[slot] = self.versions[slot].wrapping_add(1); }
@@ -401,14 +450,26 @@ impl Fonts {
 
     /// (gid, advance, xoff) for a codepoint; a miss resolves to gid 0 (tofu,
     /// cell width advance) and bumps the miss counter.
-    fn glyph(&self, atlas: &Atlas, cp: u32) -> (u16, f32, f32) {
+    fn glyph(&self, atlas: &Atlas, cp: u32) -> (u16, f32, f32, f32) {
         match atlas.lookup_entry(cp) {
-            Some(e) => (e.gid, e.advance_px, e.xoff as f32),
+            Some(e) => (e.gid, e.advance_px, e.xoff as f32, 0.0),
             None => {
+                #[cfg(feature="std")]
+                if let Some(f)=&atlas.fallback {
+                    let mut bytes=[0u8;4];
+                    if let Some(glyph)=char::from_u32(cp).and_then(|ch|f.lookup(ch.encode_utf8(&mut bytes))) {return glyph;}
+                }
                 self.misses.set(self.misses.get().wrapping_add(1));
-                (0, atlas.cell_w as f32, 0.0)
+                (0, atlas.cell_w as f32, 0.0, 0.0)
             }
         }
+    }
+
+    /// Install before atlases are loaded. Each atlas retains its provider so
+    /// queued frames cannot switch font metrics after measurement.
+    #[cfg(feature="std")]
+    pub fn set_system_fallback(&mut self, provider: SystemGlyphProvider) {
+        self.fallback=Some(provider);
     }
 
     /// Measure a run: (max line width, line count x line height). Empty text
@@ -453,20 +514,40 @@ impl Fonts {
             line_h_override
         };
         let mut max_w = 0.0f32;
-        let mut line_w = 0.0f32;
-        let mut lines = 1u32;
-        for ch in text.chars() {
-            if ch == '\n' {
-                max_w = max_w.max(line_w);
-                line_w = 0.0;
-                lines += 1;
-                continue;
-            }
-            let (_, adv, _) = self.glyph(atlas, ch as u32);
-            line_w += adv + tracking;
+        let mut lines = 0u32;
+        for line in text.split('\n') {
+            let mut line_w=0.0;
+            self.for_each_glyph(atlas,line,|(_,adv,_,_)|line_w+=adv+tracking);
+            max_w=max_w.max(line_w);lines+=1;
         }
-        max_w = max_w.max(line_w);
-        (max_w, lines as f32 * lh)
+        (max_w,lines as f32*lh)
+    }
+
+    #[cfg(feature="std")]
+    fn cluster_text(text:&str)->bool {
+        // SIMD prefix scans keep normal ASCII/CJK on the scalar atlas path.
+        // False positives (some symbols/fullwidth characters) are harmless:
+        // segmentation still retains primary atlas entries for single scalars.
+        let bytes=text.as_bytes();
+        memchr::memchr3(0xe2,0xef,0xf0,bytes).is_some()
+            || memchr::memchr3(0xcc,0xcd,0xf1,bytes).is_some()
+            || memchr::memchr3(0xf2,0xf3,0xf4,bytes).is_some()
+    }
+
+    fn for_each_glyph(&self,atlas:&Atlas,text:&str,mut emit:impl FnMut((u16,f32,f32,f32))) {
+        #[cfg(feature="std")]
+        if let Some(f)=&atlas.fallback {
+            if Self::cluster_text(text) {
+                for cluster in text.graphemes(true) {
+                    if cluster.chars().count()>1 && cluster.chars().any(|c|atlas.lookup_entry(c as u32).is_none()) {
+                        if let Some(g)=f.lookup(cluster) {emit(g);continue;}
+                    }
+                    for ch in cluster.chars() {emit(self.glyph(atlas,ch as u32));}
+                }
+                return;
+            }
+        }
+        for ch in text.chars() {emit(self.glyph(atlas,ch as u32));}
     }
 
     /// Soft-wrap break columns for ONE line of text under `max_w` px
@@ -498,13 +579,20 @@ impl Fonts {
         }
         // Per-char byte offsets + running UTF-16 columns (the guest slices
         // JS strings, whose indices are UTF-16 code units).
-        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let chars: Vec<(usize, &str)> = {
+            #[cfg(feature="std")]
+            if self.atlas(slot).is_some_and(|a|a.fallback.is_some()) && Self::cluster_text(text) {
+                text.grapheme_indices(true).collect()
+            } else {text.char_indices().map(|(i,c)|(i,&text[i..i+c.len_utf8()])).collect()}
+            #[cfg(not(feature="std"))]
+            {text.char_indices().map(|(i,c)|(i,&text[i..i+c.len_utf8()])).collect()}
+        };
         let n = chars.len();
         let mut u16_at = Vec::with_capacity(n + 1);
         let mut acc = 0u32;
         for &(_, c) in &chars {
             u16_at.push(acc);
-            acc += c.len_utf16() as u32;
+            acc += c.encode_utf16().count() as u32;
         }
         u16_at.push(acc);
         let byte_at = |ci: usize| if ci < n { chars[ci].0 } else { text.len() };
@@ -514,9 +602,9 @@ impl Fonts {
         let mut x = 0f32; // committed row width (hanging spaces included)
         let mut i = 0usize;
         while i < n {
-            if chars[i].1 == ' ' {
+            if chars[i].1 == " " {
                 let mut j = i;
-                while j < n && chars[j].1 == ' ' {
+                while j < n && chars[j].1 == " " {
                     j += 1;
                 }
                 x += w(i, j);
@@ -524,7 +612,7 @@ impl Fonts {
                 continue;
             }
             let mut j = i;
-            while j < n && chars[j].1 != ' ' {
+            while j < n && chars[j].1 != " " {
                 j += 1;
             }
             let word_w = w(i, j);
@@ -585,13 +673,12 @@ impl Fonts {
             let line_start = out.len();
             let mut pen = 0.0f32;
             let y = line_top + (lh - cell_h) * 0.5;
-            for ch in line.chars() {
-                let (gid, adv, xoff) = self.glyph(atlas, ch as u32);
+            self.for_each_glyph(atlas,line,|(gid,adv,xoff,yoff)| {
                 // The cell holds the outline shifted right by xoff (negative
                 // LSB accents) — place it at pen - xoff so ink lands at pen.
-                out.push(GlyphPos { gid, x: pen - xoff, y });
+                out.push(GlyphPos { gid, x: pen - xoff, y: y - yoff });
                 pen += adv + tracking;
-            }
+            });
             let offset = match align {
                 a if a == spec::TextAlign::Center as u8 => (box_w - pen) * 0.5,
                 a if a == spec::TextAlign::Right as u8 => box_w - pen,
