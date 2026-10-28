@@ -94,6 +94,7 @@ let planPath: string | undefined;
 let densityFlag: number | undefined;
 let hzFlag: number | undefined;
 let minifyFlag = false;
+let diagnosticJsStack = false;
 let projectRoot = process.cwd();
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
@@ -115,6 +116,7 @@ for (const a of args) {
   else if (a.startsWith("--density=")) densityFlag = Number(a.slice("--density=".length));
   else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
   else if (a === "--minify") minifyFlag = true;
+  else if (a === "--diagnostic-js-stack") diagnosticJsStack = true;
   else if (!a.startsWith("-")) appArg = a;
 }
 
@@ -551,7 +553,9 @@ const result = await Bun.build({
       ? { document: "globalThis.__pocketDocument" }
       : {}),
   },
-  minify: minifyForQuickJsStartup,
+  // Diagnostic artifacts keep static bytecode function names and readable
+  // bundle locations. Normal production minification remains the default.
+  minify: diagnosticJsStack ? false : minifyForQuickJsStartup,
   sourcemap: "none",
   plugins: [jsxPlugin(framework, {
     entry,

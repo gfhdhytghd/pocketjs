@@ -26,6 +26,7 @@ use std::{cell::Cell, time::{Duration, Instant}};
 
 // Surface crates implement ops against the same rquickjs the guest uses.
 pub use rquickjs as qjs;
+pub mod stall_diagnostics;
 
 /// One QuickJS realm hosting one guest program.
 pub struct Guest {
@@ -101,6 +102,21 @@ impl Guest {
     pub fn set_job_budget(&self, budget: Option<JobBudget>) { self.job_budget.set(budget); }
     pub fn has_pending_jobs(&self) -> bool { self.rt.is_job_pending() }
     pub fn job_stats(&self) -> JobStats { self.job_stats.get() }
+
+    /// Install an observation-only interrupt handler. The returned probe can be
+    /// requested/cancelled by an independent host watchdog, even during a job.
+    /// It never interrupts execution or changes Promise/exception semantics.
+    pub fn install_stall_diagnostics(&self, sink: impl Fn(&str) + Send + 'static) -> std::sync::Arc<stall_diagnostics::StackProbe> {
+        let probe = std::sync::Arc::new(stall_diagnostics::StackProbe::default());
+        probe.enable(true);
+        let state = probe.clone();
+        let raw = self.ctx.with(|ctx| unsafe { qjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) as usize });
+        self.rt.set_interrupt_handler(Some(Box::new(move || {
+            unsafe { stall_diagnostics::capture(raw, &state, &sink); }
+            false
+        })));
+        probe
+    }
 
     /// Mount a surface: creates the namespace object, lets `build` populate
     /// it with op functions, and installs it as `globalThis.<name>`.
