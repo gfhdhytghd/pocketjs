@@ -22,6 +22,7 @@
 
 use anyhow::{Result, anyhow};
 use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime};
+use std::{cell::Cell, time::{Duration, Instant}};
 
 // Surface crates implement ops against the same rquickjs the guest uses.
 pub use rquickjs as qjs;
@@ -30,6 +31,18 @@ pub use rquickjs as qjs;
 pub struct Guest {
     rt: Runtime,
     ctx: Context,
+    job_budget: Cell<Option<JobBudget>>,
+    job_stats: Cell<JobStats>,
+}
+
+/// Cooperative host scheduling. A running JS job is never interrupted: only
+/// boundaries between FIFO Promise reactions are safe places to return to UI.
+#[derive(Clone, Copy)]
+pub struct JobBudget { pub max_jobs: u32, pub max_time: Duration }
+
+#[derive(Clone, Copy, Default)]
+pub struct JobStats {
+    pub jobs: u64, pub yields: u64, pub errors: u64, pub max_job_micros: u64,
 }
 
 impl Guest {
@@ -53,7 +66,7 @@ impl Guest {
         let ctx = Context::full(&rt)?;
         ctx.with(|ctx| install_console(&ctx))
             .map_err(|e| anyhow!("pocket-mod: installing console: {e}"))?;
-        Ok(Guest { rt, ctx })
+        Ok(Guest { rt, ctx, job_budget: Cell::new(None), job_stats: Cell::new(JobStats::default()) })
     }
 
     /// Demand-only QuickJS JS_ComputeMemoryUsage. Call between guest turns;
@@ -82,6 +95,12 @@ impl Guest {
     {
         self.ctx.with(f)
     }
+
+    /// Opt in only for hosts that arrange continuation turns. Headless callers
+    /// retain the historical drain-to-quiescence contract unless configured.
+    pub fn set_job_budget(&self, budget: Option<JobBudget>) { self.job_budget.set(budget); }
+    pub fn has_pending_jobs(&self) -> bool { self.rt.is_job_pending() }
+    pub fn job_stats(&self) -> JobStats { self.job_stats.get() }
 
     /// Mount a surface: creates the namespace object, lets `build` populate
     /// it with op functions, and installs it as `globalThis.<name>`.
@@ -213,15 +232,31 @@ impl Guest {
     /// Drain the microtask/job queue (promise reactions). Job exceptions are
     /// logged, not fatal — matching how hosts treat stray rejections.
     pub fn drain_jobs(&self) {
+        let began = Instant::now();
+        let budget = self.job_budget.get();
+        let mut count = 0u32;
+        let mut stats = self.job_stats.get();
         loop {
+            // Always allow one pending job to make progress, even if the host
+            // was descheduled just after entry. Failed jobs consume budget too.
+            if count > 0 && budget.is_some_and(|b| count >= b.max_jobs || began.elapsed() >= b.max_time) {
+                if self.has_pending_jobs() { stats.yields = stats.yields.saturating_add(1); }
+                break;
+            }
+            let job_began = Instant::now();
             match self.rt.execute_pending_job() {
-                Ok(true) => continue,
+                Ok(true) => {},
                 Ok(false) => break,
                 Err(e) => {
+                    stats.errors = stats.errors.saturating_add(1);
                     log::error!(target: "guest", "pocket-mod: pending job threw: {e:?}");
                 }
             }
+            count = count.saturating_add(1);
+            stats.jobs = stats.jobs.saturating_add(1);
+            stats.max_job_micros = stats.max_job_micros.max(job_began.elapsed().as_micros().min(u64::MAX as u128) as u64);
         }
+        self.job_stats.set(stats);
     }
 
     /// Whether the evaluated bundle installed `globalThis.frame`.
