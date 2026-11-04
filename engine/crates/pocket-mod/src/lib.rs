@@ -27,11 +27,14 @@ use std::{cell::Cell, time::{Duration, Instant}};
 // Surface crates implement ops against the same rquickjs the guest uses.
 pub use rquickjs as qjs;
 pub mod stall_diagnostics;
+mod collection_limit;
+pub use collection_limit::CollectionLimit;
 
 /// One QuickJS realm hosting one guest program.
 pub struct Guest {
     rt: Runtime,
     ctx: Context,
+    collection_limit: CollectionLimit,
     job_budget: Cell<Option<JobBudget>>,
     job_stats: Cell<JobStats>,
 }
@@ -67,7 +70,7 @@ impl Guest {
         let ctx = Context::full(&rt)?;
         ctx.with(|ctx| install_console(&ctx))
             .map_err(|e| anyhow!("pocket-mod: installing console: {e}"))?;
-        Ok(Guest { rt, ctx, job_budget: Cell::new(None), job_stats: Cell::new(JobStats::default()) })
+        Ok(Guest { rt, ctx, collection_limit: CollectionLimit::default(), job_budget: Cell::new(None), job_stats: Cell::new(JobStats::default()) })
     }
 
     /// Demand-only QuickJS JS_ComputeMemoryUsage. Call between guest turns;
@@ -137,14 +140,13 @@ impl Guest {
     /// Evaluate a product bundle (an iife script, the PocketJS build output)
     /// as a global script. Exceptions come back as errors with the JS stack.
     pub fn eval(&self, label: &str, source: &str) -> Result<()> {
-        self.ctx.with(|ctx| -> Result<()> {
+        let turn = self.ctx.with(|ctx| -> Result<()> {
             ctx.eval::<(), _>(source.as_bytes())
                 .catch(&ctx)
                 .map_err(|e| anyhow!("pocket-mod: eval '{label}' failed: {e}"))?;
             Ok(())
-        })?;
-        self.drain_jobs();
-        Ok(())
+        });
+        self.finish_turn(turn)
     }
 
     /// One guest turn at a centered analog nub — hosts without a stick call
@@ -159,7 +161,7 @@ impl Guest {
     /// as (x << 8) | y, each axis 0..255 with 128 = center. Call exactly
     /// once per fixed-step tick.
     pub fn frame_with_analog(&self, buttons: u32, analog: u32) -> Result<()> {
-        self.ctx.with(|ctx| -> Result<()> {
+        let turn = self.ctx.with(|ctx| -> Result<()> {
             let frame: Option<Function> = ctx.globals().get("frame").ok();
             if let Some(frame) = frame {
                 frame
@@ -168,9 +170,8 @@ impl Guest {
                     .map_err(|e| anyhow!("pocket-mod: frame() threw: {e}"))?;
             }
             Ok(())
-        })?;
-        self.drain_jobs();
-        Ok(())
+        });
+        self.finish_turn(turn)
     }
 
     /// One guest turn with touch contacts. `touches` packs each contact as
@@ -211,7 +212,7 @@ impl Guest {
         touches: &[u32],
         hits: Option<&[i32]>,
     ) -> Result<()> {
-        self.ctx.with(|ctx| -> Result<()> {
+        let turn = self.ctx.with(|ctx| -> Result<()> {
             let frame: Option<Function> = ctx.globals().get("frame").ok();
             if let Some(frame) = frame {
                 let arr = rquickjs::Array::new(ctx.clone())
@@ -240,9 +241,26 @@ impl Guest {
                 }
             }
             Ok(())
-        })?;
-        self.drain_jobs();
-        Ok(())
+        });
+        self.finish_turn(turn)
+    }
+
+    /// Set an optional heap cap without changing the host's job budget.
+    pub fn set_memory_limit(&self, bytes: usize) {
+        self.rt.set_memory_limit(bytes);
+        self.collection_limit.reset(bytes);
+    }
+
+    /// Hosts running JavaScript through `with` call this after their turn.
+    pub fn keep_collection_below_limit(&self) {
+        if !self.collection_limit.has_limit() { return; }
+        self.ctx.with(|ctx| self.collection_limit.keep_below_limit(&ctx));
+    }
+
+    fn finish_turn(&self, turn: Result<()>) -> Result<()> {
+        if turn.is_ok() { self.drain_jobs(); }
+        self.keep_collection_below_limit();
+        turn
     }
 
     /// Drain the microtask/job queue (promise reactions). Job exceptions are
@@ -260,7 +278,9 @@ impl Guest {
                 break;
             }
             let job_began = Instant::now();
-            match self.rt.execute_pending_job() {
+            let job = self.rt.execute_pending_job();
+            self.keep_collection_below_limit();
+            match job {
                 Ok(true) => {},
                 Ok(false) => break,
                 Err(e) => {
