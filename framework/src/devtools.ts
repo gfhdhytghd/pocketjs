@@ -15,6 +15,9 @@ import type { HostOps } from "./host.ts";
 import { rootMirror, setTreeMutationHook, type NodeMirror } from "./native-tree.ts";
 import { getAuxiliarySurfaceRoots, hasAuxiliarySurface } from "./display.ts";
 
+declare const __POCKET_DEVTOOLS__: boolean;
+const DEVTOOLS_ENABLED = typeof __POCKET_DEVTOOLS__ === "undefined" || __POCKET_DEVTOOLS__;
+
 export interface DevtoolsTransport {
   /** Ship one JSON line to the panel(s). */
   send(line: string): void;
@@ -96,8 +99,8 @@ const state: DevtoolsState = {
   transport: null,
   app: undefined,
   frame: 0,
-  tape: new Uint16Array(TAPE_CAP),
-  tapeAnalog: new Uint16Array(TAPE_CAP),
+  tape: new Uint16Array(DEVTOOLS_ENABLED ? TAPE_CAP : 0),
+  tapeAnalog: new Uint16Array(DEVTOOLS_ENABLED ? TAPE_CAP : 0),
   tapeTouch: null,
   tapeTouchSurfaces: null,
   tapeStart: 0,
@@ -137,6 +140,13 @@ export function devtoolsResourceCounts() {
  * the PSP mailbox bindings on the ui namespace (hosts/psp/src/dbg.rs).
  */
 export function initDevtools(ops: HostOps): void {
+  if (!DEVTOOLS_ENABLED) {
+    const g = globalThis as any;
+    if (!g.console) g.console = {log() {}, warn() {}, error() {}};
+    setTreeMutationHook(null);
+    delete g.__pocketDevtools;
+    return;
+  }
   // QuickJS (Solid path) ships no console at all — app code calling
   // console.log must never throw, transport or not. The bridge upgrades
   // these to channel mirrors when one attaches.
@@ -206,6 +216,7 @@ export function wrapFrameHandler(
   hits?: readonly number[],
   touchSurfaces?: readonly number[],
 ) => void {
+  if (!DEVTOOLS_ENABLED) return h as any;
   return (
     buttons: number,
     analogArg?: number,

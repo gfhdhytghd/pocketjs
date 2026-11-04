@@ -94,6 +94,7 @@ let planPath: string | undefined;
 let densityFlag: number | undefined;
 let hzFlag: number | undefined;
 let minifyFlag = false;
+let productionFlag = false;
 let diagnosticJsStack = false;
 let projectRoot = process.cwd();
 for (const a of args) {
@@ -116,6 +117,7 @@ for (const a of args) {
   else if (a.startsWith("--density=")) densityFlag = Number(a.slice("--density=".length));
   else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
   else if (a === "--minify") minifyFlag = true;
+  else if (a === "--production") productionFlag = true;
   else if (a === "--diagnostic-js-stack") diagnosticJsStack = true;
   else if (!a.startsWith("-")) appArg = a;
 }
@@ -544,6 +546,7 @@ const result = await Bun.build({
   conditions: ["browser"],
   define: {
     "process.env.NODE_ENV": '"production"',
+    __POCKET_DEVTOOLS__: JSON.stringify(!productionFlag),
     __POCKET_TARGET__: JSON.stringify(buildPlan?.target.id ?? ""),
     __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? 0),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),

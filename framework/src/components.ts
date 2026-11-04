@@ -452,7 +452,7 @@ export function Lazy(props: LazyProps): SolidJSX.Element {
     onFrame(() => {
       if (ready() || !active()) return; // count only while active; latch once ready
       if (++elapsed >= reveal) setReady(true);
-    });
+    }, () => active() && !ready());
   }
 
   const fallback = (): SolidJSX.Element =>

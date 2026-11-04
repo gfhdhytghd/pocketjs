@@ -25,6 +25,7 @@ import {
   installResizeViewportHook,
   type HostOps,
 } from "./host.ts";
+import { ANALOG_CENTER } from "../../contracts/spec/spec.ts";
 import { initDevtools, wrapFrameHandler } from "./devtools.ts";
 import {
   createElement,
@@ -272,13 +273,13 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
   installFrameHandler(
     wrapFrameHandler((
       buttons: number,
-      analog: number,
+      analog: number = ANALOG_CENTER,
       touches?: readonly number[],
       hits?: readonly number[],
       touchSurfaces?: readonly number[],
     ) => {
       __advanceClock(); // virtual frame++, fire due after() timers
-      __setAnalog(analog); // latch the nub before any app code reads it
+      __setAnalog(analog & 0xffff); // latch the nub before any app code reads it
       __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
       runServicePumps(); // only modules with pending async work register here
       __drainEffects(); // frame-boundary deliveries enter the world first

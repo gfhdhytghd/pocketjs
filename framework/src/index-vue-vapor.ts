@@ -1,3 +1,4 @@
+import { ANALOG_CENTER } from "../../contracts/spec/spec.ts";
 // Vue Vapor runtime entry: render(<App/>) / mount(<App/>).
 
 import "./prelude.ts";
@@ -219,13 +220,13 @@ export function render(code: VaporRenderRoot, opts: RenderOptions = {}): () => v
   installFrameHandler(
     wrapFrameHandler((
       buttons: number,
-      analog: number,
+      analog: number = ANALOG_CENTER,
       touches?: readonly number[],
       hits?: readonly number[],
       touchSurfaces?: readonly number[],
     ) => {
       __advanceClock();
-      __setAnalog(analog);
+      __setAnalog(analog & 0xffff);
       __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
       runServicePumps();
       __drainEffects();

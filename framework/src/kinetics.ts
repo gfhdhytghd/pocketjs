@@ -40,5 +40,5 @@ export function bindDpadScroll(s: Scroller, o: DpadScrollOptions = {}): void {
     if (buttons & BTN.DOWN) s.nudge(step);
     const nub = analogY();
     if (nub !== 0) s.nudge(nub * nubStep);
-  });
+  }, () => false);
 }

@@ -5,13 +5,18 @@
 // patching mount() with a global per-frame callback.
 
 import { createSignal, onCleanup, type Accessor } from "solid-js";
+import { clockResourceCounts } from "./clock.ts";
 import { __resetAnalog } from "./analog.ts";
 
 export { __setAnalog, analogRaw, analogX, analogY } from "./analog.ts";
 
 type FrameCallback = (buttons: number) => void;
 
-const callbacks = new Set<FrameCallback>();
+const callbacks = new Map<FrameCallback, () => boolean>();
+/** A passive observer still runs on event frames; animations opt in while active.
+ * Old callers retain continuous ticks. Hosts without this hook retain vblank. */
+export const pocketNeedsFrame = (): boolean => clockResourceCounts().timers > 0 || [...callbacks.values()].some(active => active());
+(globalThis as any).__pocketNeedsFrame = pocketNeedsFrame;
 /** No per-frame accounting; read the live registry on demand. */
 export const frameResourceCounts = () => ({callbacks:callbacks.size});
 let buttonHandlerBlockDepth = 0;
@@ -23,11 +28,11 @@ export function resetFrameHooks(): void {
 }
 
 export function runFrameHooks(buttons: number): void {
-  for (const cb of [...callbacks]) cb(buttons);
+  for (const cb of [...callbacks.keys()]) cb(buttons);
 }
 
-export function onFrame(callback: FrameCallback): void {
-  callbacks.add(callback);
+export function onFrame(callback: FrameCallback, needsFrame: () => boolean = () => true): void {
+  callbacks.set(callback, needsFrame);
   onCleanup(() => callbacks.delete(callback));
 }
 
@@ -71,7 +76,7 @@ export function onButtonPress(
     if (!active) return;
     if (buttonHandlerBlockDepth > 0 && !opts.allowWhenBlocked) return;
     if (pressed & mask) callback(pressed, buttons);
-  });
+  }, () => false);
 }
 
 export interface SpriteAnimationOptions {

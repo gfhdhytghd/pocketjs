@@ -1347,6 +1347,11 @@ impl Ui {
     /// Advance one frame: tick animations by exactly one `set_tick_rate`
     /// step, then re-run layout if dirty. Call once per vblank, BEFORE
     /// `draw()`.
+    pub fn needs_frame(&self) -> bool {
+        self.layout.dirty || self.anims.tracks.iter().any(|t| t.alive)
+            || self.timelines.iter().any(|t| t.alive)
+    }
+
     pub fn tick(&mut self) {
         self.ticked = true;
         if self.paused {
