@@ -72,8 +72,13 @@ impl Fallback {
         if self.shared.is_none(){return (g,full);}
         let d=usize::from(self.metrics.density);let stride=full.0 as usize*d;
         let (mut right,mut bottom)=(0,0);
-        for (i,&alpha) in g.coverage.iter().enumerate() {
-            if alpha!=0||g.color.as_ref().is_some_and(|color|color[i*4+3]!=0) {right=right.max(i%stride+1);bottom=bottom.max(i/stride+1);}
+        for (y,row) in g.coverage.chunks_exact(stride).enumerate() {
+            let mut edge=row.iter().rposition(|&alpha|alpha!=0);
+            if let Some(color)=&g.color {
+                let pixels=&color[y*stride*4..(y+1)*stride*4];
+                edge=edge.max(pixels.chunks_exact(4).rposition(|pixel|pixel[3]!=0));
+            }
+            if let Some(x)=edge {right=right.max(x+1);bottom=y+1;}
         }
         // Keep one physical transparent sample after ink for bilinear filtering.
         // Only right/bottom padding is removed: placement and baselines stay exact.
