@@ -418,6 +418,8 @@ pub mod style_table {
 
 /// FONT ATLAS blob format constants — full layout in spec.ts.
 pub mod font_atlas {
+    /// Host ABI 4 device font descriptor; metrics and pixels resolve at runtime.
+    pub const SYSTEM_DESCRIPTOR_VERSION:u16=7;
     pub const MAGIC: u32 = 0x41464344; // 'DCFA' LE
     pub const VERSION: u16 = 3;
     pub const RASTER_ADVANCE_VERSION: u16 = 4;

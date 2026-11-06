@@ -1,6 +1,6 @@
 //! Optional host font fallback. Existing atlas metrics and pixels never change.
 //! Virtual gids are append-only so in-flight resource snapshots stay valid.
-use std::{collections::BTreeMap, sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}}};
+use std::{collections::{BTreeMap,HashMap}, sync::{Arc, Mutex, atomic::{AtomicU32,AtomicU64, Ordering}},time::Instant};
 use crate::text::Atlas;
 
 #[derive(Clone, Copy)]
@@ -8,12 +8,39 @@ pub struct SystemFontMetrics {
     pub px: f32, pub bold: bool, pub cell_w: u32, pub cell_h: u32,
     pub baseline: u32, pub density: u8,
 }
+#[derive(Clone)]
 pub struct SystemGlyph {
     pub advance: f32, pub xoff: f32, pub yoff: f32, pub coverage: Arc<[u8]>,
     /// Straight RGBA for color fonts; ordinary glyphs use coverage + text color.
     pub color: Option<Arc<[u8]>>,
 }
 pub type SystemGlyphProvider = Arc<dyn Fn(&str, SystemFontMetrics) -> Option<SystemGlyph> + Send + Sync>;
+
+/// One process-wide pixel budget for device fonts. Metrics and virtual gids
+/// remain stable when pixels are evicted; acquired frame references stay valid.
+#[derive(Default)]
+pub struct SharedPixels {state:Mutex<SharedState>}
+#[derive(Default)]
+struct SharedState {cells:HashMap<(u64,u16),(SystemGlyph,u64)>,lru:BTreeMap<u64,(u64,u16)>,clock:u64,bytes:usize,hits:u64,misses:u64,micros:u64}
+impl SharedPixels {
+    const LIMIT:usize=8*1024*1024;
+    fn get(&self,key:(u64,u16))->Option<SystemGlyph> {
+        let mut s=self.state.lock().ok()?;s.clock+=1;let now=s.clock;
+        let (g,last)=s.cells.get_mut(&key)?;let result=g.clone();let old=*last;*last=now;
+        s.lru.remove(&old);s.lru.insert(now,key);s.hits+=1;Some(result)
+    }
+    fn put(&self,key:(u64,u16),g:SystemGlyph,micros:u64) {
+        let mut s=self.state.lock().unwrap();s.misses+=1;s.micros+=micros;
+        let bytes=Fallback::bytes(&g);if bytes>Self::LIMIT||s.cells.contains_key(&key) {return;}
+        while s.bytes+bytes>Self::LIMIT {
+            let Some((_,old))=s.lru.pop_first() else {break;};
+            if let Some((g,_))=s.cells.remove(&old) {s.bytes-=Fallback::bytes(&g);}
+        }
+        s.clock+=1;let now=s.clock;s.bytes+=bytes;s.lru.insert(now,key);s.cells.insert(key,(g,now));
+    }
+    pub fn stats(&self)->(u64,u64,u64,usize,usize) {let s=self.state.lock().unwrap();(s.hits,s.misses,s.micros,s.bytes,s.cells.len())}
+}
+static NEXT_CACHE:AtomicU64=AtomicU64::new(1);
 
 const MAX_ENTRIES: usize = 4096;
 const PIXEL_BUDGET: usize = 256 * 1024; // per slot; 64 slots <= 16 MiB
@@ -22,10 +49,11 @@ struct State { entries: Vec<Entry>, cmap: BTreeMap<String, Option<u16>>, bytes: 
 pub(crate) struct Fallback {
     first: u16, metrics: SystemFontMetrics, provider: SystemGlyphProvider, state: Mutex<State>,
     count: AtomicU32,
+    shared:Option<Arc<SharedPixels>>,id:u64,
 }
 impl Fallback {
-    pub fn new(a: &Atlas, provider: SystemGlyphProvider) -> Self {
-        let px=a.runtime.as_ref().map_or(a.line_height as f32, |r| r.px as f32);
+    pub fn new(a: &Atlas, provider: SystemGlyphProvider,shared:Option<Arc<SharedPixels>>) -> Self {
+        let px=a.system_px.unwrap_or_else(||a.runtime.as_ref().map_or(a.line_height as f32, |r| r.px as f32));
         // Missing glyphs may overhang the primary font's largest cell (emoji
         // commonly do). Only fallback cells grow; primary pixels stay compact.
         let extent=(px*2.0+4.0).ceil().clamp(1.0,255.0)as u32;
@@ -33,7 +61,7 @@ impl Fallback {
             px,
             bold: a.flags & 1 != 0, cell_w: a.cell_w.max(extent), cell_h: a.cell_h.max(extent),
             baseline: a.baseline, density: a.raster_density,
-        }, provider, count: AtomicU32::new(u32::from(a.glyph_count)), state: Mutex::new(State { entries: Vec::new(), cmap: BTreeMap::new(), bytes: 0, clock: 0, text_bytes:0 }) }
+        }, provider, shared,id:NEXT_CACHE.fetch_add(1,Ordering::Relaxed),count: AtomicU32::new(u32::from(a.glyph_count)), state: Mutex::new(State { entries: Vec::new(), cmap: BTreeMap::new(), bytes: 0, clock: 0, text_bytes:0 }) }
     }
     pub fn size(&self)->(u32,u32) { (self.metrics.cell_w,self.metrics.cell_h) }
     fn valid(&self, g: &SystemGlyph) -> bool {
@@ -60,8 +88,10 @@ impl Fallback {
             let e = s.entries.get(usize::from((*gid)? - self.first))?;
             return Some(((*gid)?, e.advance, e.xoff, e.yoff));
         }
-        if text.len()>1024 || s.text_bytes+text.len()*2>64*1024 || s.cmap.len() >= MAX_ENTRIES || usize::from(self.first) + s.entries.len() >= usize::from(u16::MAX) { return None; }
+        let (text_limit,entry_limit)=if self.shared.is_some() {(4*1024*1024,65534)}else{(64*1024,MAX_ENTRIES)};
+        if text.len()>1024 || s.text_bytes+text.len()*2>text_limit || s.cmap.len() >= entry_limit || usize::from(self.first) + s.entries.len() >= usize::from(u16::MAX) { return None; }
         s.text_bytes+=text.len()*2;
+        let began=Instant::now();
         let Some(g) = (self.provider)(text, self.metrics).filter(|g| self.valid(g)) else {
             s.cmap.insert(text.to_owned(), None); return None;
         };
@@ -69,7 +99,8 @@ impl Fallback {
         let result = (gid, g.advance, g.xoff, g.yoff);
         s.clock += 1; let last=s.clock;
         s.entries.push(Entry { text: text.to_owned(), advance: g.advance, xoff: g.xoff, yoff: g.yoff, pixels: None, last });
-        s.cmap.insert(text.to_owned(), Some(gid)); Self::store(&mut s, index, g);
+        s.cmap.insert(text.to_owned(), Some(gid));
+        if let Some(cache)=&self.shared {cache.put((self.id,gid),g,began.elapsed().as_micros() as u64);}else{Self::store(&mut s,index,g);}
         self.count.store(u32::from(gid)+1,Ordering::Release); Some(result)
     }
     pub fn count(&self) -> u32 { self.count.load(Ordering::Acquire) }
@@ -77,11 +108,13 @@ impl Fallback {
         let index = usize::from(gid.checked_sub(self.first)?);
         let mut s = self.state.lock().ok()?;
         s.clock += 1; let now = s.clock; s.entries.get_mut(index)?.last = now;
+        if let Some(g)=self.shared.as_ref().and_then(|cache|cache.get((self.id,gid))) {return if color {g.color}else{Some(g.coverage)};}
         if let Some(g) = &s.entries[index].pixels { return if color { g.color.clone() } else { Some(g.coverage.clone()) }; }
         let e = &s.entries[index];
+        let began=Instant::now();
         let g = (self.provider)(&e.text, self.metrics).filter(|g| self.valid(g) && g.advance == e.advance && g.xoff == e.xoff && g.yoff == e.yoff)?;
         let result = if color { g.color.clone() } else { Some(g.coverage.clone()) };
-        Self::store(&mut s, index, g); result
+        if let Some(cache)=&self.shared {cache.put((self.id,gid),g,began.elapsed().as_micros() as u64);}else{Self::store(&mut s,index,g);} result
     }
 }
 
@@ -103,6 +136,34 @@ mod tests {
         let n=m.cell_w as usize*m.cell_h as usize*usize::from(m.density).pow(2);
         SystemGlyph {advance:12.5,xoff:1.0,yoff:0.0,coverage:vec![(cp%255)as u8;n].into(),
             color:(cp==0x1f600).then(||vec![31;n*4].into())}
+    }
+    fn descriptor()->Vec<u8> {
+        let mut bytes=vec![0;24];bytes[..4].copy_from_slice(&crate::spec::font_atlas::MAGIC.to_le_bytes());
+        bytes[4..6].copy_from_slice(&7u16.to_le_bytes());bytes[14]=2;bytes[16..24].copy_from_slice(&16f64.to_le_bytes());bytes
+    }
+    #[test]
+    fn device_descriptor_requires_metrics_and_uses_one_provider_for_cached_and_uncached_glyphs() {
+        let bytes=descriptor();assert_eq!(bytes.len(),24);
+        let mut f=Fonts::new();assert!(!f.load(&bytes));
+        f.set_system_fallback(Arc::new(|text,m|Some(glyph(m,text.chars().next().unwrap() as u32))));
+        assert!(!f.load(&bytes));f.set_system_metrics(Arc::new(|px,bold,density|{assert_eq!((px,bold,density),(16.0,false,2));Some([36,36,17,21])}));
+        assert!(f.load(&bytes));assert_eq!(f.atlas(0).unwrap().baseline,17);
+        let text="A中文龘𠮷👍🏽❤️👨‍👩‍👧‍👦";
+        let measured=f.measure_run(text,0,0.0,f32::NAN);let first=f.atlas(0).unwrap().glyph_coverage(1);
+        assert_eq!(f.measure_run(text,0,0.0,f32::NAN),measured);
+        assert_eq!(&*f.atlas(0).unwrap().glyph_coverage(1),&*first);
+        let (hits,misses,_,bytes,cells)=f.system_cache_stats();assert!(hits>0&&misses>0&&bytes<=SharedPixels::LIMIT&&cells>0);
+        let mut broken=descriptor();broken[15]=1;assert!(Atlas::parse(&broken).is_none());
+        let mut broken=descriptor();broken[16..24].copy_from_slice(&f64::NAN.to_le_bytes());assert!(Atlas::parse(&broken).is_none());
+        for end in 0..24 {assert!(Atlas::parse(&descriptor()[..end]).is_none());}
+    }
+    #[test]
+    fn shared_pixel_eviction_keeps_pinned_cells_and_metrics() {
+        let cache=SharedPixels::default();
+        let cell=|value|SystemGlyph{advance:1.0,xoff:0.0,yoff:0.0,coverage:vec![value;SharedPixels::LIMIT/2].into(),color:None};
+        cache.put((1,1),cell(1),1);cache.put((2,1),cell(2),1);let pinned=cache.get((1,1)).unwrap();
+        cache.put((3,1),cell(3),1);assert!(cache.get((2,1)).is_none());assert_eq!(pinned.coverage[0],1);
+        assert!(cache.stats().3<=SharedPixels::LIMIT);
     }
     #[test]
     fn mixed_scripts_share_metrics_with_paint_and_preserve_atlas_entries() {

@@ -1720,6 +1720,13 @@ impl Ui {
         self.fonts.set_system_fallback(provider);
     }
 
+    #[cfg(feature="std")]
+    pub fn set_system_font_metrics(&mut self,provider:text::SystemFontMetricsProvider) {self.fonts.set_system_metrics(provider);}
+    #[cfg(feature="std")]
+    pub fn system_font_cache_stats(&self)->(u64,u64,u64,usize,usize) {self.fonts.system_cache_stats()}
+    #[cfg(feature="std")]
+    pub fn probe_glyph_cache(&self,text:&str,slot:u8)->Vec<(u32,u64,u64,bool,bool)> {self.fonts.probe_glyph_cache(text,slot)}
+
     /// Install (or clear) a native line wrapper (text::WrapFn) next to the
     /// measurer — OP wrapText then returns the host's break positions.
     /// A pure query: no layout state depends on it.

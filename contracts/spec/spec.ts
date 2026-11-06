@@ -1355,6 +1355,10 @@ export function decodeStyleTable(bytes: Uint8Array): DecodedStyleTable {
 
 export const FONT_MAGIC = 0x41464344; // 'DCFA' LE
 export const FONT_VERSION = 3;
+// Android host ABI 4: 24-byte metadata-only device font descriptor.
+// Offsets 6..11 and 15 are zero; 12=slot, 13=bold, 14=density,
+// 16..23=logical px float64 LE. No cmap, font source, metrics or pixel cells.
+export const FONT_SYSTEM_DESCRIPTOR_VERSION = 7;
 export const FONT_RASTER_ADVANCE_VERSION = 4;
 export const FONT_HEADER_SIZE = 16;
 export const FONT_CMAP_ENTRY_SIZE = 8;

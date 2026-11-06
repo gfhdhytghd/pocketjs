@@ -44,7 +44,7 @@ import {
 import type { PocketConfig } from "../framework/src/config.ts";
 import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { registerAnimationTheme, setAnimationTickRate } from "../framework/compiler/animation.ts";
-import { compileClasses, generateStylesModule } from "../framework/compiler/tailwind.ts";
+import { compileClasses, generateStylesModule, fontSlotInfo } from "../framework/compiler/tailwind.ts";
 import { bakeAtlases, DEFAULT_REGULAR, DEFAULT_BOLD, DEFAULT_MONO, type BakedAtlas, type FontSlotResource, validateFontSlots } from "../framework/compiler/bake-font.ts";
 import { bakeSvg } from "../framework/compiler/bake-svg.ts";
 import {
@@ -85,6 +85,7 @@ let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
 let fontSlots: FontSlotResource[] = [];
 let glyphCache: { warmChars: string;preseedScanned?:boolean } | undefined;
+let systemFonts=false;
 let appArg = "";
 let frameworkFlag: string | undefined;
 let configPath = join(ROOT, "pocket.config.ts");
@@ -98,7 +99,8 @@ let productionFlag = false;
 let diagnosticJsStack = false;
 let projectRoot = process.cwd();
 for (const a of args) {
-  if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
+  if(a==='--system-fonts')systemFonts=true;
+  else if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-slots-json=")) fontSlots = validateFontSlots(JSON.parse(a.slice("--font-slots-json=".length)));
   else if (a.startsWith("--glyph-cache-json=")) {
@@ -330,7 +332,7 @@ console.log(
 );
 
 const fontCacheDir = join(ROOT, ".cache/font-atlas");
-const fontCacheKey = createHash("sha256")
+const fontCacheKey = systemFonts?'system-descriptors':createHash("sha256")
   .update("podjs-font-atlas-v3\0")
   .update(readFileSync(join(ROOT, "framework/compiler/bake-font.ts")))
   .update(readFileSync(join(ROOT, "framework/compiler/tailwind.ts")))
@@ -345,7 +347,17 @@ const fontCacheKey = createHash("sha256")
   .digest("hex");
 const fontCachePath = join(fontCacheDir, `${fontCacheKey}.json`);
 let atlases: BakedAtlas[] | undefined;
-if (existsSync(fontCachePath)) {
+if(systemFonts) {
+  atlases=allFontSlots.map(slot=>{
+    const custom=fontSlots.find(f=>f.slot===slot);
+    const {px,bold}=custom??fontSlotInfo(slot);
+    const bytes=new Uint8Array(24),v=new DataView(bytes.buffer);
+    v.setUint32(0,0x41464344,true);v.setUint16(4,7,true);
+    bytes[12]=slot;bytes[13]=bold?1:0;bytes[14]=rasterDensity;v.setFloat64(16,px,true);
+    return {slot,px,bold:bold??false,rasterDensity,bytes,glyphCount:0,cellW:0,cellH:0,coverageW:0,coverageH:0};
+  });
+}
+if (!systemFonts&&existsSync(fontCachePath)) {
   try {
     const cached = JSON.parse(readFileSync(fontCachePath, "utf8")) as { version?: number; slots?: number[]; atlases?: Array<Omit<BakedAtlas, "bytes"> & { bytes: string; digest: string }> };
     const expectedSlots = allFontSlots;

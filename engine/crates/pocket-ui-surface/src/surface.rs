@@ -797,7 +797,9 @@ impl UiSurface {
 
     /// Ensure one mapped atlas is resident before a host reads its metrics.
     pub fn glyph_cache_stats(&self)->(crate::glyph_cache::Stats,usize,usize) {
-        let mut inner=self.inner.borrow_mut();record_source_integrity(&mut inner);let stats=inner.sources.cache.stats();
+        let mut inner=self.inner.borrow_mut();record_source_integrity(&mut inner);let mut stats=inner.sources.cache.stats();
+        let(hits,misses,micros,bytes,cells)=inner.ui.system_font_cache_stats();
+        stats.hits+=hits;stats.misses+=misses;stats.raster_micros+=micros;stats.bytes+=bytes;stats.cells+=cells;
         let source_bytes=inner.sources.source_bytes();
         let seeds=(0..64).filter_map(|slot|inner.ui.font_atlas(slot)).filter_map(|a|a.runtime.as_ref()).map(|i|i.seed_bytes).sum();
         (stats,source_bytes,seeds)

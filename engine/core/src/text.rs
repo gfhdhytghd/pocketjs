@@ -49,6 +49,8 @@ use unicode_segmentation::UnicodeSegmentation;
 mod fallback;
 #[cfg(feature="std")]
 pub use fallback::{SystemFontMetrics, SystemGlyph, SystemGlyphProvider};
+#[cfg(feature="std")]
+pub type SystemFontMetricsProvider=Arc<dyn Fn(f32,bool,u8)->Option<[u32;4]>+Send+Sync>;
 
 #[inline]
 fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
@@ -103,6 +105,9 @@ pub struct Atlas {
     pub runtime:Option<RuntimeAtlasInfo>,
     #[cfg(feature="std")]
     fallback: Option<fallback::Fallback>,
+    /// v7 is a device font descriptor, with no packaged metrics or pixels.
+    #[cfg(feature="std")]
+    system_px: Option<f32>,
 }
 
 impl Atlas {
@@ -114,6 +119,17 @@ impl Atlas {
             return None;
         }
         let version = rd_u16(bytes, 4)?;
+        if version==7 {
+            #[cfg(feature="std")] {
+                if bytes.len()!=24||bytes[6..12]!=[0;6]||bytes[15]!=0||bytes[13]>1
+                    ||bytes[12] as usize>=spec::MAX_FONT_SLOTS||!(1..=4).contains(&bytes[14]) {return None;}
+                let px=f64::from_le_bytes(bytes[16..24].try_into().ok()?);
+                if !px.is_finite()||!(1.0..=128.0).contains(&px) {return None;}
+                return Some(Atlas {cell_w:1,cell_h:1,baseline:0,line_height:1,raster_density:bytes[14],slot:bytes[12],flags:bytes[13],
+                    glyph_count:1,cmap:vec![CmapEntry{codepoint:0xfffd,gid:0,advance:1,advance_px:1.0,xoff:0}],bitmap:Vec::new(),runtime:None,fallback:None,system_px:Some(px as f32)});
+            }
+            #[cfg(not(feature="std"))] {return None;}
+        }
         let dynamic=version==5||version==6;
         if dynamic && !cfg!(feature="std") {return None;}
         // Atlas v2 used bytes 14..15 as reserved and had one coverage sample
@@ -210,7 +226,7 @@ impl Atlas {
             if o!=bytes.len() {return None;}
             let tofu=seeds.get(&0)?.to_vec();
             return Some(Atlas {cell_w,cell_h,baseline,line_height,raster_density,slot,flags,glyph_count,cmap,bitmap:tofu,
-                fallback:None, runtime:Some(RuntimeAtlasInfo{source_sha256,px,cache_epoch:0,seed_bytes:total,ttf_glyphs,seeds,compressed_seeds:Arc::new(compressed_seeds),provider:None})});
+                fallback:None, system_px:None, runtime:Some(RuntimeAtlasInfo{source_sha256,px,cache_epoch:0,seed_bytes:total,ttf_glyphs,seeds,compressed_seeds:Arc::new(compressed_seeds),provider:None})});
         }
         let mut bitmap = Vec::with_capacity(bitmap_len);
         bitmap.extend_from_slice(&bytes[bitmap_off..bitmap_end]);
@@ -227,6 +243,7 @@ impl Atlas {
             bitmap,
             #[cfg(feature="std")] runtime:None,
             #[cfg(feature="std")] fallback:None,
+            #[cfg(feature="std")] system_px:None,
         })
     }
 
@@ -378,6 +395,10 @@ pub struct Fonts {
     wrap_native: Option<WrapFn>,
     #[cfg(feature="std")]
     fallback: Option<SystemGlyphProvider>,
+    #[cfg(feature="std")]
+    system_metrics:Option<SystemFontMetricsProvider>,
+    #[cfg(feature="std")]
+    system_cache:Arc<fallback::SharedPixels>,
 }
 
 impl Default for Fonts {
@@ -396,6 +417,8 @@ impl Fonts {
             native: None,
             wrap_native: None,
             #[cfg(feature="std")] fallback: None,
+            #[cfg(feature="std")] system_metrics:None,
+            #[cfg(feature="std")] system_cache:Arc::new(fallback::SharedPixels::default()),
         }
     }
 
@@ -433,10 +456,24 @@ impl Fonts {
         let mut atlas=atlas;
         #[cfg(feature="std")]
         if atlas.runtime.as_ref().is_some_and(|runtime|runtime.provider.is_none()) {return false;}
+        #[cfg(feature="std")]
+        if let Some(px)=atlas.system_px {
+            if self.fallback.is_none() {return false;}
+            let Some([w,h,baseline,line])=self.system_metrics.as_ref().and_then(|f|f(px,atlas.flags&1!=0,atlas.raster_density)) else {return false;};
+            if w==0||h==0||w>255||h>255||baseline>h||line==0||line>255 {return false;}
+            atlas.cell_w=w;atlas.cell_h=h;atlas.baseline=baseline;atlas.line_height=line;
+            atlas.cmap[0].advance=w as u8;atlas.cmap[0].advance_px=w as f32;
+            let d=usize::from(atlas.raster_density);let cw=w as usize*d;let ch=h as usize*d;
+            atlas.bitmap=vec![0;cw*ch];
+            // Synthetic tofu exists only in memory. No glyph pixels enter the APK.
+            for y in d..ch.saturating_sub(d) {for x in d..cw.saturating_sub(d) {
+                if x<2*d||x>=cw.saturating_sub(2*d)||y<2*d||y>=ch.saturating_sub(2*d) {atlas.bitmap[y*cw+x]=255;}
+            }}
+        }
         let slot = atlas.slot as usize;
         let Some(target) = self.slots.get_mut(slot) else { return false; };
         #[cfg(feature="std")]
-        if let Some(provider)=&self.fallback { atlas.fallback=Some(fallback::Fallback::new(&atlas,provider.clone())); }
+        if let Some(provider)=&self.fallback { atlas.fallback=Some(fallback::Fallback::new(&atlas,provider.clone(),atlas.system_px.map(|_|self.system_cache.clone()))); }
         *target = Some(crate::SharedResource::new(atlas));
         #[cfg(feature="std")]
         { self.versions[slot] = self.versions[slot].wrapping_add(1); }
@@ -470,6 +507,25 @@ impl Fonts {
     #[cfg(feature="std")]
     pub fn set_system_fallback(&mut self, provider: SystemGlyphProvider) {
         self.fallback=Some(provider);
+    }
+
+    #[cfg(feature="std")]
+    pub fn set_system_metrics(&mut self,provider:SystemFontMetricsProvider) {self.system_metrics=Some(provider);}
+    #[cfg(feature="std")]
+    pub fn system_cache_stats(&self)->(u64,u64,u64,usize,usize) {self.system_cache.stats()}
+
+    /// Bounded diagnostic: first materialization and immediate repeat, including
+    /// lookup and pixel acquisition. No renderer or guest state is changed.
+    #[cfg(feature="std")]
+    pub fn probe_glyph_cache(&self,text:&str,slot:u8)->Vec<(u32,u64,u64,bool,bool)> {
+        let Some(atlas)=self.atlas(slot) else {return Vec::new();};
+        text.chars().take(128).map(|ch|{
+            let began=std::time::Instant::now();let (gid,_,_,_)=self.glyph(atlas,ch as u32);let first=atlas.glyph_coverage(gid);
+            let miss=began.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            let began=std::time::Instant::now();let (again,_,_,_)=self.glyph(atlas,ch as u32);let second=atlas.glyph_coverage(again);
+            let hit=began.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            (ch as u32,miss,hit,gid==again&&*first==*second,gid!=0)
+        }).collect()
     }
 
     /// Measure a run: (max line width, line count x line height). Empty text
