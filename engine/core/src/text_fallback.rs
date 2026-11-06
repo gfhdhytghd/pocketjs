@@ -44,7 +44,7 @@ static NEXT_CACHE:AtomicU64=AtomicU64::new(1);
 
 const MAX_ENTRIES: usize = 4096;
 const PIXEL_BUDGET: usize = 256 * 1024; // per slot; 64 slots <= 16 MiB
-struct Entry { text: String, advance: f32, xoff: f32, yoff: f32, pixels: Option<SystemGlyph>, last: u64 }
+struct Entry { text: String, advance: f32, xoff: f32, yoff: f32, pixels: Option<SystemGlyph>, size:(u32,u32), last: u64 }
 struct State { entries: Vec<Entry>, cmap: BTreeMap<String, Option<u16>>, bytes: usize, clock: u64, text_bytes:usize }
 pub(crate) struct Fallback {
     first: u16, metrics: SystemFontMetrics, provider: SystemGlyphProvider, state: Mutex<State>,
@@ -63,7 +63,29 @@ impl Fallback {
             baseline: a.baseline, density: a.raster_density,
         }, provider, shared,id:NEXT_CACHE.fetch_add(1,Ordering::Relaxed),count: AtomicU32::new(u32::from(a.glyph_count)), state: Mutex::new(State { entries: Vec::new(), cmap: BTreeMap::new(), bytes: 0, clock: 0, text_bytes:0 }) }
     }
-    pub fn size(&self)->(u32,u32) { (self.metrics.cell_w,self.metrics.cell_h) }
+    pub fn size(&self,gid:u16)->(u32,u32) {
+        self.state.lock().ok().and_then(|s|s.entries.get(usize::from(gid.checked_sub(self.first)?)).map(|e|e.size))
+            .unwrap_or((self.metrics.cell_w,self.metrics.cell_h))
+    }
+    fn compact(&self,mut g:SystemGlyph)->(SystemGlyph,(u32,u32)) {
+        let full=(self.metrics.cell_w,self.metrics.cell_h);
+        if self.shared.is_none(){return (g,full);}
+        let d=usize::from(self.metrics.density);let stride=full.0 as usize*d;
+        let (mut right,mut bottom)=(0,0);
+        for (i,&alpha) in g.coverage.iter().enumerate() {
+            if alpha!=0||g.color.as_ref().is_some_and(|color|color[i*4+3]!=0) {right=right.max(i%stride+1);bottom=bottom.max(i/stride+1);}
+        }
+        // Keep one physical transparent sample after ink for bilinear filtering.
+        // Only right/bottom padding is removed: placement and baselines stay exact.
+        let w=((right+1).div_ceil(d)).max(1).min(full.0 as usize);
+        let h=((bottom+1).div_ceil(d)).max(1).min(full.1 as usize);
+        if (w as u32,h as u32)==full{return (g,full);}
+        let crop=|raw:&[u8],channels:usize|->Arc<[u8]> {
+            let mut out=Vec::with_capacity(w*h*d*d*channels);
+            for row in raw.chunks_exact(stride*channels).take(h*d){out.extend_from_slice(&row[..w*d*channels]);}out.into()
+        };
+        g.coverage=crop(&g.coverage,1);g.color=g.color.map(|raw|crop(&raw,4));(g,(w as u32,h as u32))
+    }
     fn valid(&self, g: &SystemGlyph) -> bool {
         let size = self.metrics.cell_w as usize * self.metrics.cell_h as usize * usize::from(self.metrics.density).pow(2);
         g.advance.is_finite() && (0.0..=255.0).contains(&g.advance)
@@ -95,10 +117,11 @@ impl Fallback {
         let Some(g) = (self.provider)(text, self.metrics).filter(|g| self.valid(g)) else {
             s.cmap.insert(text.to_owned(), None); return None;
         };
+        let (g,size)=self.compact(g);
         let index = s.entries.len(); let gid = self.first + index as u16;
         let result = (gid, g.advance, g.xoff, g.yoff);
         s.clock += 1; let last=s.clock;
-        s.entries.push(Entry { text: text.to_owned(), advance: g.advance, xoff: g.xoff, yoff: g.yoff, pixels: None, last });
+        s.entries.push(Entry { text: text.to_owned(), advance: g.advance, xoff: g.xoff, yoff: g.yoff, pixels: None, size, last });
         s.cmap.insert(text.to_owned(), Some(gid));
         if let Some(cache)=&self.shared {cache.put((self.id,gid),g,began.elapsed().as_micros() as u64);}else{Self::store(&mut s,index,g);}
         self.count.store(u32::from(gid)+1,Ordering::Release); Some(result)
@@ -113,6 +136,7 @@ impl Fallback {
         let e = &s.entries[index];
         let began=Instant::now();
         let g = (self.provider)(&e.text, self.metrics).filter(|g| self.valid(g) && g.advance == e.advance && g.xoff == e.xoff && g.yoff == e.yoff)?;
+        let (g,size)=self.compact(g);if size!=e.size{return None;}
         let result = if color { g.color.clone() } else { Some(g.coverage.clone()) };
         if let Some(cache)=&self.shared {cache.put((self.id,gid),g,began.elapsed().as_micros() as u64);}else{Self::store(&mut s,index,g);} result
     }
@@ -140,6 +164,33 @@ mod tests {
     fn descriptor()->Vec<u8> {
         let mut bytes=vec![0;24];bytes[..4].copy_from_slice(&crate::spec::font_atlas::MAGIC.to_le_bytes());
         bytes[4..6].copy_from_slice(&7u16.to_le_bytes());bytes[14]=2;bytes[16..24].copy_from_slice(&16f64.to_le_bytes());bytes
+    }
+    #[test]
+    fn compact_system_cells_preserve_visible_samples_metrics_color_and_pinned_regeneration() {
+        for density in [1,2] {
+            let mut a=crate::text::Atlas::parse(&atlas(16,20,density)).unwrap();a.system_px=Some(16.0);
+            let source=|_:&str,m:SystemFontMetrics| {
+                let d=usize::from(m.density);let stride=m.cell_w as usize*d;
+                let mut coverage=vec![0;stride*m.cell_h as usize*d];let mut color=vec![0;coverage.len()*4];
+                for y in 4*d..15*d {for x in 2*d..11*d {let i=y*stride+x;coverage[i]=139;color[i*4..i*4+4].copy_from_slice(&[21,87,159,139]);}}
+                Some(SystemGlyph{advance:12.5,xoff:1.0,yoff:2.0,coverage:coverage.into(),color:Some(color.into())})
+            };
+            let provider:SystemGlyphProvider=Arc::new(source);let shared=Arc::new(SharedPixels::default());
+            let compact=Fallback::new(&a,provider.clone(),Some(shared.clone()));let full=Fallback::new(&a,provider,None);
+            let c=compact.lookup("❤️").unwrap();let f=full.lookup("❤️").unwrap();assert_eq!(c,f);
+            let (cw,ch)=compact.size(c.0);let (fw,fh)=full.size(f.0);assert!(cw*ch<fw*fh/2);
+            let crop=compact.pixels(c.0,false).unwrap();let original=full.pixels(f.0,false).unwrap();
+            let crop_color=compact.pixels(c.0,true).unwrap();let original_color=full.pixels(f.0,true).unwrap();let d=density as usize;
+            for y in 0..fh as usize*d {for x in 0..fw as usize*d {
+                let old=(y*fw as usize*d+x) as usize;
+                let new=if x<cw as usize*d&&y<ch as usize*d {Some(y*cw as usize*d+x)}else{None};
+                assert_eq!(original[old],new.map_or(0,|i|crop[i]));
+                assert_eq!(&original_color[old*4..old*4+4],new.map_or(&[0u8;4][..],|i|&crop_color[i*4..i*4+4]));
+            }}
+            for i in 0..3 {shared.put((99,i),SystemGlyph{advance:1.0,xoff:0.0,yoff:0.0,coverage:vec![1;SharedPixels::LIMIT/2].into(),color:None},0);}
+            assert_eq!(&*crop,&*compact.pixels(c.0,false).unwrap());assert_eq!(compact.size(c.0),(cw,ch));
+            assert_eq!((c.1,c.2,c.3),(12.5,1.0,2.0));
+        }
     }
     #[test]
     fn device_descriptor_requires_metrics_and_uses_one_provider_for_cached_and_uncached_glyphs() {

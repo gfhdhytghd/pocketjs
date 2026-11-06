@@ -295,7 +295,7 @@ impl Atlas {
             let stride=w as usize*self.raster_density as usize;
             let mut padded=vec![0;stride*h as usize*self.raster_density as usize];
             let tofu=self.glyph_coverage(0);let old=self.bytes_per_row();
-            for (y,row) in tofu.chunks_exact(old).enumerate() {padded[y*stride..y*stride+old].copy_from_slice(row);}
+            for (y,row) in tofu.chunks_exact(old).take(h as usize*self.raster_density as usize).enumerate() {let n=old.min(stride);padded[y*stride..y*stride+n].copy_from_slice(&row[..n]);}
             return GlyphRows::Shared(padded.into());
         }
         #[cfg(feature="std")]
@@ -318,7 +318,7 @@ impl Atlas {
     pub fn glyph_size(&self,_gid:u16)->(u32,u32) {
         #[cfg(feature="std")]
         if _gid>=self.glyph_count {
-            if let Some(f)=&self.fallback { return f.size(); }
+            if let Some(f)=&self.fallback { return f.size(_gid); }
         }
         (self.cell_w,self.cell_h)
     }
