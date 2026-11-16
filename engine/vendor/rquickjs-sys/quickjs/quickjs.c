@@ -5794,10 +5794,15 @@ static JSValue JS_NewObjectFromShape(JSContext *ctx, JSShape *sh, JSClassID clas
                 if (likely(sh == ctx->array_shape)) {
                     pr = &p->prop[0];
                 } else {
-                    /* only used for the first array */
-                    /* cannot fail */
+                    /* A shared empty prototype shape can require a clone. */
                     pr = add_property(ctx, p, JS_ATOM_length,
                                       JS_PROP_WRITABLE | JS_PROP_LENGTH);
+                    if (unlikely(!pr)) {
+                        js_free_shape(ctx->rt, p->shape);
+                        js_free(ctx, p->prop);
+                        js_free(ctx, p);
+                        return JS_EXCEPTION;
+                    }
                 }
                 pr->u.value = js_int32(0);
             }
@@ -36215,6 +36220,13 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
     int function_size, byte_code_offset, cpool_offset;
     int closure_var_offset, vardefs_offset;
 
+    /* Emission can fail between an opcode and its operands. Never resolve
+       that partial bytecode as though it were a complete instruction stream. */
+    if (dbuf_error(&fd->byte_code)) {
+        JS_ThrowOutOfMemory(ctx);
+        goto fail;
+    }
+
     /* recompute scope linkage */
     for (scope = 0; scope < fd->scope_count; scope++) {
         fd->scopes[scope].first = -1;
@@ -36263,6 +36275,10 @@ static JSValue js_create_function(JSContext *ctx, JSFunctionDef *fd)
 
         fd1 = list_entry(el, JSFunctionDef, link);
         cpool_idx = fd1->parent_cpool_idx;
+        if (cpool_idx < 0) {
+            JS_ThrowOutOfMemory(ctx);
+            goto fail;
+        }
         func_obj = js_create_function(ctx, fd1);
         if (JS_IsException(func_obj))
             goto fail;
@@ -54561,8 +54577,11 @@ static int js_create_resolving_functions(JSContext *ctx,
             JS_FreeValue(ctx, obj);
         fail:
 
-            if (i != 0)
+            if (i != 0) {
                 JS_FreeValue(ctx, resolving_funcs[0]);
+                /* The caller may also free its output slots on OOM. */
+                resolving_funcs[0] = JS_UNDEFINED;
+            }
             ret = -1;
             break;
         }
