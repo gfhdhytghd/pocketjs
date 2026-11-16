@@ -1733,3 +1733,14 @@ describe("public render() (index.ts)", () => {
     dispose();
   });
 });
+
+
+test("primitive keyed children retain the reconciler state across reverse window replacements",()=>{
+ const host=makeMockHost();installHost(host);resetRendererState();
+ const [values,setValues]=createSignal(Array.from({length:47},(_,i)=>i));
+ const tree=View({get children(){return comp(For,{get each(){return values();},children:(value:number)=>View({children:String(value)})});}}) as unknown as NodeMirror;
+ const first=[0,...Array.from({length:20},(_,i)=>46-i)];setValues(first);
+ expect(tree.children.map(row=>row.children[0]?.text)).toEqual(first.map(String));
+ const second=[...Array.from({length:18},(_,i)=>44-i),45,46,0];setValues(second);
+ expect(tree.children.map(row=>row.children[0]?.text)).toEqual(second.map(String));
+});

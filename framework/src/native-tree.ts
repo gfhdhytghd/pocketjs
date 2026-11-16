@@ -530,6 +530,9 @@ function unlink(node: NodeMirror): void {
 }
 
 export function insertNode(parent: NodeMirror, node: NodeMirror, anchor?: NodeMirror | null): void {
+  // Solid may insert a retained row before itself while reconciling a reverse
+  // window. Match insertBefore(node, node): leave native and mirror trees intact.
+  if (anchor === node && node.parent === parent) return;
   const ops = getOps();
   unlink(node);
   sweepSet.delete(node);
