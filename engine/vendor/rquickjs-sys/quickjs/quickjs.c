@@ -54345,11 +54345,9 @@ typedef struct JSPromiseFunctionData {
     JSPromiseFunctionDataResolved *presolved;
 } JSPromiseFunctionData;
 
-typedef struct JSPromiseReactionData {
-    struct list_head link; /* not used in promise_reaction_job */
-    JSValue resolving_funcs[2];
-    JSValue handler;
-} JSPromiseReactionData;
+/* A reaction owns the job storage from registration onwards. Settling can
+   then move it to the job queue even when the allocator has no headroom. */
+typedef JSJobEntry JSPromiseReactionData;
 
 JSPromiseStateEnum JS_PromiseState(JSContext *ctx, JSValueConst promise)
 {
@@ -54385,9 +54383,9 @@ static int js_create_resolving_functions(JSContext *ctx, JSValue *args,
 static void promise_reaction_data_free(JSRuntime *rt,
                                        JSPromiseReactionData *rd)
 {
-    JS_FreeValueRT(rt, rd->resolving_funcs[0]);
-    JS_FreeValueRT(rt, rd->resolving_funcs[1]);
-    JS_FreeValueRT(rt, rd->handler);
+    JS_FreeValueRT(rt, rd->argv[0]);
+    JS_FreeValueRT(rt, rd->argv[1]);
+    JS_FreeValueRT(rt, rd->argv[2]);
     js_free_rt(rt, rd);
 }
 
@@ -54459,13 +54457,24 @@ void JS_SetHostPromiseRejectionTracker(JSRuntime *rt,
     rt->host_promise_rejection_tracker_opaque = opaque;
 }
 
+static void enqueue_promise_reaction(JSContext *ctx, JSPromiseReactionData *rd,
+                                     JSValueConst value, bool is_reject)
+{
+    assert(!ctx->rt->in_free);
+    rd->ctx = ctx;
+    rd->job_func = promise_reaction_job;
+    rd->argc = 5;
+    rd->argv[3] = js_bool(is_reject);
+    rd->argv[4] = js_dup(value);
+    list_add_tail(&rd->link, &ctx->rt->job_list);
+}
+
 static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
                                       JSValueConst value, bool is_reject)
 {
     JSPromiseData *s = JS_GetOpaque(promise, JS_CLASS_PROMISE);
     struct list_head *el, *el1;
     JSPromiseReactionData *rd;
-    JSValueConst args[5];
 
     if (!s || s->promise_state != JS_PROMISE_PENDING)
         return; /* should never happen */
@@ -54491,14 +54500,8 @@ static void fulfill_or_reject_promise(JSContext *ctx, JSValueConst promise,
 
     list_for_each_safe(el, el1, &s->promise_reactions[is_reject]) {
         rd = list_entry(el, JSPromiseReactionData, link);
-        args[0] = rd->resolving_funcs[0];
-        args[1] = rd->resolving_funcs[1];
-        args[2] = rd->handler;
-        args[3] = js_bool(is_reject);
-        args[4] = value;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
         list_del(&rd->link);
-        promise_reaction_data_free(ctx->rt, rd);
+        enqueue_promise_reaction(ctx, rd, value, is_reject);
     }
 
     list_for_each_safe(el, el1, &s->promise_reactions[1 - is_reject]) {
@@ -54704,9 +54707,9 @@ static void js_promise_mark(JSRuntime *rt, JSValueConst val,
         list_for_each(el, &s->promise_reactions[i]) {
             JSPromiseReactionData *rd =
                 list_entry(el, JSPromiseReactionData, link);
-            JS_MarkValue(rt, rd->resolving_funcs[0], mark_func);
-            JS_MarkValue(rt, rd->resolving_funcs[1], mark_func);
-            JS_MarkValue(rt, rd->handler, mark_func);
+            JS_MarkValue(rt, rd->argv[0], mark_func);
+            JS_MarkValue(rt, rd->argv[1], mark_func);
+            JS_MarkValue(rt, rd->argv[2], mark_func);
         }
     }
     JS_MarkValue(rt, s->promise_result, mark_func);
@@ -55255,22 +55258,25 @@ static __exception int perform_promise_then(JSContext *ctx,
     JSPromiseReactionData *rd_array[2], *rd;
     int i, j;
 
-    rd_array[0] = NULL;
-    rd_array[1] = NULL;
-    for(i = 0; i < 2; i++) {
+    int first = 0, last = 2;
+    if (s->promise_state != JS_PROMISE_PENDING) {
+        first = s->promise_state - JS_PROMISE_FULFILLED;
+        last = first + 1;
+    }
+    for (i = first; i < last; i++) {
         JSValueConst handler;
-        rd = js_mallocz(ctx, sizeof(*rd));
+        rd = js_malloc(ctx, sizeof(*rd) + 5 * sizeof(JSValue));
         if (!rd) {
-            if (i == 1)
+            if (i > first)
                 promise_reaction_data_free(ctx->rt, rd_array[0]);
             return -1;
         }
         for(j = 0; j < 2; j++)
-            rd->resolving_funcs[j] = js_dup(cap_resolving_funcs[j]);
+            rd->argv[j] = js_dup(cap_resolving_funcs[j]);
         handler = resolve_reject[i];
         if (!JS_IsFunction(ctx, handler))
             handler = JS_UNDEFINED;
-        rd->handler = js_dup(handler);
+        rd->argv[2] = js_dup(handler);
         rd_array[i] = rd;
     }
 
@@ -55278,23 +55284,13 @@ static __exception int perform_promise_then(JSContext *ctx,
         for(i = 0; i < 2; i++)
             list_add_tail(&rd_array[i]->link, &s->promise_reactions[i]);
     } else {
-        JSValueConst args[5];
         if (s->promise_state == JS_PROMISE_REJECTED && !s->is_handled) {
             JSRuntime *rt = ctx->rt;
             if (rt->host_promise_rejection_tracker)
                 rt->host_promise_rejection_tracker(ctx, promise, s->promise_result,
                                                    true, rt->host_promise_rejection_tracker_opaque);
         }
-        i = s->promise_state - JS_PROMISE_FULFILLED;
-        rd = rd_array[i];
-        args[0] = rd->resolving_funcs[0];
-        args[1] = rd->resolving_funcs[1];
-        args[2] = rd->handler;
-        args[3] = js_bool(i);
-        args[4] = s->promise_result;
-        JS_EnqueueJob(ctx, promise_reaction_job, 5, args);
-        for(i = 0; i < 2; i++)
-            promise_reaction_data_free(ctx->rt, rd_array[i]);
+        enqueue_promise_reaction(ctx, rd_array[first], s->promise_result, first != 0);
     }
     s->is_handled = true;
     return 0;
