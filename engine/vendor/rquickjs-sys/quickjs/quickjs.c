@@ -2090,7 +2090,9 @@ void JS_SetMemoryLimit(JSRuntime *rt, size_t limit)
 void JS_SetDumpFlags(JSRuntime *rt, uint64_t flags)
 {
 #ifdef ENABLE_DUMPS
-    rt->dump_flags = flags;
+    /* rquickjs sets its dump flags before checking construction failure. */
+    if (rt)
+        rt->dump_flags = flags;
 #endif
 }
 
