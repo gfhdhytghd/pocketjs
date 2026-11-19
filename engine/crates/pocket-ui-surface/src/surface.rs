@@ -419,12 +419,8 @@ fn ensure_image(inner: &mut Inner, name: &str) -> i32 {
     let Some(blob) = inner.lazy_pak.as_mut().and_then(|pak| pak.blob(&key)) else {
         return -1;
     };
-    let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
-        log::warn!("pocket-ui: bad lazy image entry {key}");
-        return -1;
-    };
     let began = Instant::now();
-    let handle = inner.ui.upload_texture(pixels, w, h, psm);
+    let handle = inner.ui.upload_img_entry(blob);
     let elapsed = began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     if handle >= 0 {
         inner.textures.push((name.to_string(), handle));
@@ -434,6 +430,8 @@ fn ensure_image(inner: &mut Inner, name: &str) -> i32 {
             pak.last_image_load_micros = elapsed;
             pak.resource_generation = pak.resource_generation.wrapping_add(1);
         }
+    } else {
+        log::warn!("pocket-ui: bad lazy image entry {key}");
     }
     handle
 }
@@ -473,23 +471,11 @@ fn feed_entry(inner: &mut Inner, key: &str, blob: &[u8]) {
         if matches!(blob.get(4..6),Some([5,0]|[6,0])) {inner.tile_paks.insert(key.to_string(),blob.to_vec());}
         else if !inner.ui.load_font_atlas(blob) {log::warn!("pocket-ui: bad font atlas {}",key);}
     } else if let Some(name) = key.strip_prefix("ui:img.") {
-        // IMG entry: 8-byte header {u16 w, u16 h, u8 psm, 3B pad} + pixels.
-        let Some((w, h, psm, pixels)) = decode_pix_header(blob, 8) else {
-            log::warn!("pocket-ui: bad image entry {}", key);
-            return;
-        };
-        let handle = inner.ui.upload_texture(pixels, w, h, psm);
+        let handle = inner.ui.upload_img_entry(blob);
         if handle >= 0 {
-            let name = name.to_string();
-            inner.textures.push((name, handle));
+            inner.textures.push((name.to_owned(), handle));
         } else {
-            log::warn!(
-                "pocket-ui: image {} rejected ({}x{} psm {})",
-                key,
-                w,
-                h,
-                psm
-            );
+            log::warn!("pocket-ui: bad image entry {key}");
         }
     } else if let Some(name) = key.strip_prefix("ui:sprite.") {
         // SPRITE entry: 16-byte header {u16 w, u16 h, u8 psm, u8 pad,

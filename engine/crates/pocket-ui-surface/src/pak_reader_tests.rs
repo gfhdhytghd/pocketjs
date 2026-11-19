@@ -484,3 +484,56 @@ fn actual_739f_pak_matches_independent_legacy_records() {
     );
     assert!(max_read.get() < length);
 }
+
+// Mirror the production IMG header and consume the real shader-facing texture
+// flag as well as the software result of interpolating the black/white boundary.
+fn check_packed_image_sampling(load: impl Fn(&crate::UiSurface, &'static [u8])) {
+    use pocketjs_core::spec::{draw_op, img, psm};
+    for flags in [0, img::FLAG_LINEAR] {
+        let image = [2, 0, 1, 0, psm::PSM_8888 as u8, flags, 0, 0,
+            0, 0, 0, 255, 255, 255, 255, 255];
+        let pak = Box::leak(fixture(&[(b"ui:img.edge", &image)]).into_boxed_slice());
+        let surface = crate::UiSurface::new((3.0, 1.0));
+        load(&surface, pak);
+        let guest = pocket_mod::Guest::new().unwrap();
+        surface.mount(&guest).unwrap();
+        guest.eval("image sampling", "globalThis.edge = ui.loadPakImage('edge')").unwrap();
+        let handle: i32 = guest.with(|ctx| ctx.globals().get("edge")).unwrap();
+        assert!(handle >= 0);
+        surface.with_ui(|ui| {
+            let words = [draw_op::TEX_QUAD, handle as u32, 0, 3 | (1 << 16),
+                0, 0, 1f32.to_bits(), 1f32.to_bits(), u32::MAX];
+            let mut pixels = [0u8; 12];
+            pocketjs_core::raster::render_scaled_transparent(ui, &words, &mut pixels, 1);
+            let middle = if flags == 0 { 255 } else { 127 };
+            assert_eq!(&pixels[4..8], &[middle, middle, middle, 255]);
+            assert_eq!(ui.texture(handle).unwrap().linear, flags != 0);
+        });
+    }
+}
+#[test]
+fn eager_packed_image_sampling() {
+    check_packed_image_sampling(|surface, pak| surface.feed_pak(pak));
+}
+#[test]
+fn reader_packed_image_sampling() {
+    check_packed_image_sampling(|surface, pak| {
+        surface.feed_pak_reader(pak.len(), |offset, out| {
+            out.copy_from_slice(&pak[offset..offset + out.len()]);
+            Ok(())
+        }).unwrap();
+    });
+}
+#[test]
+fn verified_mapped_packed_image_sampling() {
+    use sha2::{Digest, Sha256};
+    check_packed_image_sampling(|surface, pak| {
+        let entries = walk_pak(pak).iter().map(|entry| crate::PakEntryIntegrity {
+            key: entry.key.to_owned(),
+            offset: entry.blob.as_ptr() as usize - pak.as_ptr() as usize,
+            bytes: entry.blob.len(),
+            sha256: Sha256::digest(entry.blob).into(),
+        }).collect();
+        unsafe { surface.feed_pak_mapped_verified(pak, entries, 0) }.unwrap();
+    });
+}
